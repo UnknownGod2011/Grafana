@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: stageguard-broadcast-alpha
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["simulator:9108"]
+        labels:
+          environment: demo
