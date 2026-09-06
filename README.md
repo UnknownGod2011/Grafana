@@ -1,10 +1,10 @@
 # StageGuard
 
-**Production-oriented incident commander for live media workflows.**
+**Production-oriented Gemini/Google Cloud incident commander for live media workflows, with Grafana as the operational evidence plane.**
 
-StageGuard is a personal open-source project that uses Grafana as its operational evidence plane and is designed to use Gemini / Google Cloud for higher-level orchestration and explanation. It investigates live-production failures through Grafana MCP, correlates bounded evidence, requests explicit approval for consequential remediation, verifies recovery from telemetry, and preserves an incident audit trail.
+StageGuard is a personal open-source project. It investigates live-production failures through Grafana MCP, correlates bounded evidence, requires trusted human authorization for consequential remediation, verifies recovery from telemetry, and preserves an incident audit trail.
 
-> Product thesis: **Grafana gives the agent trustworthy operational evidence; StageGuard turns that evidence into bounded decisions and actions; Grafana then proves whether recovery actually happened.**
+> **Grafana gives the agent trustworthy operational evidence; StageGuard turns that evidence into bounded decisions and actions; Grafana then proves whether recovery actually happened.**
 
 ## Current executable vertical slice
 
@@ -16,7 +16,8 @@ deterministic broadcast simulator
   → McpPrometheusMetricClient
   → bounded four-evidence investigator
   → IncidentService
-  → explicit revision-bound human approval
+  → authenticated operator identity
+  → evidence-revision-bound human approval
   → separate remediation adapter
   → telemetry-only recovery verification
   → append-only audit record
@@ -24,36 +25,25 @@ deterministic broadcast simulator
 
 The local fixture models three camera feeds and two uplinks. The seeded incident is deliberately specific: `cam-3` drops frames because `uplink-b` has severe packet loss while encoder CPU/GPU and peer feeds remain healthy.
 
-## Why this product exists
-
-Live broadcasts, virtual productions, sports streams, creator studios, and media pipelines fail under severe time pressure. Operators often already have the telemetry required to solve an incident, but the diagnosis still requires manually correlating metrics, logs, traces, alerts, dashboards, and topology while viewers experience the outage.
-
-StageGuard is intended to shorten that loop without becoming an unconstrained infrastructure agent. The core questions are:
-
-1. What broke?
-2. What evidence supports that diagnosis?
-3. What else is affected?
-4. What action is safe and authorized?
-5. Did the action actually restore service?
-
 ## Safety model
 
-StageGuard keeps observation and action structurally separate.
+StageGuard keeps observation, authorization, and action structurally separate.
 
 | Boundary | Policy |
 |---|---|
 | Grafana / MCP | Read-only evidence plane with least-privilege credentials |
 | Investigation | Fixed/bounded evidence contracts; missing evidence causes abstention |
-| Approval | Explicit human approval bound to the exact incident + evidence revision |
-| Remediation | Separate write-capable adapter; no arbitrary action names from callers |
+| Identity | Operator identity comes from a configured authentication provider, never request JSON |
+| Approval | Explicit approval bound to exact incident + evidence revision; approval is single-use |
+| Remediation | Separate write-capable adapter; no arbitrary action names/targets from callers |
 | Recovery | Action success is never recovery; Grafana/Prometheus telemetry must prove health |
-| Audit | Lifecycle events are appended; approvals are single-use and stale approvals are rejected |
+| Audit | Lifecycle events are appended with the trusted actor identity |
 
-The current incident investigator performs exactly six PromQL reads covering symptom, causal signal, contradiction evidence, and healthy-peer evidence. It emits `abstain` rather than allowing Gemini or another LLM to invent missing operational evidence.
+The current investigator performs exactly six PromQL reads covering symptom, causal signal, contradiction evidence, and healthy-peer evidence. It emits `abstain` instead of allowing Gemini or another LLM to invent missing operational evidence.
 
-## Narrow incident API
+## Authenticated incident API
 
-`runtime/api.py` exposes only the deterministic lifecycle:
+`runtime/api.py` exposes only:
 
 - `GET /healthz`
 - `GET /v1/incident`
@@ -61,7 +51,9 @@ The current incident investigator performs exactly six PromQL reads covering sym
 - `POST /v1/approve`
 - `POST /v1/execute`
 
-The API deliberately does **not** accept PromQL, datasource identifiers, arbitrary remediation action names, or arbitrary targets. Approval requires the exact `incident_id` and evidence `revision`, preventing authorization from being replayed after a fresh investigation changes the evidence.
+No endpoint accepts PromQL, datasource identifiers, remediation action names, remediation targets, `actor`, or `approved_by`. The authenticated identity is resolved by `runtime/identity.py` and passed into the service/audit boundary.
+
+Local development uses `LocalDevelopmentIdentityProvider`, a fixed process-configured identity that is safe only on loopback. StageGuard refuses a non-loopback bind when that development provider is active. `StaticBearerIdentityProvider` is a dependency-free explicit provider for controlled deployments (normally behind TLS/reverse-proxy policy); its token-to-subject mapping is supplied by the host process and credentials are never written to audit events or API responses.
 
 ## Local runtime
 
@@ -71,14 +63,14 @@ Start the simulator, Prometheus, and Grafana:
 docker compose up --build -d
 ```
 
-Useful local endpoints:
+Useful endpoints:
 
 - simulator metrics: `http://localhost:9108/metrics`
 - simulator state: `http://localhost:9108/state`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000`
 
-Bootstrap the least-privilege local Grafana MCP service-account credential:
+Bootstrap the least-privilege local Grafana MCP credential:
 
 ```bash
 python runtime/bootstrap_grafana.py
@@ -90,23 +82,15 @@ Then prove a real official-MCP metric read:
 python runtime/mcp_smoke.py
 ```
 
-The MCP Compose profile is opt-in and constrained to read-only datasource/Prometheus capabilities. Secrets are stored under a gitignored local secrets directory and are not printed by the bootstrap path.
+The MCP Compose profile is opt-in and constrained to read-only datasource/Prometheus capabilities. Secrets live under a gitignored local secrets directory and are not printed by the bootstrap path.
 
-See [`runtime/README.md`](runtime/README.md) for the complete local workflow and the current MCP contract.
+See [`runtime/README.md`](runtime/README.md) for the detailed local workflow and MCP contract.
 
 ## Real-user integration direction
 
-StageGuard should work with Grafana Cloud or self-hosted Grafana without forcing teams to rename their telemetry. Production onboarding is intended to support configurable mappings from existing labels/datasources into a small canonical model such as `production`, `service`, `device`, `feed`, `region`, and `severity`.
+StageGuard should work with Grafana Cloud or self-hosted Grafana without forcing teams to rename telemetry. Production onboarding should support configurable mappings from existing labels/datasources into a small canonical model such as `production`, `service`, `device`, `feed`, `region`, and `severity`.
 
-Real deployments should provide:
-
-- a least-privilege Grafana/MCP identity;
-- separate credentials for each allowlisted remediation adapter;
-- production-specific telemetry mappings;
-- explicit approval policy;
-- durable/immutable audit persistence;
-- authenticated operator UI/API access;
-- a dry-run readiness check before write capabilities are enabled.
+A production deployment should provide least-privilege Grafana/MCP access, a real operator authentication provider, separate credentials per allowlisted remediation adapter, production-specific telemetry mappings, durable tamper-resistant audit storage, TLS/reverse-proxy policy, and a dry-run readiness check before write capabilities are enabled.
 
 ## Repository structure
 
@@ -115,8 +99,9 @@ Real deployments should provide:
 - `runtime/mcp_metric_client.py` — official Grafana MCP → metric client adapter
 - `runtime/remediation.py` — approval-gated action + telemetry recovery verification
 - `runtime/incident_service.py` — lifecycle orchestration and append-only audit boundary
-- `runtime/api.py` — narrow local HTTP API
-- `runtime/tests/` — deterministic policy/service tests
+- `runtime/identity.py` — pluggable trusted operator identity providers
+- `runtime/api.py` — narrow authenticated HTTP API
+- `runtime/tests/` — deterministic policy/service/API tests
 - `runtime/grafana/`, `runtime/prometheus/` — local observability provisioning
 - `ARCHITECTURE.md` — architecture and trust-boundary detail
 - `progress.md` — exact implementation/run log and next step
@@ -130,17 +115,15 @@ python -m unittest discover -s runtime/tests -v
 python -m py_compile runtime/*.py
 ```
 
-The full Docker → Grafana → official MCP gate still requires a Docker-capable host. Missing cloud/Gemini credentials do not block local implementation or safety testing.
+The Docker → Grafana → official MCP gate still requires a Docker-capable host. Missing cloud/Gemini credentials do not block local implementation or safety testing.
 
 ## Near-term roadmap
 
-The next implementation priorities are:
-
-1. execute the complete local official-MCP diagnosis/remediation/recovery path on a Docker-capable host and capture real latency/tool traces;
-2. add authenticated operator identity and durable audit persistence suitable for deployment;
-3. add Loki corroboration and configurable telemetry mappings;
-4. place Gemini above the deterministic safety core for incident summarization, hypothesis workflow selection, operator communication, and bounded tool orchestration;
-5. build the operator incident console and deployment path on Google Cloud.
+1. execute the complete official-MCP diagnosis/remediation/recovery path on a Docker-capable host and capture real latency/tool traces;
+2. add configurable telemetry/property mappings so real productions can use existing metric names/labels;
+3. add Loki corroboration and evidence provenance across metrics + logs;
+4. place Gemini above the deterministic safety core for incident summarization, bounded workflow selection, and operator communication;
+5. build the authenticated operator incident console and durable audit/deployment path on Google Cloud.
 
 ## Official references
 
@@ -153,4 +136,4 @@ The next implementation priorities are:
 
 ## Project status
 
-StageGuard is under active development as a personal open-source project. The deterministic local incident lifecycle is now implemented through investigation, evidence-revision-bound approval, remediation, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
+StageGuard is under active development. The deterministic local incident lifecycle is implemented through investigation, authenticated evidence-revision-bound approval, remediation, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
