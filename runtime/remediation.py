@@ -2,11 +2,12 @@
 """Approval-gated remediation and telemetry-based recovery verification."""
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Callable, Protocol
 
 from investigator import IncidentReport, MetricQueryClient
@@ -32,6 +33,7 @@ class Approval:
 class ActionResult:
     accepted: bool
     detail: str
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,35 @@ def _approval_matches(report: IncidentReport, approval: Approval, profile: Telem
     )
 
 
+def remediation_operation_id(report: IncidentReport, approval: Approval) -> str:
+    """Return a stable idempotency identity for one evidence revision/action.
+
+    Human identity is excluded deliberately: re-approving identical evidence must
+    not create a second infrastructure mutation after an uncertain transport retry.
+    """
+    payload = {
+        "report": report.to_dict(),
+        "action": approval.action,
+        "production_id": approval.production_id,
+        "target": approval.target,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sg-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:40]
+
+
+def _execute_remediation(
+    remediation: RemediationClient,
+    report: IncidentReport,
+    approval: Approval,
+    profile: TelemetryProfile,
+) -> ActionResult:
+    operation_id = remediation_operation_id(report, approval)
+    idempotent_method = getattr(remediation, "recover_uplink_idempotent", None)
+    if callable(idempotent_method):
+        return idempotent_method(report.production_id, profile.affected_uplink, operation_id)
+    return remediation.recover_uplink(report.production_id, profile.affected_uplink)
+
+
 def remediate_and_verify(
     report: IncidentReport,
     approval: Approval,
@@ -97,7 +128,7 @@ def remediate_and_verify(
     if required_consecutive_healthy < 1:
         raise ValueError("required_consecutive_healthy must be >= 1")
 
-    action = remediation.recover_uplink(report.production_id, profile.affected_uplink)
+    action = _execute_remediation(remediation, report, approval, profile)
     if not action.accepted:
         return RemediationOutcome("action_failed", action, (),
             "The remediation endpoint rejected or failed the action; recovery was not inferred.")
