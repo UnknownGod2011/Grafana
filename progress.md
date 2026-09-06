@@ -2,16 +2,18 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable vertical slice now includes configurable, validated telemetry bindings while preserving a fixed safety policy:
+StageGuard is a personal open-source incident commander for live media workflows. The executable vertical slice now includes a strict real-production onboarding gate before the existing bounded incident lifecycle:
 
-`telemetry profile → Prometheus/Grafana → official Grafana MCP → bounded six-read investigator → audited IncidentService → trusted operator identity → revision-bound approval → separate remediation adapter → bounded two-read recovery verification`
+`versioned telemetry mapping → eight-read read-only preflight → Prometheus/Grafana → official Grafana MCP → bounded six-read investigator → audited IncidentService → trusted operator identity → revision-bound approval → separate remediation adapter → bounded two-read recovery verification`
 
 Core invariants:
 
 - Grafana is the read-only evidence plane; write credentials remain separate.
-- Callers never provide raw PromQL, datasource IDs, remediation actions, or targets through the incident API.
+- Callers never provide raw PromQL, datasource IDs, remediation actions, or targets through the incident API or telemetry mapping file.
 - Existing production metric/label names are mapped through validated configuration, not interpolated as raw query fragments.
-- Missing evidence causes abstention.
+- Every production mapping must explicitly define all semantic bindings; omitted values never silently fall back to demo scope.
+- Activation preflight performs exactly the six investigation reads and two recovery reads and requires one numeric sample for every slot.
+- Missing or ambiguous evidence refuses activation; missing runtime evidence causes abstention.
 - Approval is tied to the exact evidence revision, single-use, and invalidated by fresh investigation.
 - Action success is never recovery; recovery requires consecutive healthy telemetry.
 - Operator identity comes from authentication context, not request JSON.
@@ -26,94 +28,101 @@ Core invariants:
 - Audited incident lifecycle service and narrow authenticated HTTP API.
 - Loopback development identity plus explicit static-bearer deployment primitive.
 - Configurable validated telemetry mapping across investigation, approval target selection, and recovery verification.
+- Strict versioned telemetry-config loader and eight-slot read-only production activation preflight.
 
-## Run log — 2026-09-06 — configurable telemetry mappings
+## Run log — 2026-09-07 — production telemetry onboarding/preflight
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to implement. Inspected the current repository and the safety-critical runtime files, especially:
+Read `progress.md` completely before deciding what to implement. Inspected the current repository through the connected GitHub integration, especially:
 
-- `runtime/investigator.py`
-- `runtime/remediation.py`
-- `runtime/incident_service.py`
-- `runtime/tests/test_investigator.py`
+- `runtime/telemetry.py`
+- `runtime/mcp_metric_client.py`
+- `runtime/tests/test_telemetry.py`
+- root `README.md`
 
-The prior handoff identified hard-coded demo metric and label names as the highest-value portability gap. That remained correct: the policy was bounded, but a real production would have had to rename telemetry to match the demo schema.
+The previous handoff identified production onboarding/preflight as the highest-value unblocked gap. That remained correct: configurable query generation existed, but there was no safe persisted mapping contract or proof that all semantic telemetry slots actually resolved before StageGuard was activated.
 
 ### Exact changes made
 
-Added `runtime/telemetry.py`:
+Added `runtime/onboarding.py`:
 
-- introduced immutable `TelemetryProfile` for production/feed/uplink identities, peer feeds, metric names, and label-key mappings;
-- validates Prometheus metric identifiers and label identifiers with restrictive grammars;
-- rejects empty required scope/peer bindings;
-- escapes PromQL string-literal values including quotes, backslashes, and newlines;
-- regex-escapes peer-feed values before constructing the bounded healthy-peer matcher;
-- added `investigation_queries(profile)` which always emits the same six semantic evidence slots;
-- added `recovery_queries(profile)` which always emits the same two recovery checks;
-- retained `DEFAULT_TELEMETRY_PROFILE` matching the deterministic simulator, preserving existing callers and tests.
+- introduced strict `version: 1` JSON telemetry configuration loading;
+- caps local configuration at 64 KiB;
+- rejects malformed UTF-8/JSON, non-object structures, unknown top-level fields, unknown profile fields, unsupported versions, wrong field types, and malformed peer arrays;
+- requires **every** `TelemetryProfile` field to be explicit so a production config can never silently inherit demo production/feed/uplink defaults;
+- continues to rely on `TelemetryProfile` identifier validation and PromQL value escaping for the query construction boundary;
+- introduced immutable `PreflightSlot` / `PreflightResult` models;
+- `preflight_telemetry()` executes exactly eight semantic reads: all six investigation slots plus both recovery slots;
+- records each slot as `ok`, `missing`, or `error` instead of failing the whole report on one unavailable source;
+- requires every slot to resolve to exactly one numeric sample before `ready=True`;
+- ambiguous multi-series responses remain rejected by `McpPrometheusMetricClient` and are surfaced as failed preflight slots;
+- preflight has no remediation/write capability.
 
-Updated `runtime/investigator.py`:
+Added `runtime/preflight.py`:
 
-- `investigate()` now accepts a validated `TelemetryProfile` rather than relying on hard-coded query text;
-- query count and semantic evidence classes remain exactly six;
-- report scope and hypothesis now reflect the configured production/feed/uplink;
-- missing mapped telemetry keeps the same fail-closed abstention semantics;
-- compatibility constants and default `QUERIES` remain for existing tests/adapters.
+- operator CLI that loads the strict mapping and runs it through the existing official-Grafana-MCP metric adapter;
+- emits machine-readable JSON readiness results;
+- exit code `0` = ready, `2` = configuration/transport setup failure, `3` = valid profile but incomplete/ambiguous evidence.
 
-Updated `runtime/remediation.py`:
+Added `runtime/telemetry.example.json`:
 
-- approval targets are derived from the same `TelemetryProfile` used for diagnosis;
-- approval validation now verifies report production/feed/hypothesis against that profile;
-- post-action recovery uses the same mapped metric/label names through exactly two queries;
-- custom mappings therefore cannot diagnose one uplink and accidentally remediate/verify the demo uplink;
-- the simulator actuator remains intentionally bound to the default local fixture only.
+- complete explicit mapping matching the deterministic local fixture;
+- no datasource UID, arbitrary PromQL, credentials, remediation configuration, or secrets are represented in the mapping format.
 
-Updated `runtime/incident_service.py`:
+Added `runtime/tests/test_onboarding.py` with credential-free coverage for:
 
-- accepts one validated `telemetry_profile` at construction;
-- propagates that exact profile through investigate → approve → execute/verify;
-- no profile/query fields were added to the HTTP request surface.
+1. loading a complete versioned profile;
+2. rejecting unknown top-level fields;
+3. rejecting unknown profile fields such as caller-controlled datasource IDs;
+4. rejecting unsupported configuration versions;
+5. requiring all eight bounded checks for readiness;
+6. refusing activation on one missing semantic slot while still evaluating the remaining checks;
+7. surfacing an ambiguous/transport-style query failure per slot while preserving the exact eight-query budget.
 
-Added `runtime/tests/test_telemetry.py` with seven deterministic tests covering:
+Updated root `README.md`:
 
-1. custom production/metric/label mapping while retaining exactly six investigation reads;
-2. production-scope quote escaping without turning values into arbitrary matchers;
-3. peer-feed regex escaping;
-4. rejection of unsafe metric identifiers;
-5. rejection of unsafe label identifiers;
-6. exactly two recovery query slots;
-7. unchanged abstention when a mapped evidence source is missing.
+- documented the onboarding safety boundary, example config, preflight command, result semantics, and exit codes;
+- updated the runtime diagram and repository map;
+- removed the now-obsolete roadmap item for telemetry mapping and moved the live official-MCP lifecycle gate to the front.
 
 ### Tests / checks / results
 
-This automation environment still cannot obtain a local checkout from GitHub, so the new Python suite was not executed here. I did not add or trigger GitHub Actions merely to compensate, avoiding noisy CI/storage usage.
-
-The next executable host should run:
+Attempted a clean checkout and full deterministic suite with:
 
 ```bash
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
 python -m py_compile runtime/*.py runtime/tests/*.py
 python -m unittest discover -s runtime/tests -v
 ```
 
-No live Grafana/MCP credential was required for this implementation; all new mapping tests are credential-free.
+The environment failed before checkout with:
+
+```text
+fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com
+```
+
+Therefore the new suite is **not claimed as executed/passing** in this runtime. No GitHub Actions workflow was added or triggered merely to compensate, preserving the project's low-noise CI/storage policy.
+
+The implementation itself was written directly through the authenticated GitHub repository connection. No Grafana, Gemini, Google Cloud, or remediation credential was required for these changes.
 
 ### Decisions made
 
-1. Configuration maps semantic telemetry slots; it does not grant arbitrary PromQL capability.
-2. Identifier-like configuration and label values are treated differently: identifiers are allowlisted by grammar, values are escaped as PromQL literals.
-3. One immutable profile follows the whole incident lifecycle so diagnosis, approval target, remediation, and recovery cannot drift to different production scopes.
-4. The fixed evidence budget is a policy invariant independent of metric naming.
-5. Simulator write behavior remains fixture-specific; real production remediation must provide a separate adapter whose allowed targets are configured independently and explicitly.
+1. Production config is strict and complete rather than permissive/defaulting; silent fallback to the demo production is too dangerous for an incident commander.
+2. Mapping files define semantic bindings only. Datasource selection stays in the MCP adapter/runtime environment and raw PromQL remains unavailable.
+3. Preflight proves evidence **coverage and cardinality**, not incident health. A high metric value can still be valid onboarding evidence; diagnosis owns threshold interpretation.
+4. The preflight query budget is derived from the same query builders used by investigation and recovery, preventing onboarding/runtime drift.
+5. One broken slot does not stop evaluation of the other seven, giving operators a complete remediation checklist while still refusing activation.
+6. Preflight is read-only and structurally cannot perform remediation.
 
 ### Current blockers / unknowns
 
+- Full deterministic Python suite has not executed in this automation environment because direct GitHub DNS resolution is unavailable to the execution container.
 - Full Compose startup and end-to-end official MCP Gate A remain unverified on a Docker-capable host.
-- The six-query diagnosis and two-query recovery loop have not yet been exercised through a live `grafana/mcp-grafana:1.1.0` process in this environment.
-- New mapping tests have not executed in this environment due lack of a local checkout.
-- No persisted/onboarding configuration loader yet turns a user-owned mapping file into `TelemetryProfile` with preflight checks.
+- The eight-read preflight, six-read diagnosis, and two-read recovery loop have not yet been exercised through one live `grafana/mcp-grafana:1.1.0` process here.
 - OIDC/IAP integration, Loki corroboration, Gemini explanation/orchestration, operator UI, durable multi-user audit storage, and Google Cloud deployment remain implementation gates.
+- The current onboarding preflight checks instant-query cardinality/availability but does not yet persist a signed/hash-pinned activation record tying a running `IncidentService` to the exact profile that passed preflight.
 
 ## Single best next step
 
-**Build a safe production onboarding/preflight layer for `TelemetryProfile`: load a versioned local JSON configuration, reject unknown fields, validate the profile, execute the eight bounded queries read-only through the metric client, report exactly which semantic evidence slots are missing/ambiguous, and refuse activation until production scoping and required telemetry are proven. This turns the new mapping primitive into a real-user connection workflow without exposing generic PromQL or requiring credentials to be committed.**
+**Add a fail-closed activation artifact that hashes the exact validated telemetry profile plus datasource identity and records the eight successful preflight slots, then require `IncidentService` startup to consume a matching, non-stale activation record. This prevents a profile from being changed after preflight and turns onboarding readiness into an enforceable runtime safety gate rather than a standalone operator check.**
