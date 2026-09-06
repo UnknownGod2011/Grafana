@@ -17,6 +17,7 @@ Core handoff documents now exist:
 - `DEMO.md` — deterministic 3-minute judge narrative
 - `VERTICAL_SLICE_SPEC.md` — fixed `broadcast-alpha` Gate A/B/C contract
 - `INTEGRATION_HANDOFF.md` — MCP deployment decision, auth/transport posture, judge evidence package, real-user onboarding and production evolution
+- `OPERATIONS_AND_SAFETY.md` — production operating modes, least-privilege contract, approval/remediation policy, onboarding/readiness tests, evidence/audit model and safe failure behavior
 
 ---
 
@@ -127,6 +128,63 @@ The permitted implementation session no longer needs to decide between an opaque
 
 ---
 
+## Run log — 2026-09-06 — operations, safety and adoption contract
+
+### Inspected at start
+
+Read `progress.md` fully and reviewed `README.md`. The biggest remaining product gap was not another architecture diagram; it was proving StageGuard has a credible operating model for real customers: least privilege, safe approvals, onboarding readiness, tenant boundaries, evidence quality, and safe failure behavior.
+
+### Fresh official research checked 2026-09-06
+
+Verified current Grafana docs:
+
+1. MCP tool permissions can be scoped to exact datasource/dashboard UIDs rather than broad wildcard access.
+2. `datasources:query` is sufficient for scoped Prometheus/Loki querying when matched to the required datasource UID.
+3. OSS MCP `--disable-write` removes write operations while retaining safe read/query capabilities such as Prometheus/Loki querying.
+4. `--disable-query` must **not** be used for StageGuard because it removes the runtime evidence tools required by the product.
+5. Loki queries require datasource-scoped `datasources:query`.
+6. `run_panel_query` remains optional and requires both dashboard read and datasource query; it is disabled by default.
+7. Dynamic multi-organization mode exists but should not be the production default when single-org service-account isolation is possible.
+
+References are recorded in `OPERATIONS_AND_SAFETY.md`.
+
+### New file: `OPERATIONS_AND_SAFETY.md`
+
+Added a production-grade operating contract covering:
+
+- four explicit autonomy modes: Observe, Recommend, Approve-to-act, Selective autonomy
+- hard evidence-plane/action-plane credential separation
+- minimum datasource-scoped Grafana RBAC profile
+- real-user connection and telemetry-mapping flow
+- readiness checks before a deployment is considered usable
+- required shadow/historical incident validation
+- four-class evidence standard for high-confidence diagnosis
+- operator-visible evidence objects without hidden chain-of-thought
+- declarative remediation-action metadata and rollback/verification rules
+- non-ceremonial human approval UX requirements
+- explicit rule that an action response is not proof of recovery
+- tenant/org/data-source isolation posture
+- judge-visible audit ledger proving Grafana use at every critical stage
+- safe failure behavior for unreachable Grafana, missing/stale/conflicting data, permission errors, unavailable remediation, rejected approvals and unverified recovery
+- evaluation gates required before any selective autonomy is enabled
+
+### Decisions locked this run
+
+1. **Hackathon demo mode is Approve-to-act**, not fully autonomous remediation.
+2. **Gate A/B Grafana MCP should run with write operations disabled** while preserving Prometheus/Loki query execution.
+3. **Final demo should use datasource-UID-scoped `datasources:query`**, not a broad Editor role, where environment capabilities permit.
+4. **No remediation credential is ever exposed to Grafana MCP or the model.**
+5. **High-confidence diagnosis requires symptom + causal + contradiction + peer evidence; missing/conflicting evidence forces abstention or lower confidence.**
+6. **Approval expires when evidence becomes stale or target state materially changes.**
+7. **Recovery is telemetry-verified through Grafana; action success alone never closes an incident.**
+8. **Dynamic multi-org access is not a default shortcut; prefer explicit tenant/org isolation.**
+
+### Why this is meaningful progress
+
+StageGuard now has a credible answer to a judge or enterprise operator asking, “Why would I ever let this agent touch a live broadcast?” The answer is a bounded, evidence-first system with scoped Grafana permissions, separate action credentials, explicit approvals, abstention behavior, telemetry verification, and a migration path from shadow mode to controlled autonomy.
+
+---
+
 ## Current blockers / unknowns
 
 1. **No submitted implementation exists yet.** This remains intentional under the hackathon's stated AI-tool restrictions; implementation should use Gemini CLI/Gemini Code Assist / permitted Google tooling.
@@ -151,19 +209,22 @@ The permitted implementation session no longer needs to decide between an opaque
 - recovery is claimed from an action response rather than observed telemetry
 - optional AI/MCP Observability distracts from required core MCP use
 - demo depends on nondeterministic external failures
+- approval UX becomes ceremonial rather than evidence-informed
+- multi-tenant shortcuts broaden Grafana organization scope unnecessarily
 
 ---
 
 ## Single best next step
 
-**Using hackathon-permitted Google tooling, execute Gate A with the recommended OSS-first path:**
+**Using hackathon-permitted Google tooling, execute Gate A with the OSS-first, least-privilege operating contract now frozen in the repo:**
 
 1. seed `broadcast-alpha` Prometheus telemetry
 2. connect it to a controlled Grafana instance
-3. run official `grafana/mcp-grafana` with a dedicated datasource-scoped read/query identity
+3. run official `grafana/mcp-grafana` with writes disabled and only the minimum datasource-scoped query permissions
 4. connect the permitted Gemini/ADK runtime
 5. retrieve all four evidence classes
 6. diagnose `uplink-b` packet loss and explicitly reject encoder overload
-7. record the actual environment, MCP version/mode/transport, auth/RBAC posture, datasource identifiers, tool names, query payload/result shapes, tool-call count, latency and reproducibility result in the repo
+7. force abstention when one required evidence class is removed, proving the safety contract
+8. record the actual environment, MCP version/mode/transport, auth/RBAC posture, datasource identifiers, tool names, query payload/result shapes, tool-call count, latency and reproducibility result in the repo
 
 **Do not build UI or remediation before this passes.**
