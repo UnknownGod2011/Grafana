@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Production-oriented StageGuard runtime bootstrap.
 
-This module is intentionally boring: it turns validated files + process-owned
-secrets into the already-bounded StageGuard runtime. It does not accept PromQL,
-datasource IDs, actions, or remediation targets over HTTP.
+This module turns validated files + process-owned secrets into the bounded
+StageGuard runtime. It does not accept PromQL, datasource IDs, actions, or
+remediation targets over HTTP.
 """
 from __future__ import annotations
 
@@ -11,11 +11,12 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
 from activation import ActivationRecord, load_activation_record
-from api import make_server
+from api import _is_loopback, make_server
 from identity import IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
 from incident_service import IncidentService, JsonlAuditLog
 from mcp_metric_client import McpPrometheusMetricClient
@@ -36,10 +37,10 @@ class RuntimeBundle:
     service: IncidentService
     metrics: McpPrometheusMetricClient
     identity_provider: IdentityProvider
-    host: str
-    port: int
+    server: ThreadingHTTPServer
 
     def close(self) -> None:
+        self.server.server_close()
         self.metrics.close()
 
 
@@ -52,8 +53,6 @@ def _read_required_secret(env_name: str) -> str:
 
 def _identity_provider(host: str, *, token_env: str, subject_env: str) -> IdentityProvider:
     """Use implicit local identity only on loopback; otherwise require bearer auth."""
-    from api import _is_loopback
-
     if _is_loopback(host):
         # Operators may still opt into bearer auth locally by setting the token.
         token = os.getenv(token_env, "")
@@ -86,10 +85,13 @@ def build_runtime(
     Production mappings always require a matching activation artifact. The
     datasource identity is taken from the actual MCP metric client instance and
     therefore cannot drift from the identity verified by ``IncidentService``.
+    The HTTP server is constructed exactly once and returned in the bundle,
+    avoiding a validate-then-rebind race around the listening socket.
     """
     profile = load_telemetry_profile(telemetry_config)
     metrics = metrics_factory()
     activation: ActivationRecord | None = None
+    server: ThreadingHTTPServer | None = None
     try:
         if activation_path is not None:
             activation = load_activation_record(activation_path)
@@ -117,13 +119,11 @@ def build_runtime(
             datasource_identity=metrics.datasource_uid if activation is not None else None,
             activation_now_unix=activation_now_unix,
         )
-
-        # Constructing the server validates the final network/auth boundary now,
-        # before the caller begins serving requests.
         server = make_server(service, host, port, identity_provider=identity)
-        server.server_close()
-        return RuntimeBundle(service, metrics, identity, host, port)
+        return RuntimeBundle(service, metrics, identity, server)
     except Exception:
+        if server is not None:
+            server.server_close()
         metrics.close()
         raise
 
@@ -156,18 +156,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"StageGuard startup refused: {exc}", file=sys.stderr)
         return 2
 
-    server = make_server(
-        bundle.service,
-        bundle.host,
-        bundle.port,
-        identity_provider=bundle.identity_provider,
-    )
     try:
-        server.serve_forever()
+        bundle.server.serve_forever()
     except KeyboardInterrupt:
         return 0
     finally:
-        server.server_close()
         bundle.close()
     return 0
 
