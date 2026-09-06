@@ -78,6 +78,32 @@ The policy will only emit the seeded high-confidence diagnosis when all four cla
 
 This split is intentional: Gemini can later decide *which incident workflow to invoke, summarize the evidence, and communicate with operators*, while the production-safety invariant stays deterministic and testable.
 
+## Official MCP metric adapter
+
+`mcp_metric_client.py` now implements `MetricQueryClient` over the official Grafana MCP stdio transport. It initializes one MCP session, checks that `query_prometheus` advertises `readOnlyHint=true`, executes only instant PromQL queries, and records per-query latency/value provenance in `QueryTrace`.
+
+The parser follows the pinned `mcp-grafana v1.1.0` implementation rather than inventing a private schema: ordinary tool values are JSON-marshaled into MCP text content, and `query_prometheus` returns a `QueryPrometheusResult` with `data`, optional `hints`, and `warnings`. The adapter also accepts `structuredContent` defensively for forward compatibility.
+
+Safety behavior is fail-closed:
+
+- an empty Prometheus vector becomes `None` and therefore missing evidence;
+- tool errors are raised, never converted to healthy telemetry;
+- malformed/non-numeric samples are rejected;
+- multiple instant series are rejected rather than silently selecting one;
+- the bounded investigator still owns the six-query policy and thresholds.
+
+Once the local stack and MCP credential are ready, a real diagnosis can be executed from Python with:
+
+```python
+from investigator import investigate
+from mcp_metric_client import McpPrometheusMetricClient
+
+with McpPrometheusMetricClient() as metrics:
+    report = investigate(metrics)
+    print(report.to_dict())
+    print(metrics.traces)
+```
+
 ## Gate A PromQL evidence set
 
 ```promql
@@ -110,11 +136,13 @@ No third-party Python packages are required for the current runtime tests:
 
 ```bash
 python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/investigator.py
+python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/mcp_metric_client.py runtime/investigator.py
 ```
 
 `test_investigator.py` covers the successful four-evidence diagnosis, healthy state, missing causal evidence, missing contradiction evidence, contradictory cause evidence, and the fixed six-query budget.
 
+`test_mcp_metric_client.py` covers the pinned Prometheus vector shape, scalar shape, empty results, structured-content compatibility, multiple-series rejection, tool errors, and malformed values without requiring a live Grafana instance.
+
 ## Next implementation step
 
-After Gate A is executed on a Docker-capable host, adapt the actual `query_prometheus` MCP response into `MetricQueryClient.instant`. Do not couple the investigator to an assumed MCP payload shape before that real response is captured. Then run the same investigator tests against the official MCP transport and add recovery verification as a separate post-approval state transition.
+Execute the full local stack on a Docker-capable host and run `mcp_smoke.py`, then run the bounded investigator through `McpPrometheusMetricClient` and capture all six `QueryTrace` records. If that succeeds, implement the next safety boundary: a human-approved remediation command model plus telemetry-based recovery verification that cannot be satisfied by a successful action response alone.
