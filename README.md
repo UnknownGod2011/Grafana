@@ -21,7 +21,8 @@ deterministic broadcast simulator
   → activation-enforced IncidentService
   → authenticated operator identity
   → evidence-revision-bound human approval
-  → governed allowlisted remediation policy + deployment transport
+  → governed allowlisted remediation policy
+  → explicit credential-isolated HTTPS remediation transport
   → bounded two-read telemetry recovery verification
   → append-only audit record
 ```
@@ -41,7 +42,8 @@ StageGuard keeps observation, authorization, and action structurally separate.
 | Investigation | Fixed/bounded evidence contracts; missing evidence causes abstention |
 | Identity | Operator identity comes from a configured authentication provider, never request JSON |
 | Approval | Explicit approval bound to exact incident + evidence revision; approval is single-use |
-| Remediation | Production policy pins one action and target, uses a deterministic evidence-bound operation ID, bounds retries/timeouts, and delegates credentialed I/O to an injected transport; bootstrap still defaults to disabled writes |
+| Remediation policy | Production policy pins one action and target, uses a deterministic evidence-bound operation ID, and bounds retries/timeouts |
+| Remediation transport | Production network writes are disabled by default and require explicit startup opt-in, a fixed process-owned HTTPS endpoint, and a separate process-owned bearer credential |
 | Recovery | Action success is never recovery; Grafana/Prometheus telemetry must prove health |
 | Audit | Lifecycle events are appended with trusted actor identity, activation hashes, and non-secret remediation operation/result metadata when available |
 
@@ -85,25 +87,52 @@ python runtime/bootstrap.py \
 
 For real production profiles, `--activation` is mandatory and is verified against the datasource UID of the actual `McpPrometheusMetricClient`. If either the mapping or datasource differs from preflight, startup is refused before incident handling begins. Tokens are read from environment variables and are not accepted through request bodies or written to audit records.
 
-Production bootstrap deliberately uses a `DisabledRemediationClient` unless an explicit write adapter is supplied by the host application. This means production diagnosis, review, approval, and audit can be deployed without accidentally enabling infrastructure mutation. The local deterministic demo remains wired to the loopback-only simulator remediation adapter.
+Production bootstrap uses a `DisabledRemediationClient` unless writes are explicitly enabled. The local deterministic demo remains wired to the loopback-only simulator remediation adapter.
 
 ## Governed production remediation
 
-`runtime/production_remediation.py` supplies the policy half of a production write integration without owning cloud/provider credentials. A host application injects a `RemediationTransport` that is already bound to one deployment-controlled endpoint and its write credential; StageGuard never receives a caller-selectable URL.
+`runtime/production_remediation.py` owns the policy half of the production write boundary. `runtime/http_remediation_transport.py` now supplies the first concrete deployment transport while preserving strict separation from Grafana evidence credentials.
 
-`AllowlistedProductionRemediationClient` then enforces:
+`AllowlistedProductionRemediationClient` enforces:
 
 - exactly one supported action: `recover_uplink`;
 - one configured production ID and one configured uplink target;
 - a deterministic operation ID derived from the exact diagnosed evidence + action + target;
-- re-approval of identical evidence reuses the same operation ID, preventing duplicate mutation after uncertain retries;
+- re-approval of identical evidence reuses the same operation ID;
 - maximum timeout of 10 seconds per transport attempt;
-- at most three attempts, with retry decisions supplied by the narrow transport result;
-- retry attempts reuse the identical immutable request and operation ID;
-- no recovery inference from the transport result—Grafana telemetry still has to prove recovery;
-- non-secret action metadata (`operation_id`, adapter type, attempt count, transport status) is copied into the append-only lifecycle audit event.
+- at most three attempts, with retries using the identical immutable request;
+- no recovery inference from transport acceptance—Grafana telemetry still proves recovery;
+- non-secret action metadata in the append-only lifecycle audit event.
 
-The canonical bootstrap does **not** enable this adapter automatically. Production writes remain disabled unless a host explicitly supplies a remediation factory/transport with separate credentials. This keeps the Grafana evidence credential and infrastructure write credential structurally independent.
+`HttpRemediationTransport` adds these deployment constraints:
+
+- HTTPS only; embedded credentials, URL query strings, and fragments are rejected;
+- endpoint and bearer credential are process-owned configuration, never incident/API input;
+- the write bearer credential is separate from `STAGEGUARD_API_TOKEN` and from Grafana MCP credentials;
+- every POST sends the deterministic operation ID as both JSON data and `Idempotency-Key`;
+- the remediation server must return exactly `{"accepted": <bool>, "operation_id": "<same-id>"}`;
+- mismatched operation IDs, malformed JSON, unknown response fields, and oversized responses fail closed;
+- only transient HTTP classes (`408`, `425`, `429`, selected `5xx`) are marked retryable;
+- response bodies, endpoint URLs, and credentials are never copied into `TransportResult` or audit metadata.
+
+Production writes require an explicit startup flag plus deployment-owned environment settings:
+
+```bash
+export STAGEGUARD_API_TOKEN='operator-api-secret'
+export STAGEGUARD_API_SUBJECT='operator@example.com'
+export STAGEGUARD_REMEDIATION_ENDPOINT='https://remediation.example.com/v1/recover'
+export STAGEGUARD_REMEDIATION_TOKEN='separate-write-secret'
+
+python runtime/bootstrap.py \
+  --telemetry-config /etc/stageguard/telemetry.json \
+  --activation /var/lib/stageguard/activation.json \
+  --audit-log /var/lib/stageguard/audit.jsonl \
+  --host 0.0.0.0 \
+  --port 9110 \
+  --enable-production-remediation
+```
+
+Without `--enable-production-remediation`, production writes remain disabled even when remediation environment variables are present. The demo profile explicitly refuses the production-write opt-in.
 
 ## Authenticated incident API
 
@@ -164,10 +193,11 @@ See [`runtime/README.md`](runtime/README.md) for the detailed local workflow and
 - `runtime/investigator.py` — bounded incident evidence policy
 - `runtime/remediation.py` — approval-gated action dispatch, deterministic operation identity, and telemetry recovery verification
 - `runtime/production_remediation.py` — allowlisted production write policy with injected deployment transport
+- `runtime/http_remediation_transport.py` — strict credential-isolated HTTPS transport and server idempotency contract
 - `runtime/incident_service.py` — activation-enforced lifecycle orchestration and append-only audit boundary
 - `runtime/identity.py` — pluggable trusted operator identity providers
 - `runtime/api.py` — narrow authenticated HTTP API
-- `runtime/tests/` — deterministic policy/service/API/onboarding/activation/bootstrap tests
+- `runtime/tests/` — deterministic policy/service/API/onboarding/activation/bootstrap/transport tests
 - `runtime/grafana/`, `runtime/prometheus/` — local observability provisioning
 - `ARCHITECTURE.md` — architecture and trust-boundary detail
 - `progress.md` — exact implementation/run log and next step
@@ -186,7 +216,7 @@ The Docker → Grafana → official MCP gate still requires a Docker-capable hos
 ## Near-term roadmap
 
 1. execute the complete official-MCP onboarding/activation/bootstrap/diagnosis/approval/recovery path on a Docker-capable host and capture real latency/tool traces;
-2. add a concrete deployment transport for the governed remediation adapter, with a provider-specific write credential and server-side idempotency contract;
+2. provide a tiny reference remediation receiver that demonstrates the server-side idempotency contract without real infrastructure mutation;
 3. add Loki corroboration and evidence provenance across metrics + logs;
 4. place Gemini above the deterministic safety core for incident summarization, bounded workflow selection, and operator communication;
 5. build the authenticated operator incident console, OIDC/IAP identity, durable audit storage, and Google Cloud deployment path.
@@ -202,4 +232,4 @@ The Docker → Grafana → official MCP gate still requires a Docker-capable hos
 
 ## Project status
 
-StageGuard is under active development. The deterministic incident lifecycle now includes strict telemetry onboarding/preflight, hash-pinned activation, a canonical fail-closed runtime bootstrap, bounded investigation, authenticated evidence-revision-bound approval, governed idempotent production-remediation policy, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
+StageGuard is under active development. The deterministic incident lifecycle now includes strict telemetry onboarding/preflight, hash-pinned activation, canonical fail-closed runtime bootstrap, bounded investigation, authenticated evidence-revision-bound approval, governed idempotent production-remediation policy, an explicit credential-isolated HTTPS write transport, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
