@@ -2,14 +2,14 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable vertical slice now includes a canonical fail-closed runtime/bootstrap path around the previously implemented activation-enforced lifecycle:
+StageGuard is a personal open-source incident commander for live media workflows. The executable vertical slice now includes a canonical fail-closed runtime/bootstrap path plus a governed production-remediation policy boundary:
 
-`versioned telemetry mapping → eight-read read-only preflight → hash-pinned/time-bounded activation artifact → production bootstrap → official Grafana MCP metric adapter → bounded six-read investigator → activation-enforced audited IncidentService → trusted operator identity → revision-bound approval → separate remediation boundary → bounded two-read recovery verification`
+`versioned telemetry mapping → eight-read read-only preflight → hash-pinned/time-bounded activation artifact → production bootstrap → official Grafana MCP metric adapter → bounded six-read investigator → activation-enforced audited IncidentService → trusted operator identity → revision-bound approval → governed allowlisted remediation policy → deployment-owned write transport → bounded two-read recovery verification`
 
 Core invariants:
 
 - Grafana is the read-only evidence plane; write credentials remain separate.
-- Callers never provide raw PromQL, datasource IDs, remediation actions, or targets through the incident API or telemetry mapping file.
+- Callers never provide raw PromQL, datasource IDs, remediation actions, targets, or write endpoints through the incident API or telemetry mapping file.
 - Existing production metric/label names are mapped through validated configuration, not interpolated as raw query fragments.
 - Every production mapping explicitly defines all semantic bindings; omitted values never silently fall back to demo scope.
 - Activation preflight performs exactly the six investigation reads and two recovery reads and requires one numeric sample for every slot.
@@ -18,6 +18,7 @@ Core invariants:
 - The canonical bootstrap derives datasource identity from the actual MCP metric client configuration instead of accepting a second runtime datasource argument.
 - Non-loopback HTTP startup requires a process-owned production-capable authentication provider.
 - Production bootstrap does not silently enable write capability: absent an explicit write adapter it uses a disabled remediation client.
+- The production-remediation policy pins exactly one action, production, and uplink, uses deterministic evidence-bound operation IDs, bounds retries/timeouts, and delegates credentialed I/O to a deployment-owned transport.
 - Missing or ambiguous evidence refuses activation; missing runtime evidence causes abstention.
 - Approval is tied to the exact evidence revision, single-use, and invalidated by fresh investigation.
 - Action success is never recovery; recovery requires consecutive healthy telemetry.
@@ -36,97 +37,103 @@ Core invariants:
 - Strict versioned telemetry-config loader and eight-slot read-only production activation preflight.
 - SHA-256 pinned, expiring activation artifact enforced for non-demo production profiles.
 - Canonical production bootstrap wiring mapping + activation + MCP datasource identity + audit + auth + service + HTTP bind policy.
+- Governed production-remediation policy with allowlisted action/target, deterministic operation identity, bounded retry/timeout policy, injected transport, and audited non-secret result metadata.
 
-## Run log — 2026-09-07 — canonical production runtime/bootstrap
+## Run log — 2026-09-07 — governed production remediation boundary
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to implement. Inspected the current repository through the connected GitHub integration, especially:
 
-- `runtime/incident_service.py`
-- `runtime/api.py`
-- `runtime/identity.py`
-- `runtime/mcp_metric_client.py`
 - `runtime/remediation.py`
-- `runtime/activation.py`
-- `runtime/onboarding.py`
-- `runtime/telemetry.example.json`
+- `runtime/incident_service.py`
+- `runtime/bootstrap.py`
+- `runtime/tests/test_remediation.py`
 - root `README.md`
 
-The previous handoff identified the highest-value unblocked gap correctly: all runtime safety pieces existed, but starting StageGuard still required hand-written Python glue and therefore left room for production deployments to accidentally wire the wrong datasource, omit activation, expose loopback identity externally, or enable writes inconsistently.
+The previous handoff identified the highest-value unblocked gap correctly: production bootstrap was fail-closed but the only write-capable implementation was the loopback simulator. A production-safe policy layer for a real remediation integration did not yet exist.
 
 ### Exact changes made
 
-Added `runtime/bootstrap.py`:
+Added `runtime/production_remediation.py`:
 
-- added one canonical `build_runtime(...)` composition path;
-- loads the strict versioned telemetry profile from disk;
-- requires an activation artifact for every non-default production profile;
-- constructs the official `McpPrometheusMetricClient` and passes **that client's actual `datasource_uid`** into `IncidentService` activation verification;
-- loads the append-only `JsonlAuditLog`;
-- chooses loopback-only fixed development identity only when binding to loopback and no bearer token is configured;
-- requires `STAGEGUARD_API_TOKEN` (or an explicitly named token env var) for non-loopback binds;
-- obtains the audit/operator subject from a process-owned env var rather than request JSON;
-- returns a `RuntimeBundle` that owns the service, metric client, identity provider, and already-bound HTTP server;
-- constructs the HTTP listener exactly once, eliminating a validate-then-rebind race in the first implementation draft;
-- closes the MCP subprocess/transport and listening socket through one `RuntimeBundle.close()` path;
-- adds CLI arguments for telemetry config, activation artifact, audit log, host, port, and the **names** of secret/subject environment variables without accepting secret values as CLI arguments.
+- introduced immutable `RemediationRequest` and `TransportResult` contracts;
+- introduced a narrow `RemediationTransport` protocol so deployment code owns the actual credentialed endpoint while StageGuard owns remediation policy;
+- added `AllowlistedProductionRemediationClient` that pins exactly one production ID and one uplink;
+- hardcodes the only supported semantic action to `recover_uplink`;
+- rejects target drift before any transport call;
+- requires an evidence-bound StageGuard operation identity before production execution;
+- limits per-attempt timeout to at most 10 seconds;
+- permits at most three attempts;
+- bounds retry delay to at most two seconds;
+- retries only when the deployment transport marks failure as retryable (or a bounded timeout/OS transport failure occurs);
+- reuses the exact immutable request and operation ID on every retry;
+- returns only non-secret immutable metadata: adapter name, operation ID, attempt count, and transport status.
 
-Added `DisabledRemediationClient` as the production-safe default:
+Updated `runtime/remediation.py`:
 
-- non-demo production bootstrap does not silently obtain write capability;
-- diagnosis, evidence review, approval, and audit can run while `/v1/execute` receives an action rejection until a host application deliberately injects an explicit remediation adapter;
-- the deterministic demo profile continues using the existing loopback-only `SimulatorRemediationClient`.
+- added deterministic `remediation_operation_id(...)` derived from the complete diagnosed report plus fixed action/production/target;
+- deliberately excludes the approving human identity from that key so re-approval of identical evidence does not produce a second infrastructure mutation after an uncertain retry;
+- dispatches to `recover_uplink_idempotent(...)` when a client supports the governed production interface;
+- retains the existing two-argument `recover_uplink(...)` compatibility path for the deterministic simulator and existing simple test doubles;
+- extended `ActionResult` with optional metadata while preserving existing positional construction.
 
-Added `runtime/tests/test_bootstrap.py` with five credential-free startup-policy tests:
+Updated `runtime/incident_service.py`:
 
-1. non-default production profile refuses startup without activation;
-2. activation is checked against the datasource identity of the actual metric client instance, catching datasource drift;
-3. non-loopback bind refuses startup without a process-owned bearer token;
-4. loopback startup defaults to the local development identity and creates the audit sink;
-5. an activated production runtime can start with bearer auth while retaining the disabled write boundary by default.
+- remediation completion audit events now persist the governed adapter's non-secret action metadata when available;
+- bearer/write credentials, endpoint URLs, and arbitrary transport payloads are not added to audit events.
+
+Added `runtime/tests/test_production_remediation.py` with credential-free coverage for:
+
+1. deterministic operation identity and actor-independent re-approval behavior;
+2. rejection of non-allowlisted targets before transport execution;
+3. retry reuse of the exact immutable request/operation ID;
+4. successful remediation still requiring Grafana telemetry recovery proof;
+5. non-retryable failure stopping immediately without recovery reads;
+6. timeout handling with bounded retries and timeout propagation;
+7. rejection of unbounded timeout/retry configurations.
 
 Updated root `README.md`:
 
-- inserted bootstrap into the executable architecture and safety table;
-- documented the canonical production startup command;
-- documented bearer token/subject env handling;
-- documented runtime verification against the actual MCP datasource identity;
-- documented the safe disabled production remediation default;
-- updated repository map, status, and roadmap.
+- documented the governed production-remediation boundary;
+- clarified that the deployment transport, not the incident caller, owns endpoint and write credentials;
+- documented deterministic operation identity, retry/timeout bounds, audit metadata, and telemetry-only recovery proof;
+- kept canonical bootstrap writes disabled by default;
+- updated repository map, safety model, project status, and roadmap.
 
 ### Tests / checks / results
 
-After repository writes, attempted a clean checkout followed by:
+The repository connector accepted all final source/test/documentation writes. `runtime/production_remediation.py` was fetched back after commit and manually re-inspected for the final immutable request, allowlist, timeout/retry, and metadata behavior.
+
+The local execution environment still does not provide a runnable checkout of the repository, so the deterministic Python commands below were not executed here and are **not** claimed as passing:
 
 ```bash
 python -m py_compile runtime/*.py runtime/tests/*.py
 python -m unittest discover -s runtime/tests -v
 ```
 
-The checkout failed before Python execution because the execution container still cannot resolve `github.com` (`Could not resolve host: github.com`). Therefore neither syntax compilation nor the unittest suite is claimed as executed/passing in this run.
+No GitHub Actions workflow was added, triggered, or rerun as a substitute, preserving the project's low-noise CI/storage policy. No Grafana, Gemini, Google Cloud, or remediation credential was required for this implementation.
 
-The newly written `runtime/bootstrap.py` was fetched back through the authenticated GitHub connector and manually re-inspected after commit, including the final one-bind `RuntimeBundle` lifecycle.
-
-No GitHub Actions workflow was added, triggered, or rerun merely to compensate, preserving the project's low-noise CI/storage policy. No Grafana, Gemini, Google Cloud, or remediation credential was required for the implementation.
+One initial attempt to place credentialed HTTP transport logic directly inside the repository write was rejected by the repository safety layer. Rather than weakening policy or retrying around that control, the implementation was redesigned so StageGuard owns a provider-neutral, credential-free policy adapter and the deployment injects a narrow credentialed transport. This is also a cleaner separation of duties for the project.
 
 ### Decisions made
 
-1. **Datasource identity has one source of truth at runtime.** Bootstrap takes it from `McpPrometheusMetricClient.datasource_uid`; callers do not independently pass a second datasource identity into the launcher.
-2. **No non-loopback implicit identity.** External binds require a process-owned bearer credential. Loopback retains the frictionless deterministic development identity.
-3. **Secrets are environment-owned, not CLI-owned.** The CLI accepts env-var names but not bearer secret values, reducing accidental shell-history/process-list exposure.
-4. **Production writes are disabled by default.** An activated production can diagnose and collect approvals without acquiring mutation capability. A real write adapter must be injected deliberately with its own credentials/policy.
-5. **The server socket is created once.** The first draft constructed and closed a server merely to validate bind/auth policy, then rebound it in `main`; that was replaced with a bundle that owns the already-bound server, avoiding a TOCTOU/race window.
-6. **Activation remains the runtime admission gate.** Bootstrap does not duplicate activation semantics; it composes the existing `IncidentService` verifier so the safety rule stays centralized.
+1. **Idempotency is bound to evidence, not the human actor.** The same diagnosed evidence + action + target yields the same operation identity even if a second operator re-approves it.
+2. **Production policy and credentialed transport are separate modules.** StageGuard does not need to know arbitrary URLs or provider credential formats to enforce action/target/retry policy.
+3. **No caller-selectable action or target.** The adapter constructs `recover_uplink` internally and accepts only the preconfigured production/uplink pair.
+4. **Retries are safe only with the same operation identity.** Every retry receives the exact same immutable `RemediationRequest`.
+5. **Transport acceptance is not recovery.** Existing two-read consecutive telemetry verification remains authoritative.
+6. **Audit metadata is intentionally narrow.** Operation identity, adapter type, attempt count, and transport status are useful provenance; secrets and endpoint details are excluded.
+7. **Bootstrap remains safe by default.** Existing `remediation_factory` injection is the explicit host hook; canonical CLI startup still uses `DisabledRemediationClient` for production.
 
 ### Current blockers / unknowns
 
-- Full deterministic Python suite has not executed in this automation environment because direct `github.com` DNS resolution remains unavailable to the local execution container.
+- Full deterministic Python suite has not executed in this automation environment because a runnable local checkout is unavailable.
 - Full Compose startup and end-to-end official MCP Gate A remain unverified on a Docker-capable host.
-- The eight-read preflight, activation artifact, new bootstrap, six-read diagnosis, approval, and two-read recovery loop have not yet been exercised through one live `grafana/mcp-grafana:1.1.0` process here.
-- The production bootstrap intentionally has no write-capable remediation implementation yet; only the local simulator adapter can mutate state.
+- The eight-read preflight, activation artifact, bootstrap, six-read diagnosis, approval, governed production action, and two-read recovery loop have not yet been exercised through one live `grafana/mcp-grafana:1.1.0` process here.
+- A concrete deployment-specific `RemediationTransport` is intentionally not implemented yet; it needs a chosen provider/endpoint contract and separate write credential.
 - OIDC/IAP integration, Loki corroboration, Gemini explanation/orchestration, operator UI, durable multi-user/tamper-resistant audit storage, and Google Cloud deployment remain implementation gates.
 
 ## Single best next step
 
-**Implement a narrow allowlisted production remediation adapter with separate credentials, explicit idempotency keys, bounded timeout/retry behavior, immutable request/result audit metadata, and no caller-selectable URL/action/target. Add credential-free adapter tests and integrate it into bootstrap only behind explicit configuration, preserving `DisabledRemediationClient` as the default.**
+**Add the first concrete deployment transport for `AllowlistedProductionRemediationClient` using a fixed provider-controlled endpoint and separate process-owned write credential, with server-side idempotency-key expectations, strict response parsing, credential-redaction tests, and explicit bootstrap opt-in. Preserve `DisabledRemediationClient` as the default and keep the provider-neutral policy layer unchanged.**
