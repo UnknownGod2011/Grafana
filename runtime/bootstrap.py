@@ -17,10 +17,12 @@ from typing import Callable
 
 from activation import ActivationRecord, load_activation_record
 from api import _is_loopback, make_server
+from http_remediation_transport import HttpRemediationTransport
 from identity import IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
 from incident_service import IncidentService, JsonlAuditLog
 from mcp_metric_client import McpPrometheusMetricClient
 from onboarding import load_telemetry_profile
+from production_remediation import AllowlistedProductionRemediationClient
 from remediation import ActionResult, RemediationClient, SimulatorRemediationClient
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
@@ -54,7 +56,6 @@ def _read_required_secret(env_name: str) -> str:
 def _identity_provider(host: str, *, token_env: str, subject_env: str) -> IdentityProvider:
     """Use implicit local identity only on loopback; otherwise require bearer auth."""
     if _is_loopback(host):
-        # Operators may still opt into bearer auth locally by setting the token.
         token = os.getenv(token_env, "")
         if not token:
             return LocalDevelopmentIdentityProvider()
@@ -65,6 +66,22 @@ def _identity_provider(host: str, *, token_env: str, subject_env: str) -> Identi
     if not subject:
         raise ValueError(f"{subject_env} must not be blank")
     return StaticBearerIdentityProvider({token: subject})
+
+
+def _production_remediation_from_env(
+    profile: TelemetryProfile,
+    *,
+    endpoint_env: str,
+    token_env: str,
+) -> AllowlistedProductionRemediationClient:
+    endpoint = _read_required_secret(endpoint_env)
+    token = _read_required_secret(token_env)
+    transport = HttpRemediationTransport(endpoint, token)
+    return AllowlistedProductionRemediationClient(
+        transport,
+        allowed_production_id=profile.production_id,
+        allowed_uplink=profile.affected_uplink,
+    )
 
 
 def build_runtime(
@@ -78,6 +95,9 @@ def build_runtime(
     subject_env: str = "STAGEGUARD_API_SUBJECT",
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
+    enable_production_remediation: bool = False,
+    remediation_endpoint_env: str = "STAGEGUARD_REMEDIATION_ENDPOINT",
+    remediation_token_env: str = "STAGEGUARD_REMEDIATION_TOKEN",
     activation_now_unix: int | None = None,
 ) -> RuntimeBundle:
     """Construct the complete runtime and enforce startup trust boundaries.
@@ -85,8 +105,8 @@ def build_runtime(
     Production mappings always require a matching activation artifact. The
     datasource identity is taken from the actual MCP metric client instance and
     therefore cannot drift from the identity verified by ``IncidentService``.
-    The HTTP server is constructed exactly once and returned in the bundle,
-    avoiding a validate-then-rebind race around the listening socket.
+    Production writes remain disabled unless the host injects a factory or the
+    CLI explicitly opts into the credential-isolated HTTPS transport.
     """
     profile = load_telemetry_profile(telemetry_config)
     metrics = metrics_factory()
@@ -98,16 +118,25 @@ def build_runtime(
         elif profile != DEFAULT_TELEMETRY_PROFILE:
             raise ValueError("non-default production telemetry requires --activation")
 
+        if remediation_factory is not None and enable_production_remediation:
+            raise ValueError("choose either remediation_factory or explicit production remediation, not both")
+        if enable_production_remediation and profile == DEFAULT_TELEMETRY_PROFILE:
+            raise ValueError("explicit production remediation is not permitted for the demo telemetry profile")
+
         identity = _identity_provider(host, token_env=token_env, subject_env=subject_env)
         audit = JsonlAuditLog(audit_path)
 
         if remediation_factory is not None:
             remediation = remediation_factory(profile)
+        elif enable_production_remediation:
+            remediation = _production_remediation_from_env(
+                profile,
+                endpoint_env=remediation_endpoint_env,
+                token_env=remediation_token_env,
+            )
         elif profile == DEFAULT_TELEMETRY_PROFILE:
             remediation = SimulatorRemediationClient()
         else:
-            # Deliberately safe: production diagnosis/API can run, but execute
-            # cannot mutate infrastructure until an explicit adapter is wired.
             remediation = DisabledRemediationClient()
 
         service = IncidentService(
@@ -137,6 +166,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=9110)
     parser.add_argument("--token-env", default="STAGEGUARD_API_TOKEN", help="name of env var containing bearer token")
     parser.add_argument("--subject-env", default="STAGEGUARD_API_SUBJECT", help="name of env var containing operator subject")
+    parser.add_argument(
+        "--enable-production-remediation",
+        action="store_true",
+        help="explicitly enable the allowlisted HTTPS production write adapter",
+    )
+    parser.add_argument(
+        "--remediation-endpoint-env",
+        default="STAGEGUARD_REMEDIATION_ENDPOINT",
+        help="name of env var containing the fixed HTTPS remediation endpoint",
+    )
+    parser.add_argument(
+        "--remediation-token-env",
+        default="STAGEGUARD_REMEDIATION_TOKEN",
+        help="name of env var containing the separate remediation bearer credential",
+    )
     return parser
 
 
@@ -151,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             token_env=args.token_env,
             subject_env=args.subject_env,
+            enable_production_remediation=args.enable_production_remediation,
+            remediation_endpoint_env=args.remediation_endpoint_env,
+            remediation_token_env=args.remediation_token_env,
         )
     except Exception as exc:
         print(f"StageGuard startup refused: {exc}", file=sys.stderr)
