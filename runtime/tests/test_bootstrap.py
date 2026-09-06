@@ -11,6 +11,7 @@ from unittest.mock import patch
 from activation import create_activation_record, write_activation_record
 from bootstrap import DisabledRemediationClient, build_runtime
 from onboarding import PreflightResult, PreflightSlot, load_telemetry_profile
+from production_remediation import AllowlistedProductionRemediationClient
 from telemetry import investigation_queries, recovery_queries
 
 
@@ -121,8 +122,6 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(metrics.closed)
 
     def test_non_loopback_requires_process_owned_bearer_token(self) -> None:
-        # Reuse the repository's demo profile shape so activation is not the
-        # reason startup is refused; this isolates the network/auth boundary.
         example = Path(__file__).parents[1] / "telemetry.example.json"
         with clean_auth_env(), self.assertRaisesRegex(ValueError, "STAGEGUARD_API_TOKEN"):
             build_runtime(
@@ -170,11 +169,67 @@ class BootstrapTests(unittest.TestCase):
             )
         try:
             self.assertFalse(bundle.identity_provider.is_development_only)
-            # Approval/execution plumbing is present, but no write-capable
-            # production adapter is silently enabled by bootstrap.
             self.assertIsInstance(bundle.service._remediation, DisabledRemediationClient)
         finally:
             bundle.close()
+
+    def test_explicit_production_remediation_requires_separate_write_settings(self) -> None:
+        config = self._write_profile()
+        activation = self._activation(config)
+        env = {"STAGEGUARD_API_TOKEN": "api-secret", "STAGEGUARD_API_SUBJECT": "ops@example"}
+        metrics = FakeMetrics()
+        with patch.dict(os.environ, env, clear=True), self.assertRaisesRegex(
+            ValueError, "STAGEGUARD_REMEDIATION_ENDPOINT"
+        ):
+            build_runtime(
+                telemetry_config=config,
+                activation_path=activation,
+                audit_path=self.root / "audit.jsonl",
+                host="0.0.0.0",
+                port=0,
+                metrics_factory=lambda: metrics,
+                activation_now_unix=1_800_000_100,
+                enable_production_remediation=True,
+            )
+        self.assertTrue(metrics.closed)
+
+    def test_explicit_production_remediation_wires_allowlisted_https_adapter(self) -> None:
+        config = self._write_profile()
+        activation = self._activation(config)
+        env = {
+            "STAGEGUARD_API_TOKEN": "api-secret",
+            "STAGEGUARD_API_SUBJECT": "ops@example",
+            "STAGEGUARD_REMEDIATION_ENDPOINT": "https://writer.example/v1/recover",
+            "STAGEGUARD_REMEDIATION_TOKEN": "write-secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            bundle = build_runtime(
+                telemetry_config=config,
+                activation_path=activation,
+                audit_path=self.root / "audit.jsonl",
+                host="0.0.0.0",
+                port=0,
+                metrics_factory=FakeMetrics,
+                activation_now_unix=1_800_000_100,
+                enable_production_remediation=True,
+            )
+        try:
+            self.assertIsInstance(bundle.service._remediation, AllowlistedProductionRemediationClient)
+            self.assertNotEqual(os.environ.get("STAGEGUARD_API_TOKEN"), os.environ.get("STAGEGUARD_REMEDIATION_TOKEN"))
+        finally:
+            bundle.close()
+
+    def test_demo_profile_refuses_production_write_opt_in(self) -> None:
+        example = Path(__file__).parents[1] / "telemetry.example.json"
+        with self.assertRaisesRegex(ValueError, "not permitted for the demo"):
+            build_runtime(
+                telemetry_config=example,
+                activation_path=None,
+                audit_path=self.root / "audit.jsonl",
+                port=0,
+                metrics_factory=FakeMetrics,
+                enable_production_remediation=True,
+            )
 
 
 if __name__ == "__main__":
