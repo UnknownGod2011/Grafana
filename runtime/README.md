@@ -65,10 +65,27 @@ With the default faulted fixture, the returned value should be approximately `18
 
 If an MCP protocol upgrade is required, override `STAGEGUARD_MCP_PROTOCOL_VERSION`. If Docker is not the desired client launcher, override `STAGEGUARD_MCP_COMMAND`.
 
+## Bounded incident investigator
+
+`investigator.py` is the deterministic policy/evidence core that sits between telemetry tools and any Gemini reasoning layer. It has a deliberately tiny read-only boundary (`MetricQueryClient.instant`) and executes exactly six fixed PromQL reads covering four required evidence classes:
+
+1. **Symptom** — Camera 3 dropped-frame rate is elevated.
+2. **Causal** — `uplink-b` packet loss is elevated.
+3. **Contradiction** — Camera 3 encoder CPU and GPU are both healthy, arguing against encoder saturation.
+4. **Healthy peer** — `uplink-a` and Cameras 1/2 remain healthy.
+
+The policy will only emit the seeded high-confidence diagnosis when all four classes are present and support it. Missing telemetry produces `status="abstain"`; it never substitutes an LLM guess for absent evidence. A real symptom with contradictory causal evidence also abstains. A healthy symptom metric returns `status="no_incident"`.
+
+This split is intentional: Gemini can later decide *which incident workflow to invoke, summarize the evidence, and communicate with operators*, while the production-safety invariant stays deterministic and testable.
+
 ## Gate A PromQL evidence set
 
 ```promql
-rate(video_frames_dropped_total{production_id="broadcast-alpha",feed_id="cam-3"}[1m])
+rate(video_frames_dropped_total{production_id="broadcast-alpha",feed_id="cam-3"}[2m])
+```
+
+```promql
+network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}
 ```
 
 ```promql
@@ -80,22 +97,24 @@ encoder_gpu_percent{production_id="broadcast-alpha",feed_id="cam-3"}
 ```
 
 ```promql
-network_packet_loss_percent{production_id="broadcast-alpha"}
+network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-a"}
 ```
 
 ```promql
-sum by (feed_id) (rate(video_frames_dropped_total{production_id="broadcast-alpha"}[1m]))
+max(rate(video_frames_dropped_total{production_id="broadcast-alpha",feed_id=~"cam-1|cam-2"}[2m]))
 ```
-
-The fixture exposes four evidence classes: Camera 3 symptom, `uplink-b` causal signal, normal Camera 3 encoder utilization as contradiction evidence, and healthy Camera 1/2 peers.
 
 ## Tests
 
-No third-party Python packages are required for the simulator tests:
+No third-party Python packages are required for the current runtime tests:
 
 ```bash
 python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py
+python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/investigator.py
 ```
 
-The next implementation step after Gate A passes is a bounded StageGuard investigation agent that executes the four evidence queries through MCP, scores evidence completeness, and abstains when required evidence is missing.
+`test_investigator.py` covers the successful four-evidence diagnosis, healthy state, missing causal evidence, missing contradiction evidence, contradictory cause evidence, and the fixed six-query budget.
+
+## Next implementation step
+
+After Gate A is executed on a Docker-capable host, adapt the actual `query_prometheus` MCP response into `MetricQueryClient.instant`. Do not couple the investigator to an assumed MCP payload shape before that real response is captured. Then run the same investigator tests against the official MCP transport and add recovery verification as a separate post-approval state transition.
