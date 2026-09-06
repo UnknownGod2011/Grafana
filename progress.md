@@ -2,24 +2,22 @@
 
 ## Current status
 
-StageGuard is a personal open-source project with an executable local telemetry slice, official Grafana MCP path, deterministic bounded incident investigator, MCP-to-investigator metric adapter, and approval-gated remediation/recovery verification.
+StageGuard is a personal open-source project with an executable local telemetry slice, official Grafana MCP path, deterministic bounded incident investigator, MCP-to-investigator metric adapter, approval-gated remediation/recovery verification, an audited incident orchestration service, and a narrow HTTP API.
 
 Current vertical slice:
 
-`deterministic simulator → Prometheus → Grafana → official Grafana MCP → McpPrometheusMetricClient → bounded four-evidence investigator → explicit human approval → separate remediation adapter → bounded telemetry recovery verification`
+`deterministic simulator → Prometheus → Grafana → official Grafana MCP → McpPrometheusMetricClient → bounded four-evidence investigator → IncidentService → evidence-revision-bound human approval → separate remediation adapter → telemetry recovery verification → append-only audit`
 
-Core design intent remains: Grafana is the read-only evidence plane; consequential writes use separate credentials/adapters; missing evidence causes abstention; and an action API success never counts as recovery.
+Core safety decisions remain locked:
 
-## Locked product decisions
-
-- Primary use case: live media/broadcast incident response.
-- Seeded incident: `cam-3` frame drops caused by `uplink-b` packet loss while encoder CPU/GPU remain healthy.
-- High-confidence diagnosis requires symptom, causal, contradiction, and healthy-peer evidence.
-- Missing required evidence causes explicit abstention; an LLM must not fill evidence gaps with guesses.
-- Grafana is the evidence plane; remediation credentials stay separate.
-- Human approval precedes consequential remediation.
-- Recovery must be verified from telemetry, not inferred from an action response.
-- Recovery requires multiple consecutive healthy samples so one transient datapoint cannot close an incident.
+- Grafana is the read-only evidence plane.
+- Consequential writes use separate credentials/adapters.
+- Missing required evidence causes abstention.
+- Callers cannot submit arbitrary PromQL or arbitrary remediation actions through the incident API.
+- Human approval must match the exact current incident evidence revision.
+- Approval is single-use and is invalidated by a fresh investigation.
+- An action API success never counts as recovery.
+- Recovery requires multiple consecutive healthy telemetry samples.
 - Real-user onboarding must support existing telemetry through mappings rather than forcing metric renames.
 
 ---
@@ -30,7 +28,7 @@ Core design intent remains: Grafana is the read-only evidence plane; consequenti
 
 Added deterministic broadcast simulator, Prometheus scrape configuration, provisioned Grafana datasource UID `stageguard-prometheus`, Docker Compose stack, local runtime documentation, and simulator tests. The simulator exposes Camera 3 dropped frames, encoder CPU/GPU, uplink packet loss, output bitrate, scenario state, and fault/recovery controls.
 
-Previously verified:
+Previously verified on an executable host:
 
 ```text
 python -m unittest discover -s runtime/tests -v
@@ -42,15 +40,17 @@ OK
 
 Added `runtime/bootstrap_grafana.py`, `runtime/mcp_smoke.py`, gitignored local secrets, and opt-in official `grafana/mcp-grafana:1.1.0` Compose profile. MCP is constrained with `--disable-write`, `datasource,prometheus` tool categories only, and proxied tools disabled. The bootstrap creates/reuses a Viewer-only service account with a short-lived token and refuses remote bootstrap unless explicitly opted in.
 
-Full Docker/Grafana/MCP Gate A remains unexecuted in the automation environment because no Docker daemon/networked clone is reachable.
-
 ### 2026-09-06 — bounded incident investigator
 
-Added `runtime/investigator.py` and tests. The investigator performs exactly six fixed PromQL reads, requires all four evidence classes for diagnosis, returns `no_incident` for a healthy symptom signal, and explicitly abstains on missing or contradictory evidence.
+Added `runtime/investigator.py` and tests. The investigator performs exactly six fixed PromQL reads, requires symptom + causal + contradiction + healthy-peer evidence for diagnosis, returns `no_incident` for a healthy symptom signal, and explicitly abstains on missing or contradictory evidence.
 
 ### 2026-09-06 — official MCP metric adapter
 
-Added `runtime/mcp_metric_client.py` and parser/safety tests. The adapter initializes one MCP session, verifies `query_prometheus` is read-only, calls only that tool for the fixed datasource/query contract, parses pinned v1.1.0 response envelopes, rejects ambiguous/malformed results, distinguishes empty telemetry from tool failure, and records per-query latency/value provenance.
+Added `runtime/mcp_metric_client.py` and parser/safety tests. The adapter initializes one MCP session, verifies `query_prometheus` is read-only, calls only that tool for the fixed datasource/query contract, parses the pinned v1.1.0 result envelopes, rejects ambiguous/malformed results, distinguishes empty telemetry from tool failure, and records per-query latency/value provenance.
+
+### 2026-09-06 — approval-gated remediation and recovery verification
+
+Added `runtime/remediation.py` and deterministic tests. The write-capable `RemediationClient` boundary is separate from Grafana. Remediation requires an exact diagnosed incident and explicit matching approval. Recovery is independently verified from bounded packet-loss + dropped-frame telemetry and requires consecutive healthy samples; missing telemetry resets the healthy streak. The local `SimulatorRemediationClient` refuses non-loopback targets.
 
 Official implementation references retained:
 
@@ -61,64 +61,109 @@ Official implementation references retained:
 
 ---
 
-## Run log — 2026-09-06 — approval-gated remediation and recovery verification
+## Run log — 2026-09-06 — audited incident orchestration + narrow API
 
 ### Inspected at start
 
-Read `progress.md` completely. Inspected `runtime/investigator.py`, `runtime/simulator.py`, and the current runtime directory before choosing the next implementation target. The previous run's single best next step was unblocked without Docker: implement mandatory approval, a separate write boundary, and telemetry-only recovery verification.
+Read `progress.md` completely before choosing work. Inspected:
+
+- `runtime/investigator.py`
+- `runtime/remediation.py`
+- `runtime/tests/test_remediation.py`
+- `runtime/README.md`
+- root `README.md`
+
+The previous run's single best next step was still the highest-value unblocked work: compose the deterministic diagnosis/approval/remediation/recovery boundaries into one service with an append-only audit trail and safe API surface.
 
 ### Exact changes made
 
-Added `runtime/remediation.py`:
+Added `runtime/incident_service.py`:
 
-- defines a `RemediationClient` protocol separate from the read-only `MetricQueryClient` evidence boundary;
-- defines explicit `Approval`, `ActionResult`, `RecoverySample`, and `RemediationOutcome` records;
-- refuses to execute unless the incident is actually `diagnosed`, the hypothesis exactly matches the seeded uplink-loss diagnosis, approval is explicit, the approver identity is non-empty, and action/production/target all match;
-- executes exactly one approved `recover_uplink` action;
-- never treats `ActionResult.accepted=True` as recovery;
-- verifies recovery from exactly two bounded post-action PromQL signals: `uplink-b` packet loss and Camera 3 dropped-frame rate;
-- requires both signals to be observable and below threshold for two consecutive samples by default;
-- resets the healthy streak on missing/unhealthy telemetry;
-- returns `recovery_unverified` and keeps the incident logically open when telemetry does not prove recovery within the bounded window;
-- includes a `SimulatorRemediationClient` for the deterministic local demo that can call `/scenario/recover` but deliberately refuses non-loopback targets, preventing this demo adapter from becoming an accidental remote actuator.
+- introduces `IncidentService` as the lifecycle boundary for investigate → approve → execute → verify;
+- creates an incident ID on first investigation and a deterministic SHA-256-derived evidence revision from the complete `IncidentReport`;
+- binds approval to both the exact `incident_id` and current evidence `revision`;
+- rejects approval for `abstain`/`no_incident` states;
+- invalidates any previous approval/outcome whenever a fresh investigation runs;
+- makes approvals single-use by refusing a second execution after an outcome exists;
+- delegates evidence collection only to the existing fixed `investigate()` function, so the service cannot broaden the six-query PromQL budget;
+- delegates consequential action/recovery only to the existing `remediate_and_verify()` policy;
+- adds `AuditEvent`, `AuditSink`, deterministic `MemoryAuditLog`, and local `JsonlAuditLog`;
+- `JsonlAuditLog` uses append mode, never truncates an existing audit file, creates it with owner-only permissions, fsyncs each event, and stores deterministic JSONL;
+- records `investigation_completed`, `remediation_approved`, and `remediation_completed` lifecycle events with monotonically increasing sequence numbers;
+- deliberately documents JSONL as a local-development primitive rather than claiming it is an immutable production audit store.
 
-Added `runtime/tests/test_remediation.py` with six deterministic policy tests:
+Added `runtime/tests/test_incident_service.py` with deterministic service-level coverage for:
 
-1. no action without explicit approval;
-2. mismatched target cannot execute;
-3. successful action response alone is not recovery;
-4. recovery requires consecutive healthy samples;
-5. missing telemetry resets the healthy streak;
-6. rejected remediation does not trigger recovery queries.
+1. full diagnose → approve → act → telemetry-verified recovery lifecycle;
+2. stale evidence revision rejection;
+3. inability to approve an abstained incident;
+4. execution refusal without approval;
+5. single-use approval/remediation;
+6. fresh investigation invalidating previous approval;
+7. JSONL audit re-open preserving existing records instead of truncating them.
 
-### Tests/results
+Added `runtime/api.py`:
 
-The tests are standard-library-only, but this automation execution environment still has no checked-out repository/Docker runtime, so this run did not claim an executed test pass.
+- exposes only `GET /healthz`, `GET /v1/incident`, `POST /v1/investigate`, `POST /v1/approve`, and `POST /v1/execute`;
+- does not expose generic PromQL, datasource selection, action names, or remediation targets;
+- rejects unexpected JSON fields rather than silently accepting future/untrusted capability expansion;
+- limits request bodies to 16 KiB and requires JSON objects for body-bearing calls;
+- approval accepts only `incident_id`, `revision`, and `approved_by`;
+- returns conflict semantics for invalid lifecycle state and avoids leaking internal transport/credential exceptions;
+- sends `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`;
+- defaults the server bind to loopback and suppresses default HTTP logging that could accidentally emit operator identifiers.
 
-Verification command for the next executable host:
+Refreshed root `README.md`:
+
+- removed the obsolete hackathon-target/restriction framing;
+- explicitly describes StageGuard as a personal open-source project;
+- documents the actually implemented runtime instead of calling the repo specification-only;
+- documents the new trust boundaries and narrow incident API;
+- records current local runtime commands, repository structure, tests, real-user integration direction, and near-term roadmap.
+
+### Tests / checks / results
+
+Attempted to clone the updated repository into the execution container and run:
 
 ```text
 python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/remediation.py runtime/investigator.py runtime/mcp_metric_client.py
 ```
 
-Then run the simulator + Prometheus + Grafana/MCP stack, diagnose the seeded incident, build explicit approval, invoke `SimulatorRemediationClient`, and observe that recovery is not returned until both post-action metrics remain healthy for two consecutive polls.
+The clone failed before test execution because the container cannot resolve `github.com`:
+
+```text
+fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com
+```
+
+Therefore this run does **not** claim that the new service/API tests passed. No GitHub Actions workflow or noisy CI job was added just to compensate for the environment limitation.
+
+Recommended verification commands on the next executable host:
+
+```bash
+python -m unittest discover -s runtime/tests -v
+python -m py_compile runtime/*.py
+```
+
+Then run the full local stack, construct `IncidentService` with `McpPrometheusMetricClient` + `SimulatorRemediationClient`, and exercise the lifecycle through the HTTP API.
 
 ### Decisions made
 
-1. Approval is a deterministic policy object, not free-form LLM text.
-2. The write-capable remediation adapter is structurally separate from Grafana/MCP read credentials.
-3. Recovery is telemetry-derived and requires a streak, not one point-in-time sample.
-4. Missing recovery telemetry is unsafe and resets the healthy streak instead of being interpreted as healthy.
-5. The demo write adapter is loopback-only; any real production actuator must be a separate authenticated implementation.
+1. Human authorization is bound to immutable evidence identity (`incident_id` + evidence revision), not merely to an action string.
+2. A fresh investigation invalidates old authorization because the evidence may have changed.
+3. Approval consumption is one-shot; repeated `/execute` calls cannot repeat the consequential action.
+4. The API uses typed lifecycle operations, not generic tool/query passthrough.
+5. Audit persistence is append-only in the local reference implementation, but production deployment must replace/augment JSONL with durable access-controlled storage.
+6. Gemini remains outside the safety-critical policy boundary; it may later summarize, communicate, and select among explicit workflows, but it cannot bypass evidence/approval/action constraints.
 
 ### Current blockers / unknowns
 
 - Full Compose startup and end-to-end Gate A remain unverified on a Docker-capable host.
-- The six-query diagnosis and two-query post-action recovery loop have not yet been executed through a live `grafana/mcp-grafana:1.1.0` process.
-- The ideal recovery polling interval/window needs measurement against real Prometheus scrape/rate behavior; the current bounded defaults are intentionally conservative scaffolding.
-- Loki corroboration, Gemini orchestration/explanation, durable approval/audit persistence, operator UI/dashboard, production auth/onboarding mappings, and cloud deployment remain future implementation gates.
+- The six-query diagnosis and two-query recovery loop have not yet been executed through a live `grafana/mcp-grafana:1.1.0` process.
+- The newly added service/API tests have not executed in this automation environment because its container cannot resolve GitHub.
+- The HTTP API does not yet authenticate operator identity; loopback-only is the current safe default, and non-loopback production exposure would be unsafe without auth/TLS/reverse-proxy policy.
+- JSONL is not an immutable multi-user production audit backend.
+- Loki corroboration, configurable telemetry mappings, Gemini orchestration/explanation, operator UI/dashboard, production auth/onboarding, and Google Cloud deployment remain implementation gates.
 
 ## Single best next step
 
-**Implement a small incident orchestration service/API that composes `investigate()`, explicit approval creation, the remediation state machine, and an append-only audit record. Keep Gemini optional and explanation-only at first. Expose safe read/status endpoints plus an approval endpoint, and ensure the API cannot execute remediation from arbitrary user-supplied action names or PromQL. Add deterministic service-level tests so the full diagnose → approve → act → verify lifecycle works locally without Docker credentials.**
+**Implement authenticated operator identity for the incident API without introducing a paid dependency: add a small pluggable `IdentityProvider` boundary, a safe local development identity mode, and service/API tests proving that approval identity comes from trusted authentication context rather than an arbitrary `approved_by` request-body string. Keep the API loopback-only by default and refuse non-loopback startup unless an explicit authentication provider is configured.**
