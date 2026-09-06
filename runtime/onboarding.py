@@ -86,18 +86,20 @@ def load_telemetry_profile(path: str | Path) -> TelemetryProfile:
     unknown_profile = set(profile_data) - _PROFILE_FIELDS
     if unknown_profile:
         raise ValueError(f"unknown profile field(s): {', '.join(sorted(unknown_profile))}")
+    missing_profile = _PROFILE_FIELDS - set(profile_data)
+    if missing_profile:
+        raise ValueError(f"missing profile field(s): {', '.join(sorted(missing_profile))}")
 
     required_string_fields = _PROFILE_FIELDS - {"healthy_peer_feeds"}
-    for key in required_string_fields & set(profile_data):
+    for key in required_string_fields:
         if not isinstance(profile_data[key], str):
             raise ValueError(f"profile.{key} must be a string")
 
-    if "healthy_peer_feeds" in profile_data:
-        peers = profile_data["healthy_peer_feeds"]
-        if not isinstance(peers, list) or not all(isinstance(item, str) for item in peers):
-            raise ValueError("profile.healthy_peer_feeds must be an array of strings")
-        profile_data = dict(profile_data)
-        profile_data["healthy_peer_feeds"] = tuple(peers)
+    peers = profile_data["healthy_peer_feeds"]
+    if not isinstance(peers, list) or not all(isinstance(item, str) for item in peers):
+        raise ValueError("profile.healthy_peer_feeds must be an array of strings")
+    profile_data = dict(profile_data)
+    profile_data["healthy_peer_feeds"] = tuple(peers)
 
     return TelemetryProfile(**profile_data)
 
