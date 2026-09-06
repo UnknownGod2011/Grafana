@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from activation import ActivationRecord, verify_activation_record
 from investigator import IncidentReport, MetricQueryClient, investigate
 from remediation import Approval, RemediationClient, RemediationOutcome, remediate_and_verify, required_approval
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
@@ -82,7 +83,12 @@ def _revision(report: IncidentReport) -> str:
 
 
 class IncidentService:
-    """Single-profile incident lifecycle with fail-closed approval semantics."""
+    """Single-profile incident lifecycle with fail-closed approval semantics.
+
+    The built-in deterministic demo profile may run without an activation artifact.
+    Every non-default production mapping must present a matching, non-stale record
+    produced by the eight-slot onboarding preflight before the service can start.
+    """
 
     def __init__(
         self,
@@ -91,14 +97,40 @@ class IncidentService:
         audit: AuditSink,
         *,
         telemetry_profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
+        activation_record: ActivationRecord | None = None,
+        datasource_identity: str | None = None,
+        activation_now_unix: int | None = None,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
         recovery_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        is_demo_profile = telemetry_profile == DEFAULT_TELEMETRY_PROFILE
+        if not is_demo_profile:
+            if activation_record is None or datasource_identity is None:
+                raise ValueError(
+                    "non-default telemetry profiles require a successful activation preflight record"
+                )
+            verify_activation_record(
+                activation_record,
+                telemetry_profile,
+                datasource_identity,
+                now_unix=activation_now_unix,
+            )
+        elif activation_record is not None:
+            if datasource_identity is None:
+                raise ValueError("datasource_identity is required when activation_record is supplied")
+            verify_activation_record(
+                activation_record,
+                telemetry_profile,
+                datasource_identity,
+                now_unix=activation_now_unix,
+            )
+
         self._metrics = metrics
         self._remediation = remediation
         self._audit = audit
         self._profile = telemetry_profile
+        self._activation = activation_record
         self._clock_ms = clock_ms
         self._id_factory = id_factory
         self._recovery_sleep = recovery_sleep
@@ -120,8 +152,20 @@ class IncidentService:
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
             self._snapshot = snapshot
-            self._record(incident_id, "investigation_completed", actor.strip() or "stageguard",
-                {"revision": snapshot.revision, "status": report.status, "confidence": report.confidence})
+            payload = {
+                "revision": snapshot.revision,
+                "status": report.status,
+                "confidence": report.confidence,
+            }
+            if self._activation is not None:
+                payload["activation_profile_sha256"] = self._activation.profile_sha256
+                payload["activation_datasource_sha256"] = self._activation.datasource_sha256
+            self._record(
+                incident_id,
+                "investigation_completed",
+                actor.strip() or "stageguard",
+                payload,
+            )
             return snapshot
 
     def approve(self, *, incident_id: str, revision: str, approved_by: str) -> IncidentSnapshot:
@@ -138,8 +182,12 @@ class IncidentService:
                 raise ValueError("only a diagnosed incident can be approved for remediation")
             approval = required_approval(snapshot.report, actor, True, self._profile)
             self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, approval, None)
-            self._record(snapshot.incident_id, "remediation_approved", actor,
-                {"revision": snapshot.revision, "action": approval.action, "target": approval.target})
+            self._record(
+                snapshot.incident_id,
+                "remediation_approved",
+                actor,
+                {"revision": snapshot.revision, "action": approval.action, "target": approval.target},
+            )
             return self._snapshot
 
     def execute_approved(self, *, actor: str = "stageguard") -> IncidentSnapshot:
@@ -149,11 +197,30 @@ class IncidentService:
                 raise RuntimeError("matching explicit approval is required before remediation")
             if snapshot.outcome is not None:
                 raise RuntimeError("this approval has already been consumed")
-            outcome = remediate_and_verify(snapshot.report, snapshot.approval, self._remediation, self._metrics,
-                profile=self._profile, sleep=self._recovery_sleep)
-            self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report,
-                snapshot.approval, outcome)
-            self._record(snapshot.incident_id, "remediation_completed", actor.strip() or "stageguard",
-                {"revision": snapshot.revision, "status": outcome.status, "sample_count": len(outcome.samples),
-                 "action_accepted": bool(outcome.action_result and outcome.action_result.accepted)})
+            outcome = remediate_and_verify(
+                snapshot.report,
+                snapshot.approval,
+                self._remediation,
+                self._metrics,
+                profile=self._profile,
+                sleep=self._recovery_sleep,
+            )
+            self._snapshot = IncidentSnapshot(
+                snapshot.incident_id,
+                snapshot.revision,
+                snapshot.report,
+                snapshot.approval,
+                outcome,
+            )
+            self._record(
+                snapshot.incident_id,
+                "remediation_completed",
+                actor.strip() or "stageguard",
+                {
+                    "revision": snapshot.revision,
+                    "status": outcome.status,
+                    "sample_count": len(outcome.samples),
+                    "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
+                },
+            )
             return self._snapshot
