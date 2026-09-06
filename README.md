@@ -14,9 +14,10 @@ deterministic broadcast simulator
   → Grafana
   → official grafana/mcp-grafana
   → strict telemetry-profile onboarding + eight-read preflight
+  → hash-pinned, time-bounded activation record
   → McpPrometheusMetricClient
   → bounded six-read investigator
-  → IncidentService
+  → activation-enforced IncidentService
   → authenticated operator identity
   → evidence-revision-bound human approval
   → separate remediation adapter
@@ -34,12 +35,13 @@ StageGuard keeps observation, authorization, and action structurally separate.
 |---|---|
 | Grafana / MCP | Read-only evidence plane with least-privilege credentials |
 | Onboarding | Versioned strict mapping; all semantic bindings explicit; exactly eight bounded checks must resolve before activation |
+| Activation | Complete profile + datasource identity are SHA-256 pinned to a successful, time-bounded preflight; non-demo runtime refuses drift/staleness |
 | Investigation | Fixed/bounded evidence contracts; missing evidence causes abstention |
 | Identity | Operator identity comes from a configured authentication provider, never request JSON |
 | Approval | Explicit approval bound to exact incident + evidence revision; approval is single-use |
 | Remediation | Separate write-capable adapter; no arbitrary action names/targets from callers |
 | Recovery | Action success is never recovery; Grafana/Prometheus telemetry must prove health |
-| Audit | Lifecycle events are appended with the trusted actor identity |
+| Audit | Lifecycle events are appended with the trusted actor identity and activation hashes when production activation is present |
 
 The current investigator performs exactly six PromQL reads covering symptom, causal signal, contradiction evidence, and healthy-peer evidence. It emits `abstain` instead of allowing Gemini or another LLM to invent missing operational evidence.
 
@@ -50,12 +52,19 @@ Real productions do not need to rename their metrics or labels. Copy `runtime/te
 With least-privilege Grafana MCP credentials configured, run:
 
 ```bash
-python runtime/preflight.py runtime/telemetry.example.json
+python runtime/preflight.py runtime/telemetry.example.json \
+  --activation-output .stageguard/activation.json
 ```
 
 Preflight executes exactly eight read-only semantic checks: the same six investigation slots plus the same two recovery slots used at runtime. A slot is `missing` if no sample exists and `error` if the metric adapter rejects the result, including ambiguous multi-series results. StageGuard reports `ready: true` only when all eight slots resolve to exactly one numeric observation. Preflight never performs remediation and does not prove an incident exists; it proves that the configured evidence contract is scoped and queryable.
 
-Exit codes are `0` for ready, `2` for configuration/transport setup failure, and `3` when the profile is valid but evidence coverage is incomplete or ambiguous.
+When `--activation-output` is supplied and all eight checks pass, the CLI writes a versioned activation record that binds the validated `TelemetryProfile` and the configured Grafana datasource UID by SHA-256, records the successful semantic-slot digest, and expires after 24 hours by default. `--ttl-seconds` may shorten the window or extend it up to seven days. A failed/partial preflight never writes a usable activation record.
+
+`IncidentService` treats the built-in deterministic fixture as an explicit local demo exception. Any non-default production mapping must present a matching, non-stale activation record plus the same datasource identity at construction time. Changing a metric, label, production/feed/uplink binding, peer set, datasource UID, or allowing the activation to expire causes startup to fail closed and requires preflight to be rerun.
+
+The activation artifact is a drift-prevention record, not a digital signature or substitute for host/file integrity controls. Production deployments should protect it using normal workload identity, filesystem/container policy, and tamper-resistant deployment configuration.
+
+Exit codes are `0` for ready, `2` for configuration/transport/activation-output failure, and `3` when the profile is valid but evidence coverage is incomplete or ambiguous.
 
 ## Authenticated incident API
 
@@ -92,11 +101,12 @@ Bootstrap the least-privilege local Grafana MCP credential:
 python runtime/bootstrap_grafana.py
 ```
 
-Then prove a real official-MCP metric read:
+Then prove a real official-MCP metric read and create an activation artifact:
 
 ```bash
 python runtime/mcp_smoke.py
-python runtime/preflight.py runtime/telemetry.example.json
+python runtime/preflight.py runtime/telemetry.example.json \
+  --activation-output .stageguard/activation.json
 ```
 
 The MCP Compose profile is opt-in and constrained to read-only datasource/Prometheus capabilities. Secrets live under a gitignored local secrets directory and are not printed by the bootstrap path.
@@ -105,23 +115,24 @@ See [`runtime/README.md`](runtime/README.md) for the detailed local workflow and
 
 ## Real-user integration direction
 
-StageGuard works toward Grafana Cloud or self-hosted Grafana integration without forcing teams to rename telemetry. `TelemetryProfile` maps existing production/feed/uplink identities, metric names, and label keys into StageGuard's fixed semantic evidence contract; `runtime/onboarding.py` provides the strict local configuration and activation-preflight boundary.
+StageGuard works toward Grafana Cloud or self-hosted Grafana integration without forcing teams to rename telemetry. `TelemetryProfile` maps existing production/feed/uplink identities, metric names, and label keys into StageGuard's fixed semantic evidence contract; `runtime/onboarding.py` provides the strict local configuration and activation-preflight boundary; `runtime/activation.py` pins that successful preflight to the runtime profile and datasource.
 
-A production deployment should provide least-privilege Grafana/MCP access, a real operator authentication provider, separate credentials per allowlisted remediation adapter, production-specific telemetry mappings, durable tamper-resistant audit storage, TLS/reverse-proxy policy, and a successful read-only preflight before write capabilities are enabled.
+A production deployment should provide least-privilege Grafana/MCP access, a real operator authentication provider, separate credentials per allowlisted remediation adapter, production-specific telemetry mappings, a fresh matching activation record, durable tamper-resistant audit storage, and TLS/reverse-proxy policy before write capabilities are enabled.
 
 ## Repository structure
 
 - `runtime/simulator.py` — deterministic media telemetry and controlled fault/recovery fixture
 - `runtime/telemetry.py` — validated semantic telemetry mappings and bounded query builders
 - `runtime/onboarding.py` — strict versioned mapping loader + eight-slot activation preflight
-- `runtime/preflight.py` — operator CLI for real Grafana/MCP readiness checks
+- `runtime/activation.py` — profile/datasource activation pinning, persistence, expiry, and runtime verification
+- `runtime/preflight.py` — operator CLI for real Grafana/MCP readiness checks + activation artifact creation
 - `runtime/mcp_metric_client.py` — official Grafana MCP → metric client adapter
 - `runtime/investigator.py` — bounded incident evidence policy
 - `runtime/remediation.py` — approval-gated action + telemetry recovery verification
-- `runtime/incident_service.py` — lifecycle orchestration and append-only audit boundary
+- `runtime/incident_service.py` — activation-enforced lifecycle orchestration and append-only audit boundary
 - `runtime/identity.py` — pluggable trusted operator identity providers
 - `runtime/api.py` — narrow authenticated HTTP API
-- `runtime/tests/` — deterministic policy/service/API/onboarding tests
+- `runtime/tests/` — deterministic policy/service/API/onboarding/activation tests
 - `runtime/grafana/`, `runtime/prometheus/` — local observability provisioning
 - `ARCHITECTURE.md` — architecture and trust-boundary detail
 - `progress.md` — exact implementation/run log and next step
@@ -139,7 +150,7 @@ The Docker → Grafana → official MCP gate still requires a Docker-capable hos
 
 ## Near-term roadmap
 
-1. execute the complete official-MCP onboarding/diagnosis/remediation/recovery path on a Docker-capable host and capture real latency/tool traces;
+1. execute the complete official-MCP onboarding/activation/diagnosis/remediation/recovery path on a Docker-capable host and capture real latency/tool traces;
 2. add Loki corroboration and evidence provenance across metrics + logs;
 3. place Gemini above the deterministic safety core for incident summarization, bounded workflow selection, and operator communication;
 4. build the authenticated operator incident console and durable audit/deployment path on Google Cloud;
@@ -156,4 +167,4 @@ The Docker → Grafana → official MCP gate still requires a Docker-capable hos
 
 ## Project status
 
-StageGuard is under active development. The deterministic local incident lifecycle is implemented through strict telemetry onboarding/preflight, investigation, authenticated evidence-revision-bound approval, remediation, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
+StageGuard is under active development. The deterministic local incident lifecycle is implemented through strict telemetry onboarding/preflight, hash-pinned activation, investigation, authenticated evidence-revision-bound approval, remediation, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
