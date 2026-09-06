@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "profile": {
+    "production_id": "broadcast-alpha",
+    "affected_feed": "cam-3",
+    "affected_uplink": "uplink-b",
+    "healthy_uplink": "uplink-a",
+    "healthy_peer_feeds": ["cam-1", "cam-2"],
+    "dropped_frames_metric": "video_frames_dropped_total",
+    "packet_loss_metric": "network_packet_loss_percent",
+    "cpu_metric": "encoder_cpu_percent",
+    "gpu_metric": "encoder_gpu_percent",
+    "production_label": "production_id",
+    "feed_label": "feed_id",
+    "uplink_label": "uplink"
+  }
+}
