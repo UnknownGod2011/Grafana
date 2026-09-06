@@ -134,6 +134,8 @@ python runtime/bootstrap.py \
 
 Without `--enable-production-remediation`, production writes remain disabled even when remediation environment variables are present. The demo profile explicitly refuses the production-write opt-in.
 
+For credential-free contract testing, `runtime/remediation_receiver.py` provides a loopback-only reference receiver. It validates bearer authentication, request schema, and `Idempotency-Key`; stores only in-memory operation identities; accepts exact retries idempotently; rejects reuse of an operation ID for a different mutation; and never touches real infrastructure.
+
 ## Authenticated incident API
 
 `runtime/api.py` exposes only:
@@ -194,6 +196,7 @@ See [`runtime/README.md`](runtime/README.md) for the detailed local workflow and
 - `runtime/remediation.py` — approval-gated action dispatch, deterministic operation identity, and telemetry recovery verification
 - `runtime/production_remediation.py` — allowlisted production write policy with injected deployment transport
 - `runtime/http_remediation_transport.py` — strict credential-isolated HTTPS transport and server idempotency contract
+- `runtime/remediation_receiver.py` — loopback-only reference receiver for server-side idempotency testing
 - `runtime/incident_service.py` — activation-enforced lifecycle orchestration and append-only audit boundary
 - `runtime/identity.py` — pluggable trusted operator identity providers
 - `runtime/api.py` — narrow authenticated HTTP API
@@ -216,10 +219,10 @@ The Docker → Grafana → official MCP gate still requires a Docker-capable hos
 ## Near-term roadmap
 
 1. execute the complete official-MCP onboarding/activation/bootstrap/diagnosis/approval/recovery path on a Docker-capable host and capture real latency/tool traces;
-2. provide a tiny reference remediation receiver that demonstrates the server-side idempotency contract without real infrastructure mutation;
-3. add Loki corroboration and evidence provenance across metrics + logs;
-4. place Gemini above the deterministic safety core for incident summarization, bounded workflow selection, and operator communication;
-5. build the authenticated operator incident console, OIDC/IAP identity, durable audit storage, and Google Cloud deployment path.
+2. add Loki corroboration and evidence provenance across metrics + logs;
+3. place Gemini above the deterministic safety core for incident summarization, bounded workflow selection, and operator communication;
+4. build the authenticated operator incident console, OIDC/IAP identity, durable audit storage, and Google Cloud deployment path;
+5. add a deployment example that replaces the reference receiver with a real provider-controlled remediation endpoint while preserving the same idempotency contract.
 
 ## Official references
 
@@ -232,4 +235,4 @@ The Docker → Grafana → official MCP gate still requires a Docker-capable hos
 
 ## Project status
 
-StageGuard is under active development. The deterministic incident lifecycle now includes strict telemetry onboarding/preflight, hash-pinned activation, canonical fail-closed runtime bootstrap, bounded investigation, authenticated evidence-revision-bound approval, governed idempotent production-remediation policy, an explicit credential-isolated HTTPS write transport, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
+StageGuard is under active development. The deterministic incident lifecycle now includes strict telemetry onboarding/preflight, hash-pinned activation, canonical fail-closed runtime bootstrap, bounded investigation, authenticated evidence-revision-bound approval, governed idempotent production-remediation policy, an explicit credential-isolated HTTPS write transport, a loopback reference idempotency receiver, telemetry-based recovery verification, and append-only audit logging. The major unproven integration gate remains executing that lifecycle through a live `grafana/mcp-grafana:1.1.0` process on a Docker-capable host.
