@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Audited StageGuard incident lifecycle orchestration.
-
-The service intentionally exposes typed operations instead of generic query or
-action execution. Callers can request the fixed investigation, inspect the
-current incident, approve the one policy-selected remediation, and execute it.
-PromQL and remediation action names are never accepted from user input.
-"""
+"""Audited StageGuard incident lifecycle orchestration."""
 from __future__ import annotations
 
 import hashlib
@@ -20,6 +14,7 @@ from typing import Callable, Protocol
 
 from investigator import IncidentReport, MetricQueryClient, investigate
 from remediation import Approval, RemediationClient, RemediationOutcome, remediate_and_verify, required_approval
+from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
 
 class AuditSink(Protocol):
@@ -37,8 +32,6 @@ class AuditEvent:
 
 
 class MemoryAuditLog:
-    """Deterministic audit sink for tests/local embedding."""
-
     def __init__(self) -> None:
         self.events: list[AuditEvent] = []
 
@@ -47,12 +40,7 @@ class MemoryAuditLog:
 
 
 class JsonlAuditLog:
-    """Append-only JSONL audit sink with owner-only file permissions.
-
-    This is intentionally a local-development persistence primitive, not a
-    substitute for an immutable production audit store. Existing files are
-    never truncated by this class.
-    """
+    """Append-only local-development audit sink with owner-only permissions."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -94,7 +82,7 @@ def _revision(report: IncidentReport) -> str:
 
 
 class IncidentService:
-    """Single-production incident lifecycle with fail-closed approval semantics."""
+    """Single-profile incident lifecycle with fail-closed approval semantics."""
 
     def __init__(
         self,
@@ -102,6 +90,7 @@ class IncidentService:
         remediation: RemediationClient,
         audit: AuditSink,
         *,
+        telemetry_profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
         recovery_sleep: Callable[[float], None] = time.sleep,
@@ -109,6 +98,7 @@ class IncidentService:
         self._metrics = metrics
         self._remediation = remediation
         self._audit = audit
+        self._profile = telemetry_profile
         self._clock_ms = clock_ms
         self._id_factory = id_factory
         self._recovery_sleep = recovery_sleep
@@ -125,26 +115,16 @@ class IncidentService:
             return self._snapshot
 
     def investigate(self, actor: str = "stageguard") -> IncidentSnapshot:
-        """Execute the fixed six-query investigation policy.
-
-        A fresh diagnosis invalidates any previous approval/outcome. This avoids
-        carrying authorization across changing telemetry evidence.
-        """
         with self._lock:
-            report = investigate(self._metrics)
+            report = investigate(self._metrics, self._profile)
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
             self._snapshot = snapshot
-            self._record(
-                incident_id,
-                "investigation_completed",
-                actor.strip() or "stageguard",
-                {"revision": snapshot.revision, "status": report.status, "confidence": report.confidence},
-            )
+            self._record(incident_id, "investigation_completed", actor.strip() or "stageguard",
+                {"revision": snapshot.revision, "status": report.status, "confidence": report.confidence})
             return snapshot
 
     def approve(self, *, incident_id: str, revision: str, approved_by: str) -> IncidentSnapshot:
-        """Approve only the policy-selected action for the exact current evidence revision."""
         with self._lock:
             snapshot = self._snapshot
             if snapshot is None:
@@ -156,51 +136,24 @@ class IncidentService:
                 raise ValueError("approved_by is required")
             if snapshot.report.status != "diagnosed":
                 raise ValueError("only a diagnosed incident can be approved for remediation")
-
-            approval = required_approval(snapshot.report, actor, True)
-            self._snapshot = IncidentSnapshot(
-                snapshot.incident_id, snapshot.revision, snapshot.report, approval, None
-            )
-            self._record(
-                snapshot.incident_id,
-                "remediation_approved",
-                actor,
-                {"revision": snapshot.revision, "action": approval.action, "target": approval.target},
-            )
+            approval = required_approval(snapshot.report, actor, True, self._profile)
+            self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, approval, None)
+            self._record(snapshot.incident_id, "remediation_approved", actor,
+                {"revision": snapshot.revision, "action": approval.action, "target": approval.target})
             return self._snapshot
 
     def execute_approved(self, *, actor: str = "stageguard") -> IncidentSnapshot:
-        """Execute exactly the approved action once and verify recovery from telemetry."""
         with self._lock:
             snapshot = self._snapshot
             if snapshot is None or snapshot.approval is None:
                 raise RuntimeError("matching explicit approval is required before remediation")
             if snapshot.outcome is not None:
                 raise RuntimeError("this approval has already been consumed")
-
-            outcome = remediate_and_verify(
-                snapshot.report,
-                snapshot.approval,
-                self._remediation,
-                self._metrics,
-                sleep=self._recovery_sleep,
-            )
-            self._snapshot = IncidentSnapshot(
-                snapshot.incident_id,
-                snapshot.revision,
-                snapshot.report,
-                snapshot.approval,
-                outcome,
-            )
-            self._record(
-                snapshot.incident_id,
-                "remediation_completed",
-                actor.strip() or "stageguard",
-                {
-                    "revision": snapshot.revision,
-                    "status": outcome.status,
-                    "sample_count": len(outcome.samples),
-                    "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
-                },
-            )
+            outcome = remediate_and_verify(snapshot.report, snapshot.approval, self._remediation, self._metrics,
+                profile=self._profile, sleep=self._recovery_sleep)
+            self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report,
+                snapshot.approval, outcome)
+            self._record(snapshot.incident_id, "remediation_completed", actor.strip() or "stageguard",
+                {"revision": snapshot.revision, "status": outcome.status, "sample_count": len(outcome.samples),
+                 "action_accepted": bool(outcome.action_result and outcome.action_result.accepted)})
             return self._snapshot
