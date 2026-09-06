@@ -10,15 +10,17 @@ StageGuard has moved from an empty repository to an implementation-ready product
 
 Do not build broad UI or multiple scenarios before this works.
 
+The runtime handoff is now concretely specified in `VERTICAL_SLICE_SPEC.md` rather than left as a generic connectivity task.
+
 ---
 
-## Run log — 2026-09-06
+## Run log — 2026-09-06 — initial specification
 
 ### Inspected at start
 
 - Repository `UnknownGod2011/grafana` was empty.
 - No `progress.md`, README, architecture, source code, CI or other files existed.
-- Therefore this run initialized the specification rather than attempting to extend nonexistent work.
+- Therefore the first run initialized the specification rather than attempting to extend nonexistent work.
 
 ### Research completed
 
@@ -34,123 +36,136 @@ Verified against current official sources:
 
 ### Files created
 
-#### `README.md`
-
-Established:
-
-- StageGuard product thesis
-- target users
-- live-production problem
-- observe → investigate → correlate → act → verify workflow
-- primary judge scenario
-- why Grafana is indispensable
-- autonomy/safety tiers
-- real-user onboarding model
-- MVP vertical slice
-- evaluation metrics
-- intended repository structure for the permitted implementation phase
-- current official research links
-
-#### `ARCHITECTURE.md`
-
-Established:
-
-- logical deployment topology
-- production telemetry contract
-- Grafana evidence layer
-- Gemini/ADK responsibilities
-- evidence ledger design
-- operator incident cockpit
-- bounded remediation adapter
-- incident state machine
-- deterministic investigation policy
-- least-privilege/RBAC model
-- prompt-injection and sensitive-telemetry boundary
-- Google + Grafana agent-observability design
-- deployment/onboarding strategy
-- primary, secondary and negative test scenarios
-- evaluation harness
-- P0/P1/P2/P3 implementation order
-- explicit MVP non-goals
-
-#### `DEMO.md`
-
-Established the exact three-minute judge narrative:
-
-1. healthy three-camera broadcast
-2. deterministic uplink-B packet-loss fault
-3. Grafana alert / frame-drop symptom
-4. agent investigates through Grafana MCP
-5. evidence shows network fault rather than encoder overload
-6. human approves reroute of Camera 3
-7. safe remediation adapter executes
-8. StageGuard re-queries Grafana
-9. recovery is verified from telemetry
-10. Grafana agent/MCP observability closes the sponsor story
+- `README.md` — product thesis, target users, workflow, sponsor dependency, onboarding, safety and MVP.
+- `ARCHITECTURE.md` — topology, telemetry contract, evidence ledger, bounded agent policy, RBAC, remediation separation and deployment plan.
+- `DEMO.md` — deterministic three-minute judge narrative.
+- `progress.md` — persistent run handoff.
 
 ### Decisions locked
 
-1. **Primary use case:** live production/broadcast incident response, not generic application SRE.
-2. **Primary demo failure:** Camera 3 frame drops caused by uplink-B packet loss.
-3. **Sponsor dependency:** Grafana is the operational evidence source before and after remediation.
-4. **Safety architecture:** Grafana investigation and remediation are separated; StageGuard does not get arbitrary shell/cloud access.
-5. **Human-in-the-loop:** rerouting a live feed is a human-approved action in the demo.
-6. **Resolution definition:** an incident is resolved only after Grafana telemetry verifies recovery.
-7. **UX:** incident cockpit, not chatbot-first UI.
-8. **Adoption path:** investigation-only mode → recommendations → human-approved actions → selective autonomy.
-9. **Scope discipline:** one excellent vertical slice before additional failure types or broad integration work.
+1. Primary use case is live production/broadcast incident response, not generic application SRE.
+2. Primary demo failure is Camera 3 frame drops caused by uplink-B packet loss.
+3. Grafana is the operational evidence source before and after remediation.
+4. Grafana investigation and remediation are separated; StageGuard does not get arbitrary shell/cloud access.
+5. Rerouting a live feed is human-approved in the demo.
+6. Resolution requires Grafana telemetry verification.
+7. UX is an incident cockpit, not chatbot-first.
+8. Adoption path is investigation-only → recommendations → human-approved actions → selective autonomy.
+9. One excellent vertical slice comes before additional failure types.
 
-### Current blockers / unknowns
+---
 
-1. **No submitted implementation exists yet.** This is intentional because OpenAI tooling must not generate hackathon implementation artifacts under the stated rules; use Gemini CLI/Gemini Code Assist / permitted Google tooling for implementation.
-2. **Grafana environment is not provisioned/connected yet.** Need to decide between hosted Grafana Cloud MCP and official OSS `mcp-grafana` based on the fastest reliable permitted implementation path.
+## Run log — 2026-09-06 — vertical slice contract
+
+### Inspected at start
+
+Read `progress.md`, `README.md`, and `ARCHITECTURE.md` before making changes. The repo already had a strong product/architecture thesis, but the highest-priority blocker was that the P0 runtime gate still left too many implementation decisions implicit: seeded metric names, exact evidence sequence, expected query results, confidence threshold, minimum Grafana permissions, and objective pass/fail criteria were not yet frozen.
+
+### Fresh official research
+
+Re-checked current Grafana documentation on 2026-09-06 and confirmed:
+
+1. Official Grafana MCP currently exposes `query_prometheus` for Prometheus datasource queries and `query_loki_logs` for Loki queries.
+2. Those query tools require `datasources:query` plus an appropriate datasource scope; current docs show datasource-specific scope patterns such as `datasources:uid:<uid>`.
+3. Grafana MCP supports broad dashboard/data-source/alert/incident capabilities, but the first StageGuard gate does not need writes.
+4. The server supports tool restriction and read-only posture. `--disable-write` removes write operations; query execution can be controlled separately.
+5. `run_panel_query` is useful later for replaying the exact query behind an existing Grafana panel, but is disabled by default and is not required for Gate A.
+
+Official references recorded in `VERTICAL_SLICE_SPEC.md`:
+
+- https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
+- https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
+- https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/oss-mcp/configure/enable-and-disable-tools/
+- https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/oss-mcp/guides/run-a-dashboard-panel-query/
+- https://github.com/grafana/mcp-grafana
+
+### New file: `VERTICAL_SLICE_SPEC.md`
+
+This converts the P0 goal into a deterministic implementation handoff.
+
+It now freezes:
+
+- demo production ID: `broadcast-alpha`
+- `cam-1`, `cam-2`, `cam-3`, `uplink-a`, `uplink-b`, `program-out` topology
+- ground-truth incident: packet loss on `uplink-b`, with `cam-3` frame drops and normal encoder CPU/GPU
+- minimum metric contract:
+  - `video_frames_dropped_total`
+  - `encoder_cpu_percent`
+  - `encoder_gpu_percent`
+  - `network_packet_loss_percent`
+  - optional verification metric `output_bitrate_mbps`
+- optional Loki corroboration contract
+- bounded investigation sequence
+- conceptual PromQL for symptom, encoder hypothesis, network hypothesis and peer/blast-radius comparison
+- expected evidence for each query
+- structured diagnosis fields
+- high-confidence evidence threshold
+- explicit `INCONCLUSIVE` behavior when evidence conflicts
+- minimum Grafana MCP tool/RBAC posture
+- connectivity/security facts that must be recorded during implementation
+- Gate A: eligibility/runtime proof
+- Gate B: judge-ready investigation
+- Gate C: approval/remediation/verification
+- judge-visible evidence requirements
+- exact implementation order for permitted Gemini tooling
+
+### Decisions locked this run
+
+1. **Gate A is diagnosis-only.** No remediation until sponsor runtime integration and evidence-grounded diagnosis are proven.
+2. **Four evidence classes define a high-confidence root cause:** symptom, causal network evidence, contradiction of encoder overload, and healthy-peer/blast-radius evidence.
+3. **Hard-coded diagnosis fails Gate A**, even if the output text is correct.
+4. **Prometheus is the minimum required data path.** Loki is recommended for the final demo but not allowed to block the first connectivity proof.
+5. **The P0 MCP posture is least-privilege and read-side only.** Dashboard/incident/admin writes are unnecessary.
+6. **`run_panel_query` is an optimization for judge-facing dashboard parity, not a Gate A dependency.**
+7. **The runtime implementation must record its exact MCP mode, auth method, transport, datasource UIDs, enabled tools and RBAC without committing secrets.**
+
+### Why this is meaningful progress
+
+The next permitted implementation session no longer needs to invent a simulator schema or decide what evidence constitutes success. It can implement one fixed scenario and objectively determine whether the sponsor-critical runtime slice passes.
+
+---
+
+## Current blockers / unknowns
+
+1. **No submitted implementation exists yet.** This remains intentional because OpenAI tooling must not generate hackathon implementation artifacts under the stated rules; use Gemini CLI/Gemini Code Assist / permitted Google tooling for implementation.
+2. **Grafana environment is not provisioned/connected yet.** Choose hosted Grafana Cloud MCP or official OSS `mcp-grafana` based on the fastest reliable permitted implementation path.
 3. **Google Cloud project/runtime is not connected yet.** Need permitted Gemini/ADK runtime setup.
-4. **No deterministic telemetry simulator exists yet.** The first simulator should implement only the three-camera/two-uplink scenario.
-5. **No Grafana dashboards/alerts/data sources exist yet.** They must be created during the permitted coding/setup phase.
-6. **No remediation adapter exists yet.** It should initially manipulate only synthetic routing state.
-7. **No LICENSE file exists.** The official rules require the public repo to include a detectable open-source license before submission.
+4. **No deterministic telemetry simulator exists yet.** Its exact first scenario is now specified in `VERTICAL_SLICE_SPEC.md`.
+5. **No Grafana dashboards/alerts/data sources exist yet.** They must be created during the permitted implementation/setup phase.
+6. **No remediation adapter exists yet.** It should initially manipulate only synthetic routing state and must wait until Gate B passes.
+7. **No LICENSE file exists.** The official rules require the public repo to include a detectable open-source license before submission; license choice is not yet locked.
 8. **Hosted project URL and demo assets do not exist yet.**
-9. **Need to confirm exact Grafana MCP tool names available in the chosen environment/version when implementation begins rather than hard-code assumptions from docs.
+9. **Exact MCP tool names/defaults must still be verified against the version/environment actually deployed.** Current docs were checked on 2026-09-06, but implementation evidence wins over documentation assumptions.
 
-### Risks to watch
+## Risks to watch
 
-- Sponsor integration becomes cosmetic instead of being visible in the actual runtime path.
-- Too much effort goes into dashboard polish before MCP connectivity works.
-- Agent performs a plausible-looking diagnosis without enough retrieved evidence.
+- Sponsor integration becomes cosmetic instead of visible in the actual runtime path.
+- UI/dashboard polish starts before MCP connectivity works.
+- Agent reaches a plausible diagnosis without enough retrieved evidence.
+- Metric names diverge from the fixed demo contract without updating the spec.
 - Demo remediation is declared successful without telemetry verification.
-- Permissions are broader than necessary, weakening the production-ready story.
+- Permissions are broader than necessary.
 - Optional Grafana AI Observability distracts from required core MCP use.
-- Demo relies on nondeterministic external failures and becomes unreliable during judging.
-- More scenarios/features are added before the core one can be reset and replayed reliably.
+- Demo relies on nondeterministic external failures.
+- More scenarios/features are added before the core one is resettable and replayable.
 
 ---
 
 ## Single best next step
 
-**Using hackathon-permitted Google tooling, implement and document one minimal integration spike that proves a Gemini/ADK agent can call the official Grafana MCP server against a seeded Grafana instance, retrieve the Camera 3 frame-drop + uplink-B packet-loss evidence, and return a structured diagnosis with Grafana evidence references.**
+**Using hackathon-permitted Google tooling, implement Gate A exactly as defined in `VERTICAL_SLICE_SPEC.md`: seed the `broadcast-alpha` Prometheus telemetry, connect the official Grafana MCP with datasource-scoped read/query permissions, and prove Gemini/ADK retrieves the four evidence classes needed to diagnose `uplink-b` packet loss and reject encoder overload.**
 
-Acceptance criteria for that spike:
+Before doing UI work, record these implementation facts in the repo:
 
-- real Gemini/Google agent invocation
-- real official Grafana MCP invocation
-- at least two real Grafana telemetry lookups
-- diagnosis correctly identifies uplink B
-- evidence clearly distinguishes network failure from encoder overload
-- no remediation yet
-- repeatable from a clean demo state
+- chosen MCP mode (Grafana Cloud hosted vs OSS)
+- auth mechanism and MCP transport
+- non-secret Grafana/datasource identifiers
+- enabled MCP tools/categories
+- effective RBAC scopes
+- actual MCP tool names observed
+- actual query payload/result shape
+- number of tool calls
+- diagnosis latency
+- Gate A pass/fail evidence
 
-Only after this passes should the next run specify/implement the approval + remediation + verification loop.
-
----
-
-## Sources to re-check during implementation
-
-- https://agentic-cinema.devpost.com/rules
-- https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
-- https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
-- https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/cloud-mcp/
-- https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/oss-mcp/configure/enable-and-disable-tools/
-- https://grafana.com/docs/grafana-cloud/observe-and-act/monitor-applications/ai-observability/mcp-observability/
-- https://github.com/grafana/mcp-grafana
-- https://grafana.com/ai/
-- https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk
+Only after Gate A passes should the repo advance to Loki/deeplinks/negative-case evidence and then approval/remediation/verification.
