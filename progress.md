@@ -2,9 +2,11 @@
 
 ## Current status
 
-StageGuard is a personal open-source project with an executable local telemetry slice and a deterministic bounded incident-investigation core. Current vertical slice:
+StageGuard is a personal open-source project with an executable local telemetry slice, official Grafana MCP path, deterministic bounded incident investigator, and a concrete MCP-to-investigator metric adapter.
 
-`deterministic simulator → Prometheus → Grafana → official Grafana MCP → bounded four-evidence investigator`
+Current vertical slice:
+
+`deterministic simulator → Prometheus → Grafana → official Grafana MCP → McpPrometheusMetricClient → bounded four-evidence investigator`
 
 Core design docs remain authoritative for product/safety intent: `README.md`, `ARCHITECTURE.md`, `DEMO.md`, `VERTICAL_SLICE_SPEC.md`, `INTEGRATION_HANDOFF.md`, and `OPERATIONS_AND_SAFETY.md`.
 
@@ -48,64 +50,85 @@ Useful official references retained:
 - https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
 - https://github.com/grafana/mcp-grafana/releases/tag/v1.1.0
 
+### 2026-09-06 — bounded incident investigator
+
+Added `runtime/investigator.py` and `runtime/tests/test_investigator.py`. The investigator performs exactly six fixed PromQL reads, requires all four evidence classes for diagnosis, returns `no_incident` for a healthy symptom signal, and explicitly abstains on missing or contradictory evidence.
+
+The policy layer remains transport-agnostic and prevents Gemini or any later orchestrator from bypassing evidence-completeness rules.
+
 ---
 
-## Run log — 2026-09-06 — bounded incident investigator
+## Run log — 2026-09-06 — official MCP metric adapter
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected repository root, `runtime/`, `runtime/tests/`, `runtime/simulator.py`, `runtime/mcp_smoke.py`, and `runtime/README.md`. Rechecked the official `grafana/mcp-grafana` Prometheus tool implementation and confirmed that `query_prometheus` returns a structured `QueryPrometheusResult` containing `data`, optional `hints`, and warnings; its MCP tool is explicitly annotated read-only/idempotent.
+Read `progress.md` completely before deciding what to change. Inspected the current repository metadata and default branch, `runtime/mcp_smoke.py`, `runtime/investigator.py`, `runtime/tests/test_investigator.py`, and `runtime/README.md`.
 
-Official source checked:
+Rechecked the pinned official `grafana/mcp-grafana v1.1.0` source rather than assuming a payload format:
 
-- https://github.com/grafana/mcp-grafana/blob/main/tools/prometheus.go
+- `tools/prometheus.go` defines `QueryPrometheusResult` as `data` plus optional `hints` and `warnings`, and marks `query_prometheus` read-only/idempotent.
+- `tools.go` JSON-marshals ordinary tool return values into MCP text content.
+
+Official source inspected:
+
+- https://github.com/grafana/mcp-grafana/blob/v1.1.0/tools/prometheus.go
+- https://github.com/grafana/mcp-grafana/blob/v1.1.0/tools.go
 
 ### Exact changes made
 
-Added `runtime/investigator.py`:
+Added `runtime/mcp_metric_client.py`:
 
-- introduces a minimal read-only `MetricQueryClient.instant(promql)` boundary;
-- executes exactly six fixed PromQL reads covering the four required evidence classes;
-- encodes thresholds for Camera 3 dropped frames, `uplink-b` packet loss, encoder CPU/GPU contradiction evidence, and healthy peer evidence;
-- emits one of `diagnosed`, `no_incident`, or `abstain`;
-- returns structured evidence including query, observed value, threshold, and whether it supports the hypothesis;
-- refuses to diagnose when any required evidence class is unavailable;
-- refuses to diagnose when a real symptom exists but the causal/contradiction/peer evidence does not support the fixed hypothesis.
+- implements the investigator's `MetricQueryClient.instant(promql)` boundary over official Grafana MCP stdio;
+- initializes one MCP session and verifies `query_prometheus` is available with `readOnlyHint=true`;
+- calls only `query_prometheus` with the configured Grafana datasource UID, instant query type, and `endTime=now`;
+- parses the pinned v1.1.0 MCP text/JSON result while also accepting `structuredContent` defensively for forward compatibility;
+- supports Prometheus instant vector and scalar encodings;
+- maps a genuinely empty vector to `None` so the investigator abstains on missing evidence;
+- rejects tool errors, malformed/non-numeric samples, unsupported shapes, and multi-series results instead of silently guessing;
+- records per-query `QueryTrace` values containing PromQL, latency in milliseconds, and observed value;
+- exposes context-manager cleanup so the MCP process is closed reliably.
 
-Added `runtime/tests/test_investigator.py` with six cases:
+Added `runtime/tests/test_mcp_metric_client.py` with seven parser/safety cases:
 
-1. successful four-evidence `uplink-b packet loss` diagnosis;
-2. missing causal telemetry forces abstention;
-3. one missing GPU contradiction metric marks the entire contradiction evidence class missing;
-4. elevated symptom with normal `uplink-b` packet loss abstains;
-5. healthy Camera 3 returns `no_incident`;
-6. the investigator remains bounded to exactly six reads.
+1. single vector sample extraction;
+2. scalar extraction;
+3. empty vector → missing evidence;
+4. `structuredContent` compatibility;
+5. multiple series fail closed;
+6. MCP tool error is not treated as missing/healthy telemetry;
+7. malformed numeric values fail closed.
 
-Updated `runtime/README.md` to document the policy boundary, six evidence queries, abstention invariant, test coverage, and the correct next integration step.
+Updated `runtime/README.md` with the new adapter boundary, safety behavior, direct investigator usage example, expanded test command, and the revised next implementation step.
 
 ### Tests/results
 
-A direct repository clone/test run was attempted in the execution container, but outbound DNS to `github.com` is unavailable there, so the clone failed before tests could execute. No false passing result is recorded. The new tests are committed and require only the Python standard library; they should be run on the next Docker/network-capable host with:
+The new parser tests are deterministic and require only the Python standard library, but this automation environment still does not provide a checked-out repository or Docker daemon. I therefore did not claim an executed pass for the new suite.
+
+The following commands are now the exact verification set for the next Docker/network-capable host:
 
 ```text
 python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/investigator.py
+python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/mcp_metric_client.py runtime/investigator.py
+python runtime/mcp_smoke.py
 ```
+
+Then run `investigate(McpPrometheusMetricClient())` and inspect six `QueryTrace` records.
 
 ### Decisions made
 
-1. Keep safety-critical evidence completeness deterministic rather than delegating it to Gemini.
-2. Keep the investigator transport-agnostic until a real `mcp-grafana:1.1.0` `query_prometheus` payload is captured; do not guess the serialization shape.
-3. Use a fixed query budget for the first vertical slice so evidence provenance, latency, and failure behavior are measurable.
-4. Treat an observed symptom with unsupported root-cause evidence as abstention rather than downgrading to a speculative diagnosis.
+1. The MCP payload adapter is now grounded in the pinned official v1.1.0 source rather than left blocked on a future manual capture.
+2. Empty telemetry and protocol/tool failure remain distinct: empty data becomes `None`; tool/protocol failures raise an error.
+3. A bounded query that unexpectedly returns multiple series is unsafe and must fail closed rather than select a sample arbitrarily.
+4. Transport latency/provenance belongs in the metric adapter, while diagnosis policy remains deterministic in `investigator.py`.
+5. Compatibility with MCP `structuredContent` is allowed only as an equivalent transport envelope; it does not broaden accepted Prometheus evidence shapes.
 
 ### Current blockers / unknowns
 
-- Full Compose startup and Gate A remain unverified on a Docker-capable host.
-- The exact MCP JSON-RPC content/structured-content envelope emitted by the pinned server has not been captured against this stack.
-- The new investigator test suite has not yet been executed in this automation environment because its container cannot resolve GitHub and has no repository checkout.
-- Gemini orchestration, Loki corroboration, approval/remediation, recovery verification, dashboard/UI, and external-user telemetry mappings remain future implementation gates.
+- Full Compose startup and end-to-end Gate A are still unverified on a Docker-capable host.
+- The six-query diagnosis has not yet been executed against a live `grafana/mcp-grafana:1.1.0` process and real local Grafana datasource.
+- The exact observed latency distribution is unknown until that live run.
+- Loki corroboration, Gemini orchestration, human approval/remediation, telemetry-based recovery verification, dashboard/UI, auth/onboarding mappings, and deployment remain future implementation gates.
 
 ## Single best next step
 
-**Execute Gate A on a Docker-capable host and capture the real `query_prometheus` response envelope from `grafana/mcp-grafana:1.1.0`; then implement a small `McpPrometheusMetricClient` adapter into `MetricQueryClient.instant`, run the six investigator tests plus one real MCP-backed diagnosis, and record query latency/tool-call provenance.**
+**On the next run, implement the human-approved remediation + recovery-verification state machine against the deterministic simulator, keeping remediation credentials/actions separate from Grafana evidence. Build it so approval is mandatory, a successful action response never equals recovery, and recovery is only declared after bounded post-action telemetry proves packet loss and dropped-frame rate returned below thresholds. This work is unblocked even if Docker/Gate A remains unavailable.**
