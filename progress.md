@@ -2,168 +2,118 @@
 
 ## Current status
 
-StageGuard is a personal open-source project with an executable local telemetry slice, official Grafana MCP path, deterministic bounded incident investigator, MCP-to-investigator metric adapter, approval-gated remediation/recovery verification, audited incident orchestration, and a narrow authenticated HTTP API.
+StageGuard is a personal open-source incident commander for live media workflows. The executable vertical slice now includes configurable, validated telemetry bindings while preserving a fixed safety policy:
 
-Current vertical slice:
+`telemetry profile → Prometheus/Grafana → official Grafana MCP → bounded six-read investigator → audited IncidentService → trusted operator identity → revision-bound approval → separate remediation adapter → bounded two-read recovery verification`
 
-`deterministic simulator → Prometheus → Grafana → official Grafana MCP → McpPrometheusMetricClient → bounded four-evidence investigator → IncidentService → trusted operator identity → evidence-revision-bound human approval → separate remediation adapter → telemetry recovery verification → append-only audit`
+Core invariants:
 
-Core safety decisions:
-
-- Grafana is the read-only evidence plane.
-- Consequential writes use separate credentials/adapters.
-- Missing required evidence causes abstention.
-- Callers cannot submit arbitrary PromQL, datasource IDs, remediation actions, or targets through the incident API.
-- Operator/approver identity comes from an authentication provider, not request JSON.
-- Human approval must match the exact current incident evidence revision.
-- Approval is single-use and invalidated by a fresh investigation.
-- An action API success never counts as recovery.
-- Recovery requires multiple consecutive healthy telemetry samples.
-- Real-user onboarding must support existing telemetry through mappings rather than forcing metric renames.
+- Grafana is the read-only evidence plane; write credentials remain separate.
+- Callers never provide raw PromQL, datasource IDs, remediation actions, or targets through the incident API.
+- Existing production metric/label names are mapped through validated configuration, not interpolated as raw query fragments.
+- Missing evidence causes abstention.
+- Approval is tied to the exact evidence revision, single-use, and invalidated by fresh investigation.
+- Action success is never recovery; recovery requires consecutive healthy telemetry.
+- Operator identity comes from authentication context, not request JSON.
 
 ## Completed milestones
 
-### 2026-09-06 — executable telemetry slice
+- Deterministic broadcast telemetry simulator + Prometheus + provisioned Grafana local stack.
+- Opt-in pinned official `grafana/mcp-grafana:1.1.0` path with write tools disabled.
+- Deterministic four-class incident investigation with exactly six metric reads.
+- MCP Prometheus metric adapter with fail-closed result parsing and query provenance.
+- Approval-gated remediation with a distinct write boundary and telemetry-only recovery proof.
+- Audited incident lifecycle service and narrow authenticated HTTP API.
+- Loopback development identity plus explicit static-bearer deployment primitive.
+- Configurable validated telemetry mapping across investigation, approval target selection, and recovery verification.
 
-Added deterministic broadcast simulator, Prometheus scrape configuration, provisioned Grafana datasource UID `stageguard-prometheus`, Docker Compose stack, local runtime documentation, and simulator tests.
-
-Previously verified on an executable host:
-
-```text
-python -m unittest discover -s runtime/tests -v
-Ran 3 tests
-OK
-```
-
-### 2026-09-06 — official Grafana MCP local path
-
-Added `runtime/bootstrap_grafana.py`, `runtime/mcp_smoke.py`, gitignored local secrets, and opt-in official `grafana/mcp-grafana:1.1.0` Compose profile. MCP is constrained with `--disable-write`, `datasource,prometheus` tool categories only, and proxied tools disabled.
-
-### 2026-09-06 — bounded incident investigator
-
-Added `runtime/investigator.py`. The investigator performs exactly six fixed PromQL reads, requires symptom + causal + contradiction + healthy-peer evidence for diagnosis, returns `no_incident` for a healthy symptom signal, and explicitly abstains on missing or contradictory evidence.
-
-### 2026-09-06 — official MCP metric adapter
-
-Added `runtime/mcp_metric_client.py`. The adapter initializes one MCP session, verifies `query_prometheus` is read-only, parses the pinned v1.1.0 result envelopes, rejects ambiguous/malformed results, distinguishes empty telemetry from tool failure, and records per-query latency/value provenance.
-
-### 2026-09-06 — approval-gated remediation and recovery verification
-
-Added `runtime/remediation.py`. The write-capable `RemediationClient` is separate from Grafana. Remediation requires exact diagnosed evidence and matching explicit approval. Recovery is independently verified from bounded packet-loss + dropped-frame telemetry and requires consecutive healthy samples; missing telemetry resets the streak. The local simulator remediation client refuses non-loopback targets.
-
-### 2026-09-06 — audited incident orchestration + narrow API
-
-Added `runtime/incident_service.py` and `runtime/api.py`. `IncidentService` composes investigate → approve → execute → verify with revision-bound, single-use approval and append-only audit events. The API exposes only `healthz`, incident status, investigate, approve, and execute; it accepts no generic tool/query/action passthrough.
-
-## Run log — 2026-09-06 — authenticated operator identity
+## Run log — 2026-09-06 — configurable telemetry mappings
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected the current repository state and then read:
+Read `progress.md` completely before deciding what to implement. Inspected the current repository and the safety-critical runtime files, especially:
 
-- `runtime/api.py`
+- `runtime/investigator.py`
+- `runtime/remediation.py`
 - `runtime/incident_service.py`
-- `runtime/tests/test_incident_service.py`
-- root `README.md`
-- `ARCHITECTURE.md`
-- `runtime/README.md`
+- `runtime/tests/test_investigator.py`
 
-The previous run's best next step was confirmed as the highest-value unblocked production gap: approval identity was still caller-controlled through the `approved_by` request field even though the rest of the approval policy was strict.
+The prior handoff identified hard-coded demo metric and label names as the highest-value portability gap. That remained correct: the policy was bounded, but a real production would have had to rename telemetry to match the demo schema.
 
 ### Exact changes made
 
-Added `runtime/identity.py`:
+Added `runtime/telemetry.py`:
 
-- introduced immutable `OperatorIdentity(subject, provider)`;
-- introduced a pluggable `IdentityProvider` protocol;
-- added `AuthenticationError` as the narrow authentication failure type;
-- added `LocalDevelopmentIdentityProvider`, which uses a process-configured fixed identity and ignores caller headers;
-- marked the local provider explicitly development-only;
-- added `StaticBearerIdentityProvider` as a zero-dependency explicit provider for controlled deployments;
-- bearer tokens are configured by the host process, retained in memory, compared using `hmac.compare_digest`, and never included in StageGuard audit/API output;
-- provider construction rejects empty subjects, empty tokens, and empty token maps.
+- introduced immutable `TelemetryProfile` for production/feed/uplink identities, peer feeds, metric names, and label-key mappings;
+- validates Prometheus metric identifiers and label identifiers with restrictive grammars;
+- rejects empty required scope/peer bindings;
+- escapes PromQL string-literal values including quotes, backslashes, and newlines;
+- regex-escapes peer-feed values before constructing the bounded healthy-peer matcher;
+- added `investigation_queries(profile)` which always emits the same six semantic evidence slots;
+- added `recovery_queries(profile)` which always emits the same two recovery checks;
+- retained `DEFAULT_TELEMETRY_PROFILE` matching the deterministic simulator, preserving existing callers and tests.
 
-Updated `runtime/api.py`:
+Updated `runtime/investigator.py`:
 
-- removed caller-controlled `actor` from `/v1/investigate` and `/v1/execute` request bodies;
-- removed caller-controlled `approved_by` from `/v1/approve`;
-- all lifecycle actors are now derived from `IdentityProvider.authenticate()`;
-- `GET /v1/incident` is authenticated while `GET /healthz` remains intentionally unauthenticated for health checks;
-- authentication failures return HTTP 401 plus `WWW-Authenticate: Bearer realm="stageguard"`;
-- unexpected identity fields are rejected instead of ignored;
-- introduced `make_server()` so startup policy can be tested independently;
-- loopback startup defaults to fixed local development identity;
-- non-loopback binding fails closed when the active provider is development-only;
-- an explicit non-development provider is required before StageGuard can bind to `0.0.0.0` or another non-loopback address;
-- existing body-size, JSON-type, no-store, nosniff, narrow-endpoint, and internal-error-redaction behavior remains intact.
+- `investigate()` now accepts a validated `TelemetryProfile` rather than relying on hard-coded query text;
+- query count and semantic evidence classes remain exactly six;
+- report scope and hypothesis now reflect the configured production/feed/uplink;
+- missing mapped telemetry keeps the same fail-closed abstention semantics;
+- compatibility constants and default `QUERIES` remain for existing tests/adapters.
 
-Added `runtime/tests/test_identity.py` with deterministic coverage for:
+Updated `runtime/remediation.py`:
 
-1. local fixed identity ignoring attacker-controlled authorization headers;
-2. valid bearer token → configured operator subject;
-3. missing/basic/invalid bearer credentials being rejected;
-4. empty bearer configuration being rejected.
+- approval targets are derived from the same `TelemetryProfile` used for diagnosis;
+- approval validation now verifies report production/feed/hypothesis against that profile;
+- post-action recovery uses the same mapped metric/label names through exactly two queries;
+- custom mappings therefore cannot diagnose one uplink and accidentally remediate/verify the demo uplink;
+- the simulator actuator remains intentionally bound to the default local fixture only.
 
-Added `runtime/tests/test_api.py` with API-level coverage for:
+Updated `runtime/incident_service.py`:
 
-1. mutating endpoints requiring authentication and emitting no audit event when unauthorized;
-2. investigation audit actor coming from the authenticated provider;
-3. body-supplied `approved_by` being rejected;
-4. valid approval using the authenticated operator subject in both approval state and audit;
-5. `/healthz` remaining unauthenticated;
-6. non-loopback startup refusing the development identity before attempting to bind;
-7. non-loopback startup allowing an explicitly configured non-development provider.
+- accepts one validated `telemetry_profile` at construction;
+- propagates that exact profile through investigate → approve → execute/verify;
+- no profile/query fields were added to the HTTP request surface.
 
-Refreshed root `README.md`:
+Added `runtime/tests/test_telemetry.py` with seven deterministic tests covering:
 
-- documents trusted identity as part of the executable vertical slice;
-- documents the new identity/authorization safety boundary;
-- clarifies that lifecycle bodies no longer accept actor/approver fields;
-- documents loopback-only development identity and explicit bearer provider behavior;
-- updates repository structure, real-deployment requirements, roadmap, and project status.
+1. custom production/metric/label mapping while retaining exactly six investigation reads;
+2. production-scope quote escaping without turning values into arbitrary matchers;
+3. peer-feed regex escaping;
+4. rejection of unsafe metric identifiers;
+5. rejection of unsafe label identifiers;
+6. exactly two recovery query slots;
+7. unchanged abstention when a mapped evidence source is missing.
 
 ### Tests / checks / results
 
-Attempted from the execution container:
+This automation environment still cannot obtain a local checkout from GitHub, so the new Python suite was not executed here. I did not add or trigger GitHub Actions merely to compensate, avoiding noisy CI/storage usage.
 
-```text
-git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
-python -m unittest discover -s runtime/tests -v
-```
-
-The clone failed before test execution because this container cannot resolve `github.com`:
-
-```text
-fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com
-```
-
-Therefore this run does **not** claim that the newly added identity/API tests passed. No GitHub Actions workflow or noisy CI job was introduced as a workaround.
-
-Recommended verification on the next executable host:
+The next executable host should run:
 
 ```bash
+python -m py_compile runtime/*.py runtime/tests/*.py
 python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/*.py
 ```
+
+No live Grafana/MCP credential was required for this implementation; all new mapping tests are credential-free.
 
 ### Decisions made
 
-1. Identity is authentication context, not business payload. Request JSON cannot assert who approved or executed an action.
-2. Local development remains frictionless but is structurally constrained to loopback.
-3. Non-loopback exposure must be an explicit deployment decision with a non-development authentication provider.
-4. Authentication tokens must never become audit actor values; only stable operator subjects are recorded.
-5. The dependency-free static bearer provider is a reference deployment primitive, not a claim of complete internet-edge security. Production deployments still require TLS/reverse-proxy/network policy or integration with a stronger identity system.
-6. Gemini remains outside the safety-critical identity, evidence, approval, action, and recovery boundaries.
+1. Configuration maps semantic telemetry slots; it does not grant arbitrary PromQL capability.
+2. Identifier-like configuration and label values are treated differently: identifiers are allowlisted by grammar, values are escaped as PromQL literals.
+3. One immutable profile follows the whole incident lifecycle so diagnosis, approval target, remediation, and recovery cannot drift to different production scopes.
+4. The fixed evidence budget is a policy invariant independent of metric naming.
+5. Simulator write behavior remains fixture-specific; real production remediation must provide a separate adapter whose allowed targets are configured independently and explicitly.
 
 ### Current blockers / unknowns
 
 - Full Compose startup and end-to-end official MCP Gate A remain unverified on a Docker-capable host.
-- The six-query diagnosis and recovery loop have not yet been executed through a live `grafana/mcp-grafana:1.1.0` process in this environment.
-- The newly added identity/API tests have not executed here because the container cannot resolve GitHub.
-- `StaticBearerIdentityProvider` is intentionally small; OIDC/IAP/identity-aware reverse-proxy integration is still needed for a polished hosted deployment.
-- JSONL is not an immutable multi-user production audit backend.
-- Loki corroboration, configurable telemetry mappings, Gemini orchestration/explanation, operator UI/dashboard, production onboarding, and Google Cloud deployment remain implementation gates.
+- The six-query diagnosis and two-query recovery loop have not yet been exercised through a live `grafana/mcp-grafana:1.1.0` process in this environment.
+- New mapping tests have not executed in this environment due lack of a local checkout.
+- No persisted/onboarding configuration loader yet turns a user-owned mapping file into `TelemetryProfile` with preflight checks.
+- OIDC/IAP integration, Loki corroboration, Gemini explanation/orchestration, operator UI, durable multi-user audit storage, and Google Cloud deployment remain implementation gates.
 
 ## Single best next step
 
-**Implement configurable telemetry mappings without weakening the bounded investigator: introduce a validated `TelemetryProfile`/query-builder layer that maps a production's existing metric names and label keys into StageGuard's six fixed semantic evidence slots and two recovery checks. Add tests proving tenant/production scoping, safe label-value escaping, rejection of unsafe metric/label identifiers, and unchanged fixed query-count/abstention semantics. This is the highest-value step for making StageGuard usable against real Grafana environments instead of only the seeded fixture.**
+**Build a safe production onboarding/preflight layer for `TelemetryProfile`: load a versioned local JSON configuration, reject unknown fields, validate the profile, execute the eight bounded queries read-only through the metric client, report exactly which semantic evidence slots are missing/ambiguous, and refuse activation until production scoping and required telemetry are proven. This turns the new mapping primitive into a real-user connection workflow without exposing generic PromQL or requiring credentials to be committed.**
