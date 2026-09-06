@@ -1,0 +1,9 @@
+# Local runtime secrets and caches
+runtime/.secrets/
+__pycache__/
+*.py[cod]
+
+# Local environment overrides
+.env
+.env.*
+!.env.example

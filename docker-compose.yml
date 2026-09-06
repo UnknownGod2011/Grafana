@@ -37,3 +37,24 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+
+  # Explicitly opt-in so a normal `docker compose up` never starts an AI/MCP
+  # process. Run after `python runtime/bootstrap_grafana.py` with:
+  #   python runtime/mcp_smoke.py
+  mcp:
+    image: grafana/mcp-grafana:1.1.0
+    profiles: ["mcp"]
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE: /run/secrets/grafana-mcp-token
+    volumes:
+      - ./runtime/.secrets/grafana-mcp-token:/run/secrets/grafana-mcp-token:ro
+    command:
+      - -t
+      - stdio
+      - --disable-write
+      - --enabled-tools
+      - datasource,prometheus
+      - --disable-proxied
+    depends_on:
+      - grafana
