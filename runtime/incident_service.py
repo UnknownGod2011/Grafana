@@ -212,15 +212,20 @@ class IncidentService:
                 snapshot.approval,
                 outcome,
             )
+            payload = {
+                "revision": snapshot.revision,
+                "status": outcome.status,
+                "sample_count": len(outcome.samples),
+                "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
+            }
+            if outcome.action_result is not None and outcome.action_result.metadata:
+                # The governed production adapter emits non-secret immutable request/result
+                # metadata only: operation identity, adapter type, attempts, transport status.
+                payload["action_metadata"] = dict(outcome.action_result.metadata)
             self._record(
                 snapshot.incident_id,
                 "remediation_completed",
                 actor.strip() or "stageguard",
-                {
-                    "revision": snapshot.revision,
-                    "status": outcome.status,
-                    "sample_count": len(outcome.samples),
-                    "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
-                },
+                payload,
             )
             return self._snapshot
