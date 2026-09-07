@@ -195,7 +195,7 @@ class JsonCheckpointStore:
 
 
 class GoogleCloudStorageCheckpointStore:
-    """Durable authenticated single-object checkpoint store with optimistic concurrency."""
+    """Durable authenticated single-object checkpoint store with optimistic compare-and-swap semantics."""
 
     def __init__(self, bucket, signing_key: bytes, object_name: str = "stageguard/incident-checkpoint.json") -> None:
         name = object_name.strip().lstrip("/")
@@ -206,6 +206,10 @@ class GoogleCloudStorageCheckpointStore:
         self._bucket = bucket
         self._object_name = name
         self._signing_key = signing_key
+        self._generation_lock = threading.Lock()
+        # A fresh store may create only a missing object. A successful load/save pins
+        # the exact generation this process is allowed to replace next.
+        self._expected_generation: int | None = 0
 
     @classmethod
     def from_environment(
@@ -230,32 +234,45 @@ class GoogleCloudStorageCheckpointStore:
 
     def load(self) -> IncidentCheckpoint | None:
         blob = self._bucket.blob(self._object_name)
-        try:
-            if not blob.exists():
-                return None
-            raw = blob.download_as_bytes()
-        except Exception as exc:
-            raise RuntimeError("incident checkpoint read failed") from exc
-        return _decode(raw, signing_key=self._signing_key, require_signature=True)
+        with self._generation_lock:
+            try:
+                if not blob.exists():
+                    self._expected_generation = 0
+                    return None
+                blob.reload()
+                generation = blob.generation
+                if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+                    raise RuntimeError("invalid checkpoint generation")
+                raw = blob.download_as_bytes(if_generation_match=generation)
+            except Exception as exc:
+                if _http_status(exc) == 412:
+                    raise CheckpointConflictError("incident checkpoint concurrent read conflict") from exc
+                raise RuntimeError("incident checkpoint read failed") from exc
+            checkpoint = _decode(raw, signing_key=self._signing_key, require_signature=True)
+            self._expected_generation = generation
+            return checkpoint
 
     def save(self, checkpoint: IncidentCheckpoint) -> None:
         encoded = _encode(checkpoint, signing_key=self._signing_key)
         blob = self._bucket.blob(self._object_name)
-        try:
-            exists = blob.exists()
-            generation = None
-            if exists:
-                blob.reload()
+        with self._generation_lock:
+            expected_generation = self._expected_generation
+            if expected_generation is None:
+                raise RuntimeError("incident checkpoint generation is unavailable")
+            try:
+                blob.upload_from_string(
+                    encoded,
+                    content_type="application/json",
+                    if_generation_match=expected_generation,
+                )
                 generation = blob.generation
-            blob.upload_from_string(
-                encoded,
-                content_type="application/json",
-                if_generation_match=generation if exists else 0,
-            )
-        except Exception as exc:
-            if _http_status(exc) == 412:
-                raise CheckpointConflictError("incident checkpoint concurrent update conflict") from exc
-            raise RuntimeError("incident checkpoint write failed") from exc
+                if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+                    raise RuntimeError("invalid checkpoint generation")
+            except Exception as exc:
+                if _http_status(exc) == 412:
+                    raise CheckpointConflictError("incident checkpoint concurrent update conflict") from exc
+                raise RuntimeError("incident checkpoint write failed") from exc
+            self._expected_generation = generation
 
 
 class ObservableCheckpointStore:
