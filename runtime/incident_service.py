@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from activation import ActivationRecord, verify_activation_record
-from investigator import IncidentReport, MetricQueryClient, investigate
+from investigator import IncidentReport, MetricQueryClient, investigate, investigate_with_log_corroboration
+from log_activation import LogActivationRecord
+from log_evidence import LogQueryClient
 from remediation import Approval, RemediationClient, RemediationOutcome, remediate_and_verify, required_approval
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
@@ -85,9 +87,10 @@ def _revision(report: IncidentReport) -> str:
 class IncidentService:
     """Single-profile incident lifecycle with fail-closed approval semantics.
 
-    The built-in deterministic demo profile may run without an activation artifact.
-    Every non-default production mapping must present a matching, non-stale record
-    produced by the eight-slot onboarding preflight before the service can start.
+    The built-in deterministic demo profile may run without activation artifacts.
+    Every non-default production mapping must present a matching metric activation
+    record. Canonical production bootstrap also injects a verified Loki client and
+    log activation, making correlated investigation mandatory there.
     """
 
     def __init__(
@@ -99,6 +102,8 @@ class IncidentService:
         telemetry_profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
         activation_record: ActivationRecord | None = None,
         datasource_identity: str | None = None,
+        logs: LogQueryClient | None = None,
+        log_activation_record: LogActivationRecord | None = None,
         activation_now_unix: int | None = None,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
@@ -126,11 +131,16 @@ class IncidentService:
                 now_unix=activation_now_unix,
             )
 
+        if (logs is None) != (log_activation_record is None):
+            raise ValueError("logs and log_activation_record must be configured together")
+
         self._metrics = metrics
+        self._logs = logs
         self._remediation = remediation
         self._audit = audit
         self._profile = telemetry_profile
         self._activation = activation_record
+        self._log_activation = log_activation_record
         self._clock_ms = clock_ms
         self._id_factory = id_factory
         self._recovery_sleep = recovery_sleep
@@ -148,7 +158,10 @@ class IncidentService:
 
     def investigate(self, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
-            report = investigate(self._metrics, self._profile)
+            if self._logs is None:
+                report = investigate(self._metrics, self._profile)
+            else:
+                report = investigate_with_log_corroboration(self._metrics, self._logs, self._profile)
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
             self._snapshot = snapshot
@@ -156,10 +169,15 @@ class IncidentService:
                 "revision": snapshot.revision,
                 "status": report.status,
                 "confidence": report.confidence,
+                "evidence_mode": "metric+loki" if self._logs is not None else "metric-only",
             }
             if self._activation is not None:
                 payload["activation_profile_sha256"] = self._activation.profile_sha256
                 payload["activation_datasource_sha256"] = self._activation.datasource_sha256
+            if self._log_activation is not None:
+                payload["log_activation_contract_sha256"] = self._log_activation.contract_sha256
+                payload["log_activation_datasource_sha256"] = self._log_activation.datasource_sha256
+                payload["log_activation_preflight_sha256"] = self._log_activation.preflight_sha256
             self._record(
                 incident_id,
                 "investigation_completed",
@@ -219,8 +237,6 @@ class IncidentService:
                 "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
             }
             if outcome.action_result is not None and outcome.action_result.metadata:
-                # The governed production adapter emits non-secret immutable request/result
-                # metadata only: operation identity, adapter type, attempts, transport status.
                 payload["action_metadata"] = dict(outcome.action_result.metadata)
             self._record(
                 snapshot.incident_id,
