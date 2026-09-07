@@ -49,9 +49,10 @@ class FakeLogs:
 class LogActivationTests(unittest.TestCase):
     def test_empty_healthy_window_can_preflight_and_round_trip(self) -> None:
         p = profile()
-        preflight = preflight_loki(FakeLogs(), p)
+        client = FakeLogs()
+        preflight = preflight_loki(client, p)
         self.assertTrue(preflight.ready)
-        self.assertEqual(1, len(FakeLogs().calls) + 1)  # sanity: fixture remains side-effect free
+        self.assertEqual(1, len(client.calls))
         record = create_log_activation_record(p, "loki-main", preflight, now_unix=1000)
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "log-activation.json"
