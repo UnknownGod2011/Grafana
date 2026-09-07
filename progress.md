@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable path covers strict telemetry mapping, metric/Loki activation pins, official Grafana MCP evidence, deterministic diagnosis with Loki corroboration, authenticated incident lifecycle orchestration, optional revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, bounded durable audit reconstruction, signed GCS incident checkpoints with strict generation CAS, checkpoint observability, fail-closed conflict recovery, remediation execution-uncertainty recovery, Cloud Run/IAP deployment, and operator liveness/readiness/self-observability.
+StageGuard is a personal open-source incident commander for live media workflows. The executable path covers strict telemetry mapping, metric/Loki activation pins, official Grafana MCP evidence, deterministic diagnosis with Loki corroboration, authenticated incident lifecycle orchestration, optional revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, bounded durable audit reconstruction, signed GCS incident checkpoints with strict generation CAS, checkpoint observability, fail-closed conflict recovery, remediation execution-uncertainty recovery, Cloud Run/IAP deployment, operator liveness/readiness/self-observability, and a same-origin operator cockpit with explicit lifecycle-recovery controls.
 
 Core invariants:
 
@@ -17,10 +17,11 @@ Core invariants:
 - After a checkpoint conflict, lifecycle work remains blocked until the durable winner is explicitly loaded and fully revalidated.
 - A CAS conflict that occurs after a remediation adapter was contacted is treated as execution ambiguity, not merely storage contention.
 - Execution ambiguity remains unready after durable-winner reload until provider reconciliation (when required) and a fresh Grafana investigation invalidate the stale approval.
-- The API never accepts a caller-supplied remediation operation id for reconciliation; the deterministic id stays server-owned.
-- Provider remediation metadata/details, credentials, Gemini output, Grafana secrets, and checkpoint signing material are not persisted.
+- The API and browser never accept a caller-supplied remediation operation id for reconciliation; the deterministic id stays server-owned.
+- Provider remediation metadata/details, credentials, Gemini output, Grafana secrets, and checkpoint signing material are not persisted or exposed to the browser.
 - Standard Cloud Run production remediation remains disabled by default.
 - `/healthz` proves process liveness only; `/readyz` proves bounded evidence-plane and lifecycle consistency.
+- The operator cockpit disables investigation, briefing, approval, and execution whenever checkpoint state is `conflicted` or `execution_uncertain`.
 
 ## Completed milestones
 
@@ -40,97 +41,96 @@ Core invariants:
 - Checkpoint conflict metrics and explicit durable-winner reload/revalidation.
 - Fail-closed remediation execution-uncertainty service with provider idempotency reconciliation contract.
 - Production bootstrap/API integration for execution uncertainty, including unready state, bounded metric, and authenticated argument-free reconciliation.
+- Operator-cockpit recovery UX for `conflicted` and `execution_uncertain`, with action controls disabled while blocked and server-owned reload/reconciliation endpoints only.
 
-## Run log — 2026-09-07 — execution-uncertainty production integration
+## Run log — 2026-09-07 — operator lifecycle-recovery cockpit
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- repository metadata/default branch;
-- `runtime/bootstrap.py`;
-- `runtime/api.py`;
-- `runtime/execution_safety.py`;
-- `runtime/tests/test_execution_safety.py`;
-- existing API/bootstrap test structure;
-- `EXECUTION_UNCERTAINTY.md`.
+- repository metadata/default branch and current head (`fe0a80bc14a8fa5945489a76343629b28f90c488` at run start);
+- `runtime/operator_console.py`;
+- `runtime/api.py` and its existing `checkpoint_state` contract;
+- `runtime/execution_safety.py`, including `execution_reconciliation_state()` and the explicit durable-reload requirement;
+- `runtime/tests/test_operator_console.py`;
+- `OPERATOR_CONSOLE.md` and the prior execution-uncertainty handoff.
 
-The highest-value remaining gap matched the previous handoff: `ExecutionSafeIncidentService` existed, but normal runtime composition still instantiated `IncidentService`; readiness did not recognize `execution_uncertain`; and no authenticated reconciliation endpoint exposed the fail-closed recovery path.
+The highest-value gap matched the previous handoff: the API already failed closed, but the browser cockpit still rendered normal investigation/approval/execution controls and had no dedicated recovery workflow for checkpoint conflict or uncertain remediation execution.
 
 ### Exact changes made
 
-Updated `runtime/bootstrap.py`:
+Updated `runtime/operator_console.py`:
 
-- imports and constructs `ExecutionSafeIncidentService` for the normal runtime path;
-- leaves the public `RuntimeBundle.service` type compatible with `IncidentService` while using the safer subclass at runtime;
-- does not enable production remediation by default or change credential handling.
+- added a dedicated fail-closed lifecycle recovery panel;
+- consumes the existing bounded `checkpoint_state` returned by `GET /v1/incident` and by the recovery endpoints;
+- recognizes `conflicted` and `execution_uncertain` as lifecycle-blocking states;
+- disables investigation, Gemini briefing, approval revision entry, approval, and execution while blocked;
+- keeps refresh and audit timeline viewing available so operators can inspect bounded state/provenance without mutating lifecycle state;
+- for `conflicted`, guides the operator to `POST /v1/checkpoint/reload`;
+- for `execution_uncertain`, guides the operator through durable checkpoint reload and then `POST /v1/execution/reconcile`;
+- both recovery calls send only `{}` and never accept an operation id, provider state, target, action, evidence revision, or arbitrary reconciliation input;
+- explicitly states that reconciliation does not replay remediation;
+- after any lifecycle mutation failure, refreshes authoritative server checkpoint state so a stale browser tab cannot leave dangerous controls enabled after a CAS race;
+- after a successful reload that remains `execution_uncertain`, keeps the safety block visible and instructs the operator that reconciliation is still required;
+- after successful reconciliation, renders the fresh investigation returned by the server, restoring controls only after server state is synchronized;
+- added bounded recovery styling without external assets or dependencies.
 
-Updated `runtime/api.py`:
+Updated `runtime/tests/test_operator_console.py`:
 
-- `/readyz` now returns unready/HTTP 503 when checkpoint state is either `conflicted` or `execution_uncertain`;
-- `/metrics` now exports the fixed-label gauge `stageguard_remediation_execution_uncertain 0|1`;
-- the gauge contains no incident id, revision, actor, remediation operation id, provider, endpoint, GCS generation, or credential labels;
-- added authenticated `POST /v1/execution/reconcile`;
-- the reconciliation endpoint accepts an empty JSON object only and rejects caller-supplied operation ids/provider states/targets;
-- the endpoint delegates only to the server-owned `reconcile_execution_uncertainty(actor=authenticated_subject)` method;
-- bumped the bounded HTTP server version to `StageGuard/0.10`.
-
-Added `runtime/tests/test_execution_safety_api.py`:
-
-- creates a real `ExecutionSafeIncidentService` with a deterministic fake checkpoint race and reconciliation-capable remediation adapter;
-- proves a post-provider checkpoint conflict drives `/readyz` to HTTP 503;
-- proves the uncertainty metric is set and does not expose the deterministic operation id;
-- proves reconciliation before durable-winner reload returns conflict/invalid-state and never calls remediation again;
-- proves authenticated checkpoint reload leaves the service `execution_uncertain`;
-- proves successful reconciliation performs fresh evidence collection, clears stale approval/outcome, returns to `synchronized`, and keeps the remediation invocation count at exactly one;
-- proves the reconciliation endpoint requires authentication and rejects a caller-supplied `operation_id`.
-
-Added `runtime/tests/test_bootstrap_execution_safety.py`:
-
-- verifies normal local runtime composition returns `ExecutionSafeIncidentService` rather than the base service;
-- verifies the initial execution-reconciliation state is `clear`.
-
-Updated `EXECUTION_UNCERTAINTY.md`:
-
-- documents the now-integrated production/API state machine;
-- documents `/healthz` vs `/readyz` behavior while execution is uncertain;
-- documents the bounded uncertainty metric;
-- documents the authenticated zero-argument reload/reconciliation sequence and server ownership of the deterministic operation id;
-- records the direct lifecycle, HTTP, and bootstrap regression coverage.
+- verifies the lifecycle recovery panel and both recovery controls are present;
+- verifies browser logic recognizes both blocked checkpoint states;
+- verifies investigation and approval input are disabled while blocked;
+- verifies execution gating includes the lifecycle safety block;
+- verifies the cockpit calls only the server-owned reload and reconciliation endpoints;
+- verifies recovery POST bodies are empty objects;
+- verifies no concrete `operation_id` field is present in cockpit HTML or JavaScript;
+- verifies the UI explicitly communicates that reconciliation does not replay remediation;
+- verifies lifecycle mutation failure paths refresh authoritative checkpoint state rather than leaving stale controls enabled.
 
 ### Commits produced this run
 
-- `6620332f` — wire execution-safe lifecycle service into runtime bootstrap
-- `b1b64c3e` — expose fail-closed uncertain execution readiness and reconciliation
-- `aeb9c29c` — test uncertain execution API safety boundary
-- `b155516e` — verify bootstrap composes execution-safe incident service
-- `d10ad1ff` — document integrated uncertain execution recovery boundary
+- `b8a49d65` — add fail-closed operator recovery cockpit
+- `91f5e270` — test fail-closed cockpit recovery controls
+- `eecd3038` — fix cockpit redaction regression assertion
 
 ### Tests / checks / results
 
 No GitHub Actions workflow was created, triggered, rerun, or modified.
 
-The changed source and test files were written through the authenticated GitHub connector and re-inspected structurally. This automation runtime still does not expose a runnable repository checkout and prior direct checkout attempts fail DNS resolution for `github.com`; therefore the new Python tests are **not claimed as executed successfully** in this run.
+Attempted credential-free local validation with:
+
+```text
+python -m unittest tests.test_operator_console tests.test_execution_safety_api tests.test_bootstrap_execution_safety
+```
+
+A fresh checkout was attempted first, but the container failed before Python started:
+
+```text
+fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com
+```
+
+Therefore the new Python tests are **not claimed as executed successfully** in this run. The changed files were written through the authenticated GitHub connector and structurally re-inspected through repository APIs.
 
 No Grafana, Loki, Gemini, IAP, Cloud Logging, GCS, Secret Manager, operator, or remediation credential/resource was used.
 
 ### Decisions made
 
-1. **Execution uncertainty is a readiness failure.** Process liveness remains independent, but an instance that cannot prove remediation side-effect state must receive no production traffic that assumes lifecycle consistency.
-2. **Reconciliation inputs remain server-owned.** The HTTP caller cannot choose or alter the deterministic provider operation id, provider state, target, evidence revision, or remediation action.
-3. **Durable reload remains a separate explicit step.** `/v1/execution/reconcile` does not silently load or merge checkpoint state; operators must first adopt the durable winner through `/v1/checkpoint/reload`.
-4. **No action replay during reconciliation.** HTTP regression coverage asserts the remediation provider is contacted exactly once across conflict, reload, and reconciliation.
-5. **Observability remains bounded.** Only a 0/1 uncertainty gauge is exported; high-cardinality or sensitive lifecycle/provider identity is excluded.
-6. **The safer lifecycle service is now the default composition.** Production safety no longer depends on callers remembering to instantiate a special subclass manually.
+1. **Browser gating mirrors, but never replaces, server authority.** The UI disables dangerous controls based on bounded checkpoint state; every server lifecycle method remains independently fail-closed.
+2. **Mutation errors force a status refresh.** A post-provider CAS conflict can happen after the browser has already initiated execution, so the tab must immediately re-fetch authoritative checkpoint state rather than trust its previous incident snapshot.
+3. **Recovery inputs remain server-owned.** The cockpit submits empty JSON objects only. It never displays or accepts a remediation operation id, target, provider state, action name, or arbitrary reconciliation payload.
+4. **Execution uncertainty remains blocked after reload.** Reload resolves durable checkpoint ownership only; the UI keeps approval/execution disabled until reconciliation plus fresh Grafana investigation completes.
+5. **No replay control exists.** The uncertain-execution workflow exposes reconciliation only; there is no browser action that retries or replays remediation.
+6. **Read-only operator visibility stays available.** Refresh and bounded audit viewing remain usable during safety blocks so operators can understand state without mutating it.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted in this environment because no runnable checkout is exposed and direct `github.com` checkout has failed DNS resolution in prior attempts.
-- The default `HttpRemediationTransport` still has no provider-specific reconciliation API. This is deliberate: StageGuard cannot safely invent a provider lookup contract. Production remediation transports must implement `reconcile(...)` before uncertain execution can clear.
+- The deterministic Python suite remains unexecuted in this environment because direct checkout still fails DNS resolution for `github.com`.
+- The default `HttpRemediationTransport` still has no provider-specific reconciliation API. This remains intentionally fail-closed; production remediation transports must implement a real idempotency lookup contract.
 - The real-GCS two-instance acceptance harness and Cloud Run/IAP browser acceptance still require external credentials/resources.
 - Grafana MCP readiness and full metric+Loki investigation still need acceptance against a real Grafana Cloud or self-hosted instance.
-- The operator cockpit does not yet surface a dedicated conflict/uncertainty recovery workflow; the safe API exists, but operators currently need to invoke the endpoints directly.
+- The cockpit currently consumes only coarse `checkpoint_state`. The service already has a bounded `execution_reconciliation_state()` (`reload_required` / `reloaded` / `clear`), but the HTTP API does not expose it yet. Server enforcement is safe, but exposing that bounded state would let the cockpit distinguish “reload still required” from “reload completed, reconcile now” across browser refreshes without relying on endpoint failure messages.
 
 ## Single best next step
 
-**Add a bounded operator-cockpit recovery UX for `conflicted` and `execution_uncertain` states that exposes only safe state, guides the operator through durable checkpoint reload then reconciliation, disables execute/approve controls while blocked, and never accepts or displays the remediation operation id. Add browser-free DOM/asset regression tests ensuring the UI cannot accidentally offer action replay during uncertainty.**
+**Expose the existing bounded `execution_reconciliation_state()` through authenticated incident/recovery responses and use it in the cockpit to make the uncertainty workflow restart-safe across browser refreshes: show exactly `reload required` versus `ready to reconcile`, while continuing to exclude operation ids/provider details. Add API + cockpit regression coverage proving the state is low-cardinality, authenticated, and cannot enable action replay.**
