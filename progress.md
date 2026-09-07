@@ -84,12 +84,16 @@ Added `runtime/tests/test_operator_console.py`:
 
 Added `OPERATOR_CONSOLE.md` documenting the operator flow, browser trust boundary, same-origin/IAP composition, CSP, storage policy, and credential-free regression coverage.
 
+Updated `README.md` so the executable vertical slice, safety table, HTTP surfaces, repository map, status, and roadmap all reflect the implemented cockpit rather than listing it as future work.
+
 ### Commits produced this run
 
 - `bbc5f0d0` — authenticated StageGuard operator cockpit assets
 - `3577ccbc` — authenticated same-origin API serving + browser security headers
 - `cea9d68d` — operator cockpit HTTP/security regression coverage
 - `0357212b` — operator cockpit security/usage documentation
+- `a96eefd6` — initial run handoff
+- `94673dce` — README coherence refresh
 
 ### Tests / checks / results
 
@@ -117,7 +121,6 @@ No GitHub Actions workflow was created, triggered, rerun, or used as a workaroun
 - The cockpit has not yet been exercised through a real Cloud Run + IAP browser session.
 - Cache/stale readiness behavior has not yet been exercised against a real `mcp-grafana:1.3.0` + Grafana Cloud/self-hosted instance.
 - Optional Gemini has not yet been exercised against live Vertex AI ADC.
-- The README near-term roadmap still needs a small coherence refresh to mark the operator console as implemented.
 
 ## Single best next step
 
