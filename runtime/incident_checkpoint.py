@@ -17,8 +17,11 @@ from investigator import Evidence, IncidentReport
 from log_evidence import LogCorroboration
 from remediation import ActionResult, Approval, RecoverySample, RemediationOutcome
 
-SCHEMA = "stageguard.incident-checkpoint.v1"
+SCHEMA_V1 = "stageguard.incident-checkpoint.v1"
+SCHEMA_V2 = "stageguard.incident-checkpoint.v2"
+SCHEMA = SCHEMA_V2
 _MAX_BYTES = 256 * 1024
+_EXECUTION_PHASES = {"none", "approved", "dispatching", "resolved"}
 
 
 class CheckpointConflictError(RuntimeError):
@@ -38,6 +41,38 @@ class IncidentCheckpoint:
     approval: Approval | None
     outcome: RemediationOutcome | None
     sequence: int
+    # None means callers are using the ordinary lifecycle API; serialization
+    # derives the precise v2 phase from approval/outcome. ``legacy_unknown`` is
+    # internal-only and is produced when restoring an ambiguous v1 checkpoint.
+    execution_phase: str | None = None
+
+
+def _derived_execution_phase(checkpoint: IncidentCheckpoint) -> str:
+    if checkpoint.execution_phase is not None:
+        return checkpoint.execution_phase
+    if checkpoint.outcome is not None:
+        return "resolved"
+    if checkpoint.approval is not None:
+        return "approved"
+    return "none"
+
+
+def _validate_execution_phase(
+    phase: str,
+    approval: Approval | None,
+    outcome: RemediationOutcome | None,
+    *,
+    allow_legacy: bool = False,
+) -> None:
+    allowed = _EXECUTION_PHASES | ({"legacy_unknown"} if allow_legacy else set())
+    if phase not in allowed:
+        raise ValueError("invalid checkpoint execution phase")
+    if phase == "none" and (approval is not None or outcome is not None):
+        raise ValueError("checkpoint execution phase does not match lifecycle state")
+    if phase in {"approved", "dispatching", "legacy_unknown"} and (approval is None or outcome is not None):
+        raise ValueError("checkpoint execution phase does not match lifecycle state")
+    if phase == "resolved" and (approval is None or outcome is None):
+        raise ValueError("checkpoint execution phase does not match lifecycle state")
 
 
 def _safe_outcome_dict(outcome: RemediationOutcome | None) -> dict | None:
@@ -76,6 +111,8 @@ def _outcome_from_dict(value: dict | None) -> RemediationOutcome | None:
 
 
 def _state(checkpoint: IncidentCheckpoint) -> dict:
+    phase = _derived_execution_phase(checkpoint)
+    _validate_execution_phase(phase, checkpoint.approval, checkpoint.outcome)
     return {
         "incident_id": checkpoint.incident_id,
         "revision": checkpoint.revision,
@@ -83,6 +120,7 @@ def _state(checkpoint: IncidentCheckpoint) -> dict:
         "approval": None if checkpoint.approval is None else asdict(checkpoint.approval),
         "outcome": _safe_outcome_dict(checkpoint.outcome),
         "sequence": checkpoint.sequence,
+        "execution_phase": phase,
     }
 
 
@@ -95,8 +133,9 @@ def checkpoint_document(checkpoint: IncidentCheckpoint, *, signing_key: bytes | 
 
 
 def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = None, require_signature: bool = False) -> IncidentCheckpoint:
-    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") != SCHEMA:
+    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") not in {SCHEMA_V1, SCHEMA_V2}:
         raise ValueError("unsupported incident checkpoint document")
+    schema = document["schema"]
     state = document.get("state")
     digest = document.get("sha256")
     signature = document.get("hmac_sha256")
@@ -117,7 +156,8 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
     elif require_signature or signature is not None:
         raise ValueError("signed incident checkpoint cannot be verified")
 
-    required = {"incident_id", "revision", "report", "approval", "outcome", "sequence"}
+    v1_required = {"incident_id", "revision", "report", "approval", "outcome", "sequence"}
+    required = v1_required if schema == SCHEMA_V1 else v1_required | {"execution_phase"}
     if set(state) != required:
         raise ValueError("invalid incident checkpoint state")
     incident_id = state["incident_id"]
@@ -133,7 +173,20 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
     approval_raw = state["approval"]
     approval = None if approval_raw is None else Approval(**approval_raw)
     outcome = _outcome_from_dict(state["outcome"])
-    return IncidentCheckpoint(incident_id, revision, report, approval, outcome, sequence)
+
+    if schema == SCHEMA_V1:
+        # v1 has no pre-side-effect marker. A pending approval is therefore
+        # execution-ambiguous for production adapters after restart.
+        phase = "legacy_unknown" if approval is not None and outcome is None else (
+            "resolved" if outcome is not None else "none"
+        )
+        _validate_execution_phase(phase, approval, outcome, allow_legacy=True)
+    else:
+        phase = state["execution_phase"]
+        if not isinstance(phase, str):
+            raise ValueError("invalid checkpoint execution phase")
+        _validate_execution_phase(phase, approval, outcome)
+    return IncidentCheckpoint(incident_id, revision, report, approval, outcome, sequence, phase)
 
 
 def _encode(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> bytes:
@@ -167,6 +220,8 @@ def _http_status(exc: BaseException) -> int | None:
 class JsonCheckpointStore:
     """Credential-free atomic local checkpoint store with owner-only permissions."""
 
+    supports_execution_phase = True
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +252,8 @@ class JsonCheckpointStore:
 class GoogleCloudStorageCheckpointStore:
     """Durable authenticated single-object checkpoint store with optimistic compare-and-swap semantics."""
 
+    supports_execution_phase = True
+
     def __init__(self, bucket, signing_key: bytes, object_name: str = "stageguard/incident-checkpoint.json") -> None:
         name = object_name.strip().lstrip("/")
         if not name or ".." in name.split("/") or len(name) > 512:
@@ -207,8 +264,6 @@ class GoogleCloudStorageCheckpointStore:
         self._object_name = name
         self._signing_key = signing_key
         self._generation_lock = threading.Lock()
-        # A fresh store may create only a missing object. A successful load/save pins
-        # the exact generation this process is allowed to replace next.
         self._expected_generation: int | None = 0
 
     @classmethod
@@ -277,6 +332,8 @@ class GoogleCloudStorageCheckpointStore:
 
 class ObservableCheckpointStore:
     """Checkpoint decorator exposing only fixed-label, non-sensitive Prometheus telemetry."""
+
+    supports_execution_phase = True
 
     def __init__(self, inner: CheckpointStore, *, monotonic: Callable[[], float] = time.monotonic) -> None:
         self._inner = inner
