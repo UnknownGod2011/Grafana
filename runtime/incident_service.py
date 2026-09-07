@@ -25,6 +25,10 @@ class AuditSink(Protocol):
     def append(self, event: "AuditEvent") -> None: ...
 
 
+class AuditReader(Protocol):
+    def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list["AuditEvent"]: ...
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     sequence: int
@@ -133,6 +137,7 @@ class IncidentService:
         remediation: RemediationClient,
         audit: AuditSink,
         *,
+        audit_reader: AuditReader | None = None,
         telemetry_profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
         activation_record: ActivationRecord | None = None,
         datasource_identity: str | None = None,
@@ -173,6 +178,7 @@ class IncidentService:
         self._logs = logs
         self._remediation = remediation
         self._audit = audit
+        self._audit_reader = audit_reader
         self._profile = telemetry_profile
         self._activation = activation_record
         self._log_activation = log_activation_record
@@ -200,10 +206,10 @@ class IncidentService:
     def audit_timeline(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> dict[str, object]:
         """Return a bounded redacted lifecycle timeline for the current incident.
 
-        Durable audit storage remains write-only to this service surface. This read
-        model is derived from lifecycle events already emitted by this process and
-        deliberately excludes provider strings, raw evidence, queries, targets,
-        endpoints, activation identifiers, and actor identities.
+        When a durable reader is configured, Cloud Logging is queried only for the
+        exact current incident and a bounded page, then merged with the process-local
+        projection. The same event-specific allow-list is applied after merging.
+        Provider details never become part of the returned operator contract.
         """
         if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
             raise ValueError("after_sequence must be a non-negative integer")
@@ -215,12 +221,30 @@ class IncidentService:
                 raise RuntimeError("no incident has been investigated")
             if incident_id != snapshot.incident_id:
                 raise ValueError("timeline request does not match the current incident")
-            matching = [
+
+            candidates: list[AuditEvent] = []
+            if self._audit_reader is not None:
+                candidates.extend(
+                    self._audit_reader.read(
+                        incident_id=incident_id,
+                        after_sequence=after_sequence,
+                        limit=min(limit + 1, 101),
+                    )
+                )
+            candidates.extend(
                 event for event in self._timeline
                 if event.incident_id == incident_id and event.sequence > after_sequence
-            ]
-            selected = matching[:limit]
-            has_more = len(matching) > len(selected)
+            )
+
+            by_sequence: dict[int, AuditEvent] = {}
+            for event in candidates:
+                existing = by_sequence.get(event.sequence)
+                if existing is not None and existing != event:
+                    raise RuntimeError("conflicting durable and in-process audit events")
+                by_sequence[event.sequence] = event
+            ordered = [by_sequence[sequence] for sequence in sorted(by_sequence)]
+            selected = ordered[:limit]
+            has_more = len(ordered) > len(selected)
             next_after = selected[-1].sequence if selected else after_sequence
             return {
                 "incident_id": incident_id,
