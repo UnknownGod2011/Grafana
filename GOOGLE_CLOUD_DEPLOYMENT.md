@@ -95,7 +95,29 @@ Before using the helper, grant the runtime service account only the permissions 
 
 ## Health and readiness
 
-`GET /healthz` is intentionally unauthenticated inside the application and returns only `{ "ok": true }`. IAP/Cloud Run may still protect the route externally. The endpoint proves that the HTTP process is serving; it does not claim Grafana evidence-plane readiness. Production evidence readiness remains enforced by the metric and Loki activation artifacts during startup and investigation.
+`GET /healthz` is intentionally unauthenticated inside the application and always performs a cheap process-liveness check only:
+
+```json
+{"ok":true}
+```
+
+`GET /readyz` is also application-unauthenticated so platform health machinery can call it, although IAP/Cloud Run may still protect the route externally. It returns HTTP `200` only when all four bounded production checks are healthy, otherwise HTTP `503`:
+
+```json
+{
+  "ready": true,
+  "checks": {
+    "metric_activation": "ok",
+    "loki_activation": "ok",
+    "prometheus_mcp": "ok",
+    "loki_mcp": "ok"
+  }
+}
+```
+
+The readiness probe re-verifies metric and Loki activation freshness on every check, including the exact pinned datasource hashes and semantic contracts. It then performs the official Grafana MCP initialize/tools-list handshake and one read-only `get_datasource` lookup for each pinned datasource UID. This proves the embedded MCP binary can start, required read tools remain available, Grafana credentials/network/org context are usable, and both pinned datasources are actually accessible. It does **not** execute PromQL or LogQL, consume incident evidence, or mutate Grafana.
+
+Readiness responses deliberately expose only `ok`, `failed`, or `missing` check states. MCP/Grafana exception strings, datasource UIDs, Grafana URLs, credentials, PromQL, LogQL, activation hashes, and raw evidence are never returned by `/readyz`.
 
 Cloud Run requires the ingress container to bind to `0.0.0.0` on the injected `PORT`; `runtime/cloudrun_entrypoint.py` enforces that composition while validating `PORT` is in `1..65535`.
 
@@ -107,7 +129,9 @@ Cloud Run requires the ingress container to bind to `0.0.0.0` on the injected `P
 - Invalid IAP JWT signature, audience, issuer, or subject: request is rejected with a generic authentication error.
 - Spoofed unsigned Google identity headers: ignored.
 - Missing Google production dependencies: explicit production mode fails rather than silently downgrading.
-- Missing Grafana MCP binary: evidence client startup fails; no Docker fallback occurs in Cloud Run.
+- Missing Grafana MCP binary: `/readyz` returns `503`; no Docker fallback occurs in Cloud Run.
+- Expired or drifted metric/Loki activation: `/readyz` returns `503` even if the process remains live.
+- Grafana auth/network/organization failure or inaccessible pinned datasource: `/readyz` returns `503` without exposing the provider error.
 - Missing Gemini credentials: irrelevant unless Gemini was explicitly enabled.
 - Missing remediation credentials: irrelevant because the standard Cloud Run artifact cannot enable remediation through environment configuration.
 
@@ -128,8 +152,19 @@ PORT=8080 docker run --rm -p 8080:8080 \
 
 A complete local production-path acceptance run also needs mounted config/activation files and a reachable Grafana instance with a read-only service-account token. Do not weaken IAP verification merely to make the production artifact start locally; use the ordinary local bootstrap path for credential-free development.
 
+Once running against a real Grafana evidence plane, verify process and evidence health independently:
+
+```bash
+curl -i http://127.0.0.1:8080/healthz
+curl -i http://127.0.0.1:8080/readyz
+```
+
+`/healthz` should stay `200` as long as the HTTP process is alive. `/readyz` should change to `503` if an activation expires, a datasource UID drifts, the MCP binary becomes unavailable, or Grafana access fails.
+
 ## Official references
 
+- Grafana MCP introduction/authentication: https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
+- Grafana MCP tools/RBAC reference: https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
 - Grafana MCP installation/binary: https://grafana.com/docs/grafana/latest/developer-resources/mcp/set-up/install-the-binary/
 - Grafana MCP tool restriction/read-only mode: https://grafana.com/docs/grafana/latest/developer-resources/mcp/configure/enable-and-disable-tools/
 - Google Cloud Run container contract: https://cloud.google.com/run/docs/container-contract
