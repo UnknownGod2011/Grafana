@@ -35,13 +35,21 @@ The HMAC key is deployment-owned secret material, is read only server-side, is n
 
 The GCS adapter uses Application Default Credentials and a fixed server-owned bucket/object mapping. The browser cannot choose bucket names, object names, generations, signatures, or storage operations.
 
-Each GCS write also uses an object-generation precondition. Creation uses `if_generation_match=0`; updates reload the current object generation and require that exact generation on upload. A competing writer therefore fails instead of silently overwriting newer lifecycle state. HTTP 412 generation-precondition failures are mapped to the bounded `CheckpointConflictError`; provider exception text is not exposed through that public error.
+### Strict compare-and-swap semantics
+
+Each GCS store instance pins the exact object generation it successfully loaded or wrote. The next save uses **that pinned generation** as `if_generation_match`; it does not re-read the latest generation immediately before upload. A fresh store that has not loaded an existing object may only attempt creation with `if_generation_match=0`.
+
+This distinction is critical. If two StageGuard instances both restore generation `N`, instance A may write generation `N+1`, but instance B must still attempt its write against `N` and receive a conflict. Re-reading `N+1` inside B's save path would turn optimistic concurrency into a last-writer-wins overwrite and could replace a newer approval-bearing lifecycle state.
+
+Reads are generation-bound as well: after metadata reload, StageGuard downloads bytes with `if_generation_match=<pinned generation>` so the validated HMAC/document corresponds to the generation that becomes the process's next compare-and-swap token.
+
+HTTP 412 generation-precondition failures are mapped to bounded `CheckpointConflictError` values. Provider exception text is not exposed. A conflict does not advance the process-local generation token and never triggers a blind retry.
 
 Use the narrowest bucket/object IAM available. Bucket write permission alone is intentionally insufficient to forge lifecycle authorization because a valid HMAC is also required.
 
 ## Checkpoint observability
 
-Configured JSON and GCS stores are wrapped by `ObservableCheckpointStore`. `/metrics` now includes fixed-label checkpoint telemetry alongside evidence-plane readiness metrics:
+Configured JSON and GCS stores are wrapped by `ObservableCheckpointStore`. `/metrics` includes fixed-label checkpoint telemetry alongside evidence-plane readiness metrics:
 
 - `stageguard_checkpoint_last_operation_ok`
 - `stageguard_checkpoint_loads_total{result="ok|empty|failed"}`
@@ -62,6 +70,6 @@ There is one unavoidable distributed-systems boundary: a process can terminate a
 
 ## Current validation status
 
-Credential-free unit coverage exists for local restart restoration, approval invalidation, consumed-approval restoration, checkpoint tamper rejection, provider-metadata stripping, GCS create/update generation preconditions, bounded 412 conflict classification, wrong-HMAC rejection, unsigned/forged-state rejection, short-key rejection, object-name bounds, checkpoint metric privacy/result classification, and the Cloud Run startup requirement for a signing secret.
+Credential-free unit coverage exists for local restart restoration, approval invalidation, consumed-approval restoration, checkpoint tamper rejection, provider-metadata stripping, GCS create/update generation preconditions, stale-writer conflict behavior, create-only behavior for a fresh uninitialized writer, generation-bound reads, bounded 412 classification, wrong-HMAC rejection, unsigned/forged-state rejection, short-key rejection, object-name bounds, checkpoint metric privacy/result classification, and the Cloud Run startup requirement for a signing secret.
 
 A real GCS/Cloud Run acceptance test still requires a Google Cloud project, private bucket, ADC/service-account permissions, injected checkpoint HMAC secret, and a runnable checkout environment.
