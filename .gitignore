@@ -1,5 +1,6 @@
-# Local runtime secrets and caches
+# Local runtime secrets, state and caches
 runtime/.secrets/
+.stageguard/
 __pycache__/
 *.py[cod]
 
