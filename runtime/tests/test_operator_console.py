@@ -93,6 +93,38 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("localStorage", body)
         self.assertNotIn("sessionStorage", body)
 
+    def test_console_has_fail_closed_checkpoint_recovery_workflow(self):
+        _status, _type, _csp, _cache, html = self.get("/console", authenticated=True)
+        _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
+        self.assertIn('id="lifecycle-recovery"', html)
+        self.assertIn('id="reload-checkpoint"', html)
+        self.assertIn('id="reconcile-execution"', html)
+        self.assertIn("checkpointState === 'conflicted'", js)
+        self.assertIn("checkpointState === 'execution_uncertain'", js)
+        self.assertIn("q('investigate').disabled = blocked", js)
+        self.assertIn("q('approval-revision').disabled = blocked", js)
+        self.assertIn("lifecycleBlocked() || !approval", js)
+        self.assertIn("/v1/checkpoint/reload", js)
+        self.assertIn("/v1/execution/reconcile", js)
+        self.assertIn("This will not replay remediation", js)
+
+    def test_console_never_exposes_or_accepts_remediation_operation_id(self):
+        _status, _type, _csp, _cache, html = self.get("/console", authenticated=True)
+        _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
+        self.assertNotIn("operation_id", html)
+        self.assertNotIn("operation_id", js)
+        self.assertNotIn("operation identifier", html.lower())
+        # The server-owned recovery endpoints receive empty objects only.
+        self.assertIn("/v1/checkpoint/reload',{method:'POST',body:{}}", js)
+        self.assertIn("/v1/execution/reconcile',{method:'POST',body:{}}", js)
+
+    def test_mutation_failures_refresh_authoritative_checkpoint_state(self):
+        _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
+        # A CAS conflict can be raised after the browser initiated execution.
+        # Every lifecycle mutation catch therefore refreshes authoritative state
+        # rather than leaving stale action controls enabled in the tab.
+        self.assertGreaterEqual(js.count("catch(err) { message(err.message); await refresh(); }"), 6)
+
     def test_health_and_metrics_remain_independent_of_operator_authentication(self):
         status, _type, _csp, _cache, _body = self.get("/healthz")
         self.assertEqual(200, status)
