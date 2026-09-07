@@ -4,7 +4,7 @@
 
 StageGuard is a personal open-source incident commander for live media workflows. The executable production path now covers:
 
-`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → Cloud Run/IAP deployment → independent liveness/readiness → bounded readiness cache/backoff + self-observability → authenticated same-origin operator cockpit → bounded redacted incident timeline`
+`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → Cloud Run/IAP deployment → independent liveness/readiness → bounded readiness cache/backoff + self-observability → authenticated same-origin operator cockpit → bounded redacted incident timeline → narrowly scoped durable Cloud Logging timeline reconstruction`
 
 Core invariants:
 
@@ -17,7 +17,7 @@ Core invariants:
 - Gemini remains advisory only and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Operator UI requests are same-origin and server-authoritative; the browser receives no Grafana, Gemini, remediation, Cloud Logging, or infrastructure credential.
 - Human approval remains bound to the exact incident evidence revision; the cockpit adds explicit typed-revision confirmation without weakening server-side enforcement.
-- Operator audit reads are incident-scoped and derived from a bounded redacted lifecycle projection; the browser never receives generic Cloud Logging read access.
+- Operator audit reads are incident-scoped, bounded, schema-pinned, and redacted; the browser never receives generic Cloud Logging read access or arbitrary filter capability.
 - Production writes remain disabled in the standard Cloud Run composition.
 - `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed non-sensitive readiness telemetry.
 
@@ -36,109 +36,129 @@ Core invariants:
 - Persistent readiness probe with external-probe TTL, failure backoff, bounded stale-on-transient-failure semantics, single-flight locking, and Prometheus-format self-observability.
 - Authenticated same-origin operator cockpit for deterministic evidence, Gemini briefing, revision-bound approval, execution, and recovery state.
 - Bounded incident-scoped audit timeline with sequence pagination, actor pseudonymization, event-specific payload allow-lists, and same-origin cockpit rendering.
+- Production Cloud Logging audit reader pinned to the dedicated StageGuard log, `stageguard.audit.v1`, one exact incident ID, a bounded lookback, and a bounded result count; durable and in-process timeline entries are merged by sequence before the same UI redaction allow-list is applied.
 
-## Run log — 2026-09-07 — bounded operator audit timeline
+## Run log — 2026-09-07 — durable audit timeline reconstruction
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Then inspected the current repository and relevant implementation surfaces including:
+Read `progress.md` completely before choosing work. Then inspected the current repository and the implementation surfaces most relevant to the previous handoff:
 
-- `runtime/api.py`
-- `runtime/incident_service.py`
-- `runtime/operator_console.py`
 - `runtime/cloud_audit.py`
-- `runtime/tests/test_operator_console.py`
+- `runtime/incident_service.py`
+- `runtime/bootstrap.py`
+- `runtime/cloudrun_entrypoint.py`
+- `runtime/api.py`
+- `runtime/tests/test_audit_timeline.py`
+- `runtime/requirements-cloudrun.txt`
+- `Dockerfile.api`
 - `OPERATOR_CONSOLE.md`
 
-The highest-value gap matched the previous handoff: lifecycle events were already written to bounded/durable audit sinks, but authenticated incident commanders had no safe incident-scoped provenance view and would otherwise need direct Cloud Logging access.
+The highest-value unblocked gap was the previous handoff: Cloud Logging was already the durable sink of record, but the operator timeline could read only the current process-local projection.
+
+### Research / attribution checked
+
+Verified the current official Google Cloud Logging Python client documentation before implementing the reader. `Logger.list_entries()` supports server-side `filter_`, ordering, `max_results`, and `page_size`, which allows StageGuard to keep the provider query bounded rather than downloading broad log history and filtering it in-process:
+
+- https://docs.cloud.google.com/python/docs/reference/logging/latest/logger
+- https://docs.cloud.google.com/python/docs/reference/logging/latest/client
+
+Google's current Cloud Logging documentation also distinguishes log-write and log-read permissions; StageGuard continues to keep those capabilities server-side and does not expose a Logs Explorer-style surface to the browser.
 
 ### Exact changes made
 
+Added `runtime/durable_audit_reader.py`:
+
+- introduced `GoogleCloudAuditReader` as a narrow read adapter rather than a generic Cloud Logging proxy;
+- binds every provider query to the configured logger's fully qualified `logName`;
+- requires `jsonPayload.schema="stageguard.audit.v1"`;
+- filters one exact `incident_id` and `jsonPayload.sequence > after_sequence`;
+- applies a default 24-hour lookback with a hard seven-day implementation ceiling;
+- caps one provider read at 101 entries so the service can request at most one look-ahead row for pagination;
+- uses ascending provider ordering and then deterministically sorts by audit sequence;
+- rejects blank/oversized incident IDs and escapes Logging filter literals;
+- requires the exact audit-v1 top-level document shape and rejects unknown top-level fields;
+- reuses the existing `audit_event_document()` validator so read-path payload constraints cannot be broader than write-path constraints;
+- rejects wrong-incident entries, old/future timestamps, lower-bound sequence violations, and conflicting duplicate sequences;
+- imports `google-cloud-logging` lazily so local/free development remains credential- and dependency-light.
+
 Updated `runtime/incident_service.py`:
 
-- lifecycle events are now also retained in a process-local bounded projection capped at 512 entries;
-- `_record()` constructs one canonical `AuditEvent`, appends it to the configured durable audit sink, and only then appends it to the operator projection;
-- added `audit_timeline(incident_id, after_sequence, limit)` with exact current-incident binding;
-- pagination is deterministic by monotonically increasing audit sequence;
-- `after_sequence` must be a non-negative integer and `limit` is hard-bounded to 1..100;
-- timeline output contains sequence, timestamp, event type, a 12-character SHA-256-derived pseudonymous actor reference, and an event-specific safe payload allow-list;
-- investigation timeline metadata exposes revision/status/confidence/evidence mode while excluding activation identifiers;
-- Gemini timeline metadata exposes revision, briefing digest, and bounded next-step classification;
-- approval metadata exposes revision and action name while deliberately dropping action target;
-- remediation metadata exposes revision, recovery status, sample count, and action acceptance while dropping arbitrary action metadata;
-- unknown payload keys are dropped by default, so future audit fields are not automatically exposed to the UI.
+- added an optional `AuditReader` protocol and constructor dependency;
+- `audit_timeline()` now asks the durable reader for at most `limit + 1` entries when configured;
+- durable and process-local events are merged by sequence;
+- identical duplicate events are deduplicated;
+- conflicting events claiming the same sequence fail closed;
+- the existing event-type-specific `_timeline_event()` allow-list remains the only data promoted to the operator response;
+- current-incident binding, 1..100 response bounds, actor pseudonymization, and sequence pagination remain unchanged.
 
-Updated `runtime/api.py`:
+Updated `runtime/bootstrap.py`:
 
-- added authenticated `GET /v1/audit`;
-- query contract is `incident_id` plus optional `after_sequence` and `limit`;
-- duplicate, unsupported, malformed, negative, and oversized pagination parameters fail closed;
-- the endpoint delegates all incident scoping and output redaction to `IncidentService.audit_timeline()`;
-- platform endpoints remain unauthenticated as before, while incident/timeline surfaces require the configured identity provider;
-- URL path parsing is now explicit so query strings cannot interfere with endpoint routing;
-- server version advanced to `StageGuard/0.7`.
+- Cloud Logging mode now constructs both `GoogleCloudLoggingAuditSink` and `GoogleCloudAuditReader` against the same configured project/log name;
+- the durable reader is injected into `IncidentService` only for the `cloud-logging` backend;
+- JSONL/local development keeps `audit_reader=None` and therefore retains the existing free/process-local behavior;
+- production remediation defaults and credential boundaries were not changed.
 
-Updated `runtime/operator_console.py`:
+Added and hardened `runtime/tests/test_durable_audit_reader.py`:
 
-- added an incident timeline card to the authenticated same-origin cockpit;
-- timeline rows are rendered only with DOM `textContent`;
-- pagination uses a 25-event page size and the opaque monotonic sequence cursor supplied by the API;
-- timeline data is refreshed after investigation, briefing, approval, and remediation lifecycle transitions;
-- no Cloud Logging URL, credential, raw actor identity, provider exception, datasource identifier, query, target, endpoint, or raw evidence is added to browser assets.
-
-Added `runtime/tests/test_audit_timeline.py`:
-
-- verifies deterministic sequence pagination;
-- verifies incident scoping;
-- verifies 1..100 page bounds and non-negative cursor validation;
-- verifies pseudonymous actor references do not expose raw identity;
-- verifies activation IDs, target, endpoint, token, and arbitrary payload fields do not escape the allow-list;
-- verifies `/v1/audit` requires authentication;
-- verifies malformed, ambiguous, unsupported, and unbounded query strings fail with `invalid_request`.
+- fake logger verifies the exact dedicated `logName` filter;
+- verifies audit-v1 schema, incident, sequence, time-window, ordering, `max_results`, and `page_size` bounds;
+- verifies wrong incident, unknown document fields, unsafe cursors/result counts, old/future entries, and conflicting duplicate sequences are rejected;
+- verifies durable/local timeline merging still applies the existing payload redaction allow-list;
+- verifies a conflicting durable/local sequence fails closed.
 
 Updated `OPERATOR_CONSOLE.md`:
 
-- documents the timeline HTTP contract and pagination bounds;
-- documents the process-local projection vs durable Cloud Logging boundary;
-- documents exactly what timeline metadata may and may not reach the browser;
-- explicitly states that a process restart empties the operational read projection while durable Cloud Logging remains the audit sink of record.
+- documents the durable reader contract and exact bounds;
+- makes explicit that `/v1/audit` accepts no arbitrary Cloud Logging filters, resource names, log names, time ranges, or query expressions;
+- documents the production durable/local merge and unchanged browser redaction boundary;
+- documents that JSONL/local development still requires no Cloud Logging read capability;
+- explicitly records the remaining limitation: durable audit reconstruction does not yet restore the complete incident state machine after a cold restart.
 
 ### Commits produced this run
 
-- `5d80dad4` — bounded incident audit timeline read model
-- `f0cd597b` — authenticated `/v1/audit` endpoint
-- `02a3cf34` — cockpit timeline rendering
-- `1a233899` — authorization/pagination/redaction regression coverage
-- `2c65c57d` — operator timeline documentation
+- `08fedd76` — add bounded durable audit reader
+- `ab8cf407` — merge durable audit history into the operator timeline
+- `0161b30e` — wire durable audit reader into the Cloud Logging runtime
+- `e498bae9` — add durable audit reader contract tests
+- `8b111ba7` — pin durable reads to the dedicated fully qualified StageGuard log
+- `a194ff94` — harden durable reader/merge tests
+- `37d152be` — document durable operator audit reads
 
 ### Tests / checks / results
 
 Attempted a clean checkout and targeted suite with:
 
-`PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_timeline runtime.tests.test_operator_console runtime.tests.test_readiness_api -v`
+`PYTHONPATH=runtime python -m unittest runtime.tests.test_durable_audit_reader runtime.tests.test_audit_timeline -v`
 
-The environment failed before Python started because `github.com` DNS resolution is unavailable to the local execution container. The new tests are therefore **not claimed as passing** in this runtime.
+The local execution container again failed before Python started because DNS resolution for `github.com` is unavailable:
 
-No GitHub Actions workflow was created, triggered, rerun, or used as a workaround. No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credential was used. No production Cloud Run or Grafana resource was changed.
+`fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com`
+
+Therefore the new tests are **not claimed as passing** in this runtime. No GitHub Actions workflow was created, triggered, rerun, or used as a workaround.
+
+No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credential was used. No production Cloud Run or Grafana resource was changed.
 
 ### Decisions made
 
-1. **Do not give the cockpit Cloud Logging query capability.** The runtime keeps a narrow lifecycle projection instead of turning `/v1/audit` into a generic logs proxy.
-2. **Allow-list timeline payloads by event type.** New audit fields stay private unless intentionally promoted to the operator contract.
-3. **Pseudonymize actor identity.** Operators can correlate repeated lifecycle actions without exposing the raw authenticated subject in browser state.
-4. **Keep pagination sequence-based and bounded.** This is deterministic, simple to test, and cannot expand into arbitrary log search.
-5. **Treat the process-local timeline as operational context, not durable history.** Cloud Logging remains the durable sink of record.
-6. **Preserve remediation safety.** Production remediation remains disabled in the standard Cloud Run composition and the timeline adds no mutation path.
+1. **Keep the durable reader narrower than Logs Explorer.** The browser cannot choose a log, filter, resource, time window, or provider query.
+2. **Pin the dedicated log explicitly.** Relying only on schema/incident fields would be unnecessarily broad even though the configured logger is already logically scoped.
+3. **Reuse the write validator on reads.** Durable data is treated as untrusted input and must satisfy the same bounded audit-v1 contract before it reaches the service.
+4. **Keep UI redaction after durable/local merge.** Cloud Logging history never bypasses the event-specific allow-list or actor pseudonymization.
+5. **Use one-row look-ahead pagination.** The provider can return at most 101 entries for an API page capped at 100, enough to determine `has_more` without an unbounded read.
+6. **Keep local/free development unchanged.** The JSONL backend gets no Cloud Logging reader and needs no Google credential.
+7. **Do not confuse audit reconstruction with lifecycle restoration.** The operator can recover bounded durable provenance for the exact current incident, but StageGuard does not yet reconstruct the complete `IncidentSnapshot`, approval, or recovery state after a cold process restart.
 
 ### Current blockers / unknowns
 
 - The deterministic Python suite remains unexecuted because the local execution environment cannot resolve `github.com` for a runnable checkout.
 - `Dockerfile.api` still needs a real Docker build acceptance on a Docker-capable host.
+- The durable reader has fake-client coverage but has not yet been exercised against a real Cloud Logging project/service account.
 - The cockpit has not yet been exercised through a real Cloud Run + IAP browser session.
 - Cache/stale readiness behavior has not yet been exercised against a real `mcp-grafana:1.3.0` + Grafana Cloud/self-hosted instance.
 - Optional Gemini has not yet been exercised against live Vertex AI ADC.
-- The new operator timeline intentionally does not replay durable historical audit entries after a process restart.
+- Cloud Logging reconstruction currently supplements the timeline for an active in-memory incident; it does not restore the incident state machine after a cold restart.
 
 ## Single best next step
 
-**Make the incident timeline restart-safe without broadening the browser trust boundary: add a narrowly scoped server-side durable audit reader that can reconstruct only `stageguard.audit.v1` entries for one exact incident ID from the dedicated StageGuard Cloud Logging log, enforce strict time/result/page bounds and the same event-field allow-list, keep Cloud Logging credentials server-side, and fall back cleanly to the current in-process projection for local/free development. Add fake-client contract tests before any live Google Cloud exercise.**
+**Make the incident lifecycle itself restart-safe, not just its audit timeline: add a bounded versioned incident-checkpoint abstraction with a credential-free local implementation and an optional Google Cloud persistence adapter, persist only the minimum server-side state required to restore the current `IncidentSnapshot`/revision/approval-consumption boundary, integrity-check the checkpoint before use, keep raw Grafana/Gemini/remediation credentials out of it, and add crash/restart tests proving stale approvals can never be replayed against a different evidence revision.**
