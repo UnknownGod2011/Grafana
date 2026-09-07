@@ -17,10 +17,16 @@ from typing import Callable
 
 from activation import ActivationRecord, load_activation_record
 from api import _is_loopback, make_server
+from cloud_audit import GoogleCloudLoggingAuditSink
 from gemini_commander import GeminiCommander, GoogleGenAICommanderModel
 from http_remediation_transport import HttpRemediationTransport
-from identity import IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
-from incident_service import IncidentService, JsonlAuditLog
+from identity import (
+    GoogleIapIdentityProvider,
+    IdentityProvider,
+    LocalDevelopmentIdentityProvider,
+    StaticBearerIdentityProvider,
+)
+from incident_service import AuditSink, IncidentService, JsonlAuditLog
 from log_activation import LogActivationRecord, load_log_activation_record, verify_log_activation_record
 from mcp_log_client import McpLokiLogClient
 from mcp_metric_client import McpPrometheusMetricClient
@@ -59,18 +65,58 @@ def _read_required_secret(env_name: str) -> str:
     return value
 
 
-def _identity_provider(host: str, *, token_env: str, subject_env: str) -> IdentityProvider:
-    if _is_loopback(host):
-        token = os.getenv(token_env, "")
-        if not token:
-            return LocalDevelopmentIdentityProvider()
-    else:
-        token = _read_required_secret(token_env)
+def _identity_provider(
+    host: str,
+    *,
+    mode: str,
+    token_env: str,
+    subject_env: str,
+    iap_audience_env: str,
+) -> IdentityProvider:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"auto", "local", "bearer", "iap"}:
+        raise ValueError("identity mode must be one of auto, local, bearer, iap")
 
-    subject = os.getenv(subject_env, "stageguard-operator").strip()
-    if not subject:
-        raise ValueError(f"{subject_env} must not be blank")
-    return StaticBearerIdentityProvider({token: subject})
+    iap_audience = os.getenv(iap_audience_env, "").strip()
+    token = os.getenv(token_env, "")
+
+    if normalized_mode == "iap" or (normalized_mode == "auto" and iap_audience):
+        if not iap_audience:
+            raise ValueError(f"required environment variable {iap_audience_env} is not set")
+        return GoogleIapIdentityProvider(iap_audience)
+
+    if normalized_mode == "local":
+        if not _is_loopback(host):
+            raise ValueError("local identity is permitted only on loopback")
+        return LocalDevelopmentIdentityProvider()
+
+    if normalized_mode == "auto" and _is_loopback(host) and not token:
+        return LocalDevelopmentIdentityProvider()
+
+    if normalized_mode in {"auto", "bearer"}:
+        token = token or _read_required_secret(token_env)
+        subject = os.getenv(subject_env, "stageguard-operator").strip()
+        if not subject:
+            raise ValueError(f"{subject_env} must not be blank")
+        return StaticBearerIdentityProvider({token: subject})
+
+    raise ValueError("unable to configure identity provider")
+
+
+def _audit_sink(
+    *,
+    backend: str,
+    audit_path: str | Path,
+    cloud_project_env: str,
+    cloud_log_name: str,
+) -> AuditSink:
+    normalized = backend.strip().lower()
+    if normalized == "jsonl":
+        return JsonlAuditLog(audit_path)
+    if normalized == "cloud-logging":
+        project = os.getenv(cloud_project_env, "").strip() or None
+        return GoogleCloudLoggingAuditSink.from_environment(project=project, log_name=cloud_log_name)
+    raise ValueError("audit backend must be jsonl or cloud-logging")
 
 
 def _production_remediation_from_env(
@@ -101,8 +147,13 @@ def build_runtime(
     audit_path: str | Path,
     host: str = "127.0.0.1",
     port: int = 9110,
+    identity_mode: str = "auto",
     token_env: str = "STAGEGUARD_API_TOKEN",
     subject_env: str = "STAGEGUARD_API_SUBJECT",
+    iap_audience_env: str = "STAGEGUARD_IAP_AUDIENCE",
+    audit_backend: str = "jsonl",
+    cloud_project_env: str = "GOOGLE_CLOUD_PROJECT",
+    cloud_log_name: str = "stageguard-audit",
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
     logs_factory: Callable[[], McpLokiLogClient] = McpLokiLogClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
@@ -113,11 +164,10 @@ def build_runtime(
     commander_factory: Callable[[], GeminiCommander] = _gemini_commander_from_environment,
     activation_now_unix: int | None = None,
 ) -> RuntimeBundle:
-    """Construct the runtime and enforce pinned evidence plus optional advisory AI.
+    """Construct runtime with pinned evidence, trusted identity, and bounded audit.
 
-    Gemini is disabled by default. Enabling it constructs only the advisory
-    commander; failure to configure the optional Google dependency/ADC fails
-    startup only when the explicit opt-in is present.
+    Gemini remains disabled by default. Google IAP and Cloud Logging dependencies
+    are also lazy and only required when their explicit production modes are used.
     """
     profile = load_telemetry_profile(telemetry_config)
     metrics = metrics_factory()
@@ -157,8 +207,19 @@ def build_runtime(
         if enable_production_remediation and profile == DEFAULT_TELEMETRY_PROFILE:
             raise ValueError("explicit production remediation is not permitted for the demo telemetry profile")
 
-        identity = _identity_provider(host, token_env=token_env, subject_env=subject_env)
-        audit = JsonlAuditLog(audit_path)
+        identity = _identity_provider(
+            host,
+            mode=identity_mode,
+            token_env=token_env,
+            subject_env=subject_env,
+            iap_audience_env=iap_audience_env,
+        )
+        audit = _audit_sink(
+            backend=audit_backend,
+            audit_path=audit_path,
+            cloud_project_env=cloud_project_env,
+            cloud_log_name=cloud_log_name,
+        )
 
         if remediation_factory is not None:
             remediation = remediation_factory(profile)
@@ -203,10 +264,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--activation", help="fresh metric activation artifact produced by preflight")
     parser.add_argument("--log-activation", help="fresh Loki evidence activation artifact produced by preflight")
     parser.add_argument("--audit-log", default=".stageguard/audit.jsonl", help="append-only local audit path")
+    parser.add_argument("--audit-backend", choices=("jsonl", "cloud-logging"), default="jsonl")
+    parser.add_argument("--cloud-project-env", default="GOOGLE_CLOUD_PROJECT")
+    parser.add_argument("--cloud-log-name", default="stageguard-audit")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9110)
+    parser.add_argument("--identity-mode", choices=("auto", "local", "bearer", "iap"), default="auto")
     parser.add_argument("--token-env", default="STAGEGUARD_API_TOKEN", help="name of env var containing bearer token")
     parser.add_argument("--subject-env", default="STAGEGUARD_API_SUBJECT", help="name of env var containing operator subject")
+    parser.add_argument(
+        "--iap-audience-env",
+        default="STAGEGUARD_IAP_AUDIENCE",
+        help="name of env var containing the exact IAP Signed Header JWT audience",
+    )
     parser.add_argument(
         "--enable-gemini",
         action="store_true",
@@ -238,10 +308,15 @@ def main(argv: list[str] | None = None) -> int:
             activation_path=args.activation,
             log_activation_path=args.log_activation,
             audit_path=args.audit_log,
+            audit_backend=args.audit_backend,
+            cloud_project_env=args.cloud_project_env,
+            cloud_log_name=args.cloud_log_name,
             host=args.host,
             port=args.port,
+            identity_mode=args.identity_mode,
             token_env=args.token_env,
             subject_env=args.subject_env,
+            iap_audience_env=args.iap_audience_env,
             enable_gemini=args.enable_gemini,
             enable_production_remediation=args.enable_production_remediation,
             remediation_endpoint_env=args.remediation_endpoint_env,
