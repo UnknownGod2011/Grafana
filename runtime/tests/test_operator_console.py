@@ -117,9 +117,8 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("q('reload-checkpoint').disabled=!reloadRequired", js)
         self.assertIn("q('reconcile-execution').disabled=!readyToReconcile", js)
         self.assertIn("ready to reconcile", js)
-        # Unknown/new values must fail closed instead of enabling reconciliation.
         self.assertIn("safeReconciliationState", js)
-        self.assertIn("?'reload_required'", js)
+        self.assertIn(":'reload_required'", js)
 
     def test_console_never_exposes_or_accepts_remediation_operation_id(self):
         _status, _type, _csp, _cache, html = self.get("/console", authenticated=True)
