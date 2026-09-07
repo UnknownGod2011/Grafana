@@ -123,9 +123,23 @@ def _checkpoint_store(
     raise ValueError("checkpoint backend must be none, json, or gcs")
 
 
-def _production_remediation_from_env(profile: TelemetryProfile, *, endpoint_env: str, token_env: str) -> AllowlistedProductionRemediationClient:
-    transport = HttpRemediationTransport(_read_required_secret(endpoint_env), _read_required_secret(token_env))
-    return AllowlistedProductionRemediationClient(transport, allowed_production_id=profile.production_id, allowed_uplink=profile.affected_uplink)
+def _production_remediation_from_env(
+    profile: TelemetryProfile,
+    *,
+    endpoint_env: str,
+    reconciliation_endpoint_env: str,
+    token_env: str,
+) -> AllowlistedProductionRemediationClient:
+    transport = HttpRemediationTransport(
+        _read_required_secret(endpoint_env),
+        _read_required_secret(token_env),
+        reconciliation_endpoint=_read_required_secret(reconciliation_endpoint_env),
+    )
+    return AllowlistedProductionRemediationClient(
+        transport,
+        allowed_production_id=profile.production_id,
+        allowed_uplink=profile.affected_uplink,
+    )
 
 
 def _gemini_commander_from_environment() -> GeminiCommander:
@@ -148,6 +162,7 @@ def build_runtime(
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
     enable_production_remediation: bool = False,
     remediation_endpoint_env: str = "STAGEGUARD_REMEDIATION_ENDPOINT",
+    remediation_reconciliation_endpoint_env: str = "STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT",
     remediation_token_env: str = "STAGEGUARD_REMEDIATION_TOKEN", enable_gemini: bool = False,
     commander_factory: Callable[[], GeminiCommander] = _gemini_commander_from_environment,
     activation_now_unix: int | None = None,
@@ -195,7 +210,12 @@ def build_runtime(
         if remediation_factory is not None:
             remediation = remediation_factory(profile)
         elif enable_production_remediation:
-            remediation = _production_remediation_from_env(profile, endpoint_env=remediation_endpoint_env, token_env=remediation_token_env)
+            remediation = _production_remediation_from_env(
+                profile,
+                endpoint_env=remediation_endpoint_env,
+                reconciliation_endpoint_env=remediation_reconciliation_endpoint_env,
+                token_env=remediation_token_env,
+            )
         elif profile == DEFAULT_TELEMETRY_PROFILE:
             remediation = SimulatorRemediationClient()
         else:
@@ -243,6 +263,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-gemini", action="store_true")
     parser.add_argument("--enable-production-remediation", action="store_true")
     parser.add_argument("--remediation-endpoint-env", default="STAGEGUARD_REMEDIATION_ENDPOINT")
+    parser.add_argument(
+        "--remediation-reconciliation-endpoint-env",
+        default="STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT",
+    )
     parser.add_argument("--remediation-token-env", default="STAGEGUARD_REMEDIATION_TOKEN")
     return parser
 
@@ -272,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
             enable_gemini=args.enable_gemini,
             enable_production_remediation=args.enable_production_remediation,
             remediation_endpoint_env=args.remediation_endpoint_env,
+            remediation_reconciliation_endpoint_env=args.remediation_reconciliation_endpoint_env,
             remediation_token_env=args.remediation_token_env,
         )
     except Exception as exc:
