@@ -26,6 +26,16 @@ CONSOLE_HTML = """<!doctype html>
       <button id="briefing" disabled>Generate Gemini briefing</button>
     </section>
     <div id="message" role="status" aria-live="polite"></div>
+    <section id="lifecycle-recovery" class="card recovery-zone" hidden aria-live="polite">
+      <p class="eyebrow">FAIL-CLOSED LIFECYCLE SAFETY</p>
+      <h2 id="lifecycle-recovery-title">Lifecycle recovery required</h2>
+      <p id="lifecycle-recovery-message"></p>
+      <p class="notice">Approval, execution, investigation, and briefing controls remain disabled until the server reports synchronized state. Recovery never replays a remediation action and never exposes its operation identifier.</p>
+      <div class="actions">
+        <button id="reload-checkpoint">Reload durable checkpoint</button>
+        <button id="reconcile-execution" disabled>Reconcile uncertain execution</button>
+      </div>
+    </section>
     <section id="empty" class="card"><h2>No active investigation</h2><p>Run a bounded investigation to collect the pinned Grafana evidence plane.</p></section>
     <section id="incident" hidden>
       <div class="grid">
@@ -47,17 +57,19 @@ CONSOLE_HTML = """<!doctype html>
 </html>
 """
 
-CONSOLE_CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0b0d10;color:#f4f6f8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#171b22,#0b0d10 48%);min-height:100vh}main{max-width:1120px;margin:0 auto;padding:32px 20px 64px}header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}h1{font-size:40px;margin:2px 0}h2{font-size:18px;margin:0 0 12px}.eyebrow,.label{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:#9ca7b5;margin:0}.pill{padding:8px 12px;border:1px solid #39414c;border-radius:999px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 20px}button,input{font:inherit;border-radius:8px;border:1px solid #3a4350;background:#151a21;color:#f4f6f8;padding:10px 14px}button{cursor:pointer}button.primary{background:#f2f4f7;color:#11151a;border-color:#f2f4f7;font-weight:700}button:disabled{opacity:.4;cursor:not-allowed}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:#11151b;border:1px solid #272e38;border-radius:12px;padding:18px;margin:12px 0;box-shadow:0 12px 28px rgba(0,0,0,.16)}.card p:last-child{margin-bottom:0}.mono,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.mono{font-size:13px;overflow-wrap:anywhere}.notice{color:#aeb8c5;font-size:13px}#message{min-height:24px;color:#f3cb72}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #252c35;padding:10px 8px;vertical-align:top}th{color:#aeb8c5;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e12;border-radius:8px;padding:14px;font-size:13px;line-height:1.5}.danger-zone{border-color:#514327}.danger-zone input{width:min(360px,100%)}@media(max-width:760px){.grid{grid-template-columns:1fr 1fr}header{align-items:flex-start;flex-direction:column}}@media(max-width:460px){.grid{grid-template-columns:1fr}h1{font-size:32px}}
+CONSOLE_CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0b0d10;color:#f4f6f8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#171b22,#0b0d10 48%);min-height:100vh}main{max-width:1120px;margin:0 auto;padding:32px 20px 64px}header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}h1{font-size:40px;margin:2px 0}h2{font-size:18px;margin:0 0 12px}.eyebrow,.label{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:#9ca7b5;margin:0}.pill{padding:8px 12px;border:1px solid #39414c;border-radius:999px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 20px}button,input{font:inherit;border-radius:8px;border:1px solid #3a4350;background:#151a21;color:#f4f6f8;padding:10px 14px}button{cursor:pointer}button.primary{background:#f2f4f7;color:#11151a;border-color:#f2f4f7;font-weight:700}button:disabled,input:disabled{opacity:.4;cursor:not-allowed}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:#11151b;border:1px solid #272e38;border-radius:12px;padding:18px;margin:12px 0;box-shadow:0 12px 28px rgba(0,0,0,.16)}.card p:last-child{margin-bottom:0}.mono,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.mono{font-size:13px;overflow-wrap:anywhere}.notice{color:#aeb8c5;font-size:13px}#message{min-height:24px;color:#f3cb72}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #252c35;padding:10px 8px;vertical-align:top}th{color:#aeb8c5;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e12;border-radius:8px;padding:14px;font-size:13px;line-height:1.5}.danger-zone{border-color:#514327}.danger-zone input{width:min(360px,100%)}.recovery-zone{border-color:#704a2b;background:#19130f}.recovery-zone h2{margin-top:8px}.recovery-zone .actions{margin-bottom:0}@media(max-width:760px){.grid{grid-template-columns:1fr 1fr}header{align-items:flex-start;flex-direction:column}}@media(max-width:460px){.grid{grid-template-columns:1fr}h1{font-size:32px}}
 """
 
 CONSOLE_JS = r"""(() => {
 'use strict';
 const q = id => document.getElementById(id);
 let current = null;
+let checkpointState = 'synchronized';
 let timelineAfter = 0;
 let timelineLoading = false;
 const message = text => { q('message').textContent = text || ''; };
 const scalar = value => value === null || value === undefined ? '—' : String(value);
+const lifecycleBlocked = () => checkpointState === 'conflicted' || checkpointState === 'execution_uncertain';
 async function request(path, options = {}) {
   const init = {method: options.method || 'GET', headers: {'Accept':'application/json'}, credentials:'same-origin'};
   if (options.body !== undefined) { init.headers['Content-Type']='application/json'; init.body=JSON.stringify(options.body); }
@@ -104,34 +116,56 @@ async function loadTimeline(reset = false) {
   } catch (err) { message(err.message); }
   finally { timelineLoading = false; }
 }
-function render(snapshot) {
+function renderLifecycleSafety() {
+  const blocked = lifecycleBlocked();
+  q('lifecycle-recovery').hidden = !blocked;
+  q('investigate').disabled = blocked;
+  q('briefing').disabled = blocked || !current;
+  q('approval-revision').disabled = blocked || !current;
+  q('reload-checkpoint').disabled = !blocked;
+  q('reconcile-execution').disabled = checkpointState !== 'execution_uncertain';
+  if (checkpointState === 'conflicted') {
+    q('lifecycle-recovery-title').textContent = 'Checkpoint conflict: durable reload required';
+    q('lifecycle-recovery-message').textContent = 'This process lost checkpoint ownership. Reload and fully revalidate the durable winner before any incident lifecycle work can continue.';
+  } else if (checkpointState === 'execution_uncertain') {
+    q('lifecycle-recovery-title').textContent = 'Remediation execution is uncertain';
+    q('lifecycle-recovery-message').textContent = 'Reload the durable checkpoint winner first, then reconcile provider idempotency state and collect fresh Grafana evidence. StageGuard will not replay the action.';
+  } else {
+    q('lifecycle-recovery-title').textContent = 'Lifecycle recovery required';
+    q('lifecycle-recovery-message').textContent = '';
+  }
+}
+function render(snapshot, state = 'synchronized') {
   const previousId = current?.incident_id;
   current = snapshot || null;
+  checkpointState = typeof state === 'string' ? state : 'failed';
   q('empty').hidden = !!current; q('incident').hidden = !current;
   q('briefing-card').hidden = true; q('briefing-output').textContent = '';
   q('approval-revision').value = ''; q('approve').disabled = true;
-  if (!current) { q('briefing').disabled = true; q('timeline').replaceChildren(); q('timeline-more').disabled = true; timelineAfter = 0; return; }
+  renderLifecycleSafety();
+  if (!current) { q('timeline').replaceChildren(); q('timeline-more').disabled = true; timelineAfter = 0; return; }
   const report = current.report || {};
   q('incident-id').textContent = scalar(current.incident_id); q('revision').textContent = scalar(current.revision);
   q('status').textContent = scalar(report.status); q('confidence').textContent = Number.isFinite(report.confidence) ? `${Math.round(report.confidence*100)}%` : '—';
   q('summary').textContent = scalar(report.summary); q('hypothesis').textContent = scalar(report.hypothesis);
   q('production').textContent = scalar(report.production_id); q('feed').textContent = scalar(report.affected_feed);
   renderEvidence(report.evidence);
-  q('briefing').disabled = false;
   const approval = current.approval;
-  q('approval-state').textContent = approval ? `Approved for ${scalar(approval.action)} on ${scalar(approval.target)}.` : 'Not approved.';
-  q('execute').disabled = !approval || !!current.outcome;
+  q('approval-state').textContent = lifecycleBlocked() ? 'Lifecycle safety block active; approval and execution are disabled.' : (approval ? `Approved for ${scalar(approval.action)} on ${scalar(approval.target)}.` : 'Not approved.');
+  q('execute').disabled = lifecycleBlocked() || !approval || !!current.outcome;
   q('recovery-card').hidden = !current.outcome; q('recovery').textContent = current.outcome ? JSON.stringify(current.outcome, null, 2) : '';
   loadTimeline(previousId !== current.incident_id || timelineAfter === 0);
 }
-async function refresh() { message('Refreshing incident status…'); try { const data=await request('/v1/incident'); render(data.incident); q('connection').textContent='Authenticated'; message(''); } catch(err) { q('connection').textContent='Unavailable'; message(err.message); } }
+async function refresh() { message('Refreshing incident status…'); try { const data=await request('/v1/incident'); render(data.incident, data.checkpoint_state); q('connection').textContent=lifecycleBlocked()?'Safety block':'Authenticated'; message(''); } catch(err) { q('connection').textContent='Unavailable'; message(err.message); } }
 q('refresh').addEventListener('click', refresh);
 q('timeline-more').addEventListener('click', () => loadTimeline(false));
-q('investigate').addEventListener('click', async () => { message('Collecting bounded Grafana evidence…'); try { const data=await request('/v1/investigate',{method:'POST',body:{}}); render(data.incident); await loadTimeline(true); message('Investigation complete.'); } catch(err) { message(err.message); } });
-q('briefing').addEventListener('click', async () => { if(!current) return; const binding={incident_id:current.incident_id,revision:current.revision}; message('Generating advisory briefing for this revision…'); try { const data=await request('/v1/briefing',{method:'POST',body:binding}); if(!current || data.revision!==current.revision){message('Briefing discarded because the incident revision changed.');return;} q('briefing-output').textContent=JSON.stringify(data.briefing,null,2); q('briefing-card').hidden=false; await loadTimeline(true); message(''); } catch(err) { message(err.message); } });
-q('approval-revision').addEventListener('input', event => { q('approve').disabled = !current || event.target.value !== current.revision || current.report?.status !== 'diagnosed'; });
-q('approve').addEventListener('click', async () => { if(!current || q('approval-revision').value!==current.revision) return; const binding={incident_id:current.incident_id,revision:current.revision}; if(!window.confirm(`Approve remediation for evidence revision ${current.revision}?`)) return; message('Recording explicit approval…'); try { const data=await request('/v1/approve',{method:'POST',body:binding}); render(data.incident); await loadTimeline(true); message('Remediation approved for the current revision.'); } catch(err) { message(err.message); } });
-q('execute').addEventListener('click', async () => { if(!current?.approval || current.outcome) return; if(!window.confirm('Execute the already-approved remediation and verify recovery telemetry?')) return; message('Executing approved remediation and verifying recovery…'); try { const data=await request('/v1/execute',{method:'POST',body:{}}); render(data.incident); await loadTimeline(true); message('Execution finished; recovery state updated.'); } catch(err) { message(err.message); } });
+q('investigate').addEventListener('click', async () => { if(lifecycleBlocked()) return; message('Collecting bounded Grafana evidence…'); try { const data=await request('/v1/investigate',{method:'POST',body:{}}); render(data.incident, 'synchronized'); await loadTimeline(true); message('Investigation complete.'); } catch(err) { message(err.message); await refresh(); } });
+q('briefing').addEventListener('click', async () => { if(!current || lifecycleBlocked()) return; const binding={incident_id:current.incident_id,revision:current.revision}; message('Generating advisory briefing for this revision…'); try { const data=await request('/v1/briefing',{method:'POST',body:binding}); if(!current || data.revision!==current.revision){message('Briefing discarded because the incident revision changed.');return;} q('briefing-output').textContent=JSON.stringify(data.briefing,null,2); q('briefing-card').hidden=false; await loadTimeline(true); message(''); } catch(err) { message(err.message); await refresh(); } });
+q('approval-revision').addEventListener('input', event => { q('approve').disabled = lifecycleBlocked() || !current || event.target.value !== current.revision || current.report?.status !== 'diagnosed'; });
+q('approve').addEventListener('click', async () => { if(lifecycleBlocked() || !current || q('approval-revision').value!==current.revision) return; const binding={incident_id:current.incident_id,revision:current.revision}; if(!window.confirm(`Approve remediation for evidence revision ${current.revision}?`)) return; message('Recording explicit approval…'); try { const data=await request('/v1/approve',{method:'POST',body:binding}); render(data.incident, 'synchronized'); await loadTimeline(true); message('Remediation approved for the current revision.'); } catch(err) { message(err.message); await refresh(); } });
+q('execute').addEventListener('click', async () => { if(lifecycleBlocked() || !current?.approval || current.outcome) return; if(!window.confirm('Execute the already-approved remediation and verify recovery telemetry?')) return; message('Executing approved remediation and verifying recovery…'); try { const data=await request('/v1/execute',{method:'POST',body:{}}); render(data.incident, 'synchronized'); await loadTimeline(true); message('Execution finished; recovery state updated.'); } catch(err) { message(err.message); await refresh(); } });
+q('reload-checkpoint').addEventListener('click', async () => { if(!lifecycleBlocked()) return; message('Reloading and validating the durable checkpoint winner…'); try { const data=await request('/v1/checkpoint/reload',{method:'POST',body:{}}); render(data.incident, data.checkpoint_state); await loadTimeline(true); q('connection').textContent=lifecycleBlocked()?'Safety block':'Authenticated'; message(checkpointState === 'execution_uncertain' ? 'Durable winner loaded. Execution uncertainty still requires reconciliation.' : 'Durable checkpoint winner loaded and validated.'); } catch(err) { message(err.message); await refresh(); } });
+q('reconcile-execution').addEventListener('click', async () => { if(checkpointState !== 'execution_uncertain') return; if(!window.confirm('Reconcile the uncertain execution and collect fresh Grafana evidence? This will not replay remediation.')) return; message('Reconciling provider state and collecting fresh Grafana evidence…'); try { const data=await request('/v1/execution/reconcile',{method:'POST',body:{}}); render(data.incident, data.checkpoint_state); await loadTimeline(true); q('connection').textContent='Authenticated'; message('Execution uncertainty resolved with fresh evidence. Any prior approval is no longer valid.'); } catch(err) { message(err.message); await refresh(); } });
 refresh();
 })();
 """
