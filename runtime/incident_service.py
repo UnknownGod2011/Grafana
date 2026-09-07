@@ -14,7 +14,7 @@ from typing import Callable, Protocol
 
 from activation import ActivationRecord, verify_activation_record
 from gemini_commander import GeminiCommander, IncidentBriefing
-from incident_checkpoint import CheckpointStore, IncidentCheckpoint
+from incident_checkpoint import CheckpointConflictError, CheckpointStore, IncidentCheckpoint
 from investigator import IncidentReport, MetricQueryClient, investigate, investigate_with_log_corroboration
 from log_activation import LogActivationRecord
 from log_evidence import LogQueryClient
@@ -171,15 +171,11 @@ class IncidentService:
         self._snapshot: IncidentSnapshot | None = None
         self._sequence = 0
         self._timeline: list[AuditEvent] = []
+        self._checkpoint_conflicted = False
         self._lock = threading.RLock()
         self._restore_checkpoint()
 
-    def _restore_checkpoint(self) -> None:
-        if self._checkpoint_store is None:
-            return
-        checkpoint = self._checkpoint_store.load()
-        if checkpoint is None:
-            return
+    def _validated_snapshot(self, checkpoint: IncidentCheckpoint) -> IncidentSnapshot:
         if checkpoint.revision != _revision(checkpoint.report):
             raise ValueError("incident checkpoint revision does not match restored evidence")
         if checkpoint.report.production_id != self._profile.production_id or checkpoint.report.affected_feed != self._profile.affected_feed:
@@ -191,22 +187,67 @@ class IncidentService:
                 raise ValueError("incident checkpoint approval does not match restored evidence revision")
         if checkpoint.outcome is not None and approval is None:
             raise ValueError("incident checkpoint outcome cannot exist without approval")
-        self._snapshot = IncidentSnapshot(
+        return IncidentSnapshot(
             checkpoint.incident_id, checkpoint.revision, checkpoint.report, checkpoint.approval, checkpoint.outcome
         )
-        self._sequence = checkpoint.sequence
+
+    def _apply_checkpoint(self, checkpoint: IncidentCheckpoint) -> None:
+        snapshot = self._validated_snapshot(checkpoint)
+        sequence = checkpoint.sequence
         if self._audit_reader is not None:
             durable = self._audit_reader.read(incident_id=checkpoint.incident_id, after_sequence=0, limit=101)
             if durable:
-                self._sequence = max(self._sequence, max(event.sequence for event in durable))
+                sequence = max(sequence, max(event.sequence for event in durable))
+        self._snapshot = snapshot
+        self._sequence = sequence
+
+    def _restore_checkpoint(self) -> None:
+        if self._checkpoint_store is None:
+            return
+        checkpoint = self._checkpoint_store.load()
+        if checkpoint is None:
+            return
+        self._apply_checkpoint(checkpoint)
+
+    def _require_checkpoint_consistency(self) -> None:
+        if self._checkpoint_conflicted:
+            raise RuntimeError("checkpoint conflict requires explicit reload before lifecycle changes")
+
+    def checkpoint_state(self) -> str:
+        with self._lock:
+            if self._checkpoint_store is None:
+                return "disabled"
+            return "conflicted" if self._checkpoint_conflicted else "synchronized"
+
+    def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
+        """Explicitly adopt and revalidate the winning durable checkpoint after CAS contention."""
+        with self._lock:
+            if self._checkpoint_store is None:
+                raise RuntimeError("checkpoint persistence is not configured")
+            if not self._checkpoint_conflicted:
+                raise RuntimeError("checkpoint reload is only permitted after a conflict")
+            checkpoint = self._checkpoint_store.load()
+            if checkpoint is None:
+                raise RuntimeError("checkpoint conflict recovery could not load durable state")
+            self._apply_checkpoint(checkpoint)
+            # Discard speculative process-local events from the losing lifecycle view.
+            # Durable audit reconstruction, when configured, remains the source of truth.
+            self._timeline.clear()
+            self._checkpoint_conflicted = False
+            assert self._snapshot is not None
+            return self._snapshot
 
     def _save_checkpoint(self) -> None:
         if self._checkpoint_store is None or self._snapshot is None:
             return
         snapshot = self._snapshot
-        self._checkpoint_store.save(IncidentCheckpoint(
-            snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, snapshot.outcome, self._sequence
-        ))
+        try:
+            self._checkpoint_store.save(IncidentCheckpoint(
+                snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, snapshot.outcome, self._sequence
+            ))
+        except CheckpointConflictError:
+            self._checkpoint_conflicted = True
+            raise
 
     def _record(self, incident_id: str, event_type: str, actor: str, payload: dict) -> None:
         self._sequence += 1
@@ -255,6 +296,7 @@ class IncidentService:
 
     def investigate(self, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
+            self._require_checkpoint_consistency()
             report = investigate(self._metrics, self._profile) if self._logs is None else investigate_with_log_corroboration(self._metrics, self._logs, self._profile)
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
@@ -273,6 +315,7 @@ class IncidentService:
 
     def briefing(self, *, incident_id: str, revision: str, actor: str = "stageguard") -> IncidentBriefing:
         with self._lock:
+            self._require_checkpoint_consistency()
             snapshot = self._snapshot
             if snapshot is None:
                 raise RuntimeError("no incident has been investigated")
@@ -293,6 +336,7 @@ class IncidentService:
 
     def approve(self, *, incident_id: str, revision: str, approved_by: str) -> IncidentSnapshot:
         with self._lock:
+            self._require_checkpoint_consistency()
             snapshot = self._snapshot
             if snapshot is None:
                 raise RuntimeError("no incident has been investigated")
@@ -311,6 +355,7 @@ class IncidentService:
 
     def execute_approved(self, *, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
+            self._require_checkpoint_consistency()
             snapshot = self._snapshot
             if snapshot is None or snapshot.approval is None:
                 raise RuntimeError("matching explicit approval is required before remediation")
