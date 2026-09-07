@@ -2,7 +2,7 @@
 
 **Production-oriented Gemini/Google Cloud incident commander for live media workflows, with Grafana as the operational evidence plane.**
 
-StageGuard is a personal open-source project. It investigates live-production failures through the official Grafana MCP server, correlates bounded Prometheus and Loki evidence, requires trusted human authorization for consequential remediation, verifies recovery from telemetry, and preserves an incident audit trail.
+StageGuard is a personal open-source project. It investigates live-production failures through the official Grafana MCP server, correlates bounded Prometheus and Loki evidence, requires trusted human authorization for consequential remediation, verifies recovery from telemetry, preserves an incident audit trail, and can optionally use Gemini only for bounded operator communication above the deterministic safety core.
 
 > Grafana gives the agent trustworthy operational evidence; StageGuard turns that evidence into bounded decisions and actions; Grafana then proves whether recovery actually happened.
 
@@ -19,6 +19,7 @@ deterministic broadcast simulator
   → canonical production bootstrap
   → six-read metric diagnosis
   → mandatory production Loki corroboration
+  → bounded Gemini operator-briefing boundary (optional)
   → authenticated IncidentService
   → evidence-revision-bound human approval
   → disabled-by-default allowlisted remediation
@@ -31,7 +32,7 @@ The deterministic fixture models three camera feeds and two uplinks. Its seeded 
 
 ## Safety model
 
-StageGuard separates evidence, authorization, action, and recovery:
+StageGuard separates evidence, explanation, authorization, action, and recovery:
 
 | Boundary | Policy |
 |---|---|
@@ -41,6 +42,7 @@ StageGuard separates evidence, authorization, action, and recovery:
 | Activation | Metric profile + Prometheus datasource and Loki contract + Loki datasource are independently SHA-256 pinned and time bounded |
 | Investigation | Six policy-selected metric reads must independently diagnose before Loki is queried |
 | Loki corroboration | Missing, truncated, scope-drifted, or inconsistent logs force abstention |
+| Gemini commander | Advisory only: receives a bounded structured projection, no raw queries/log bodies/write secrets, and cannot change diagnosis, approval, remediation, or recovery state |
 | Identity | Actor identity comes from the configured identity provider, never request JSON |
 | Approval | Explicit, single-use approval is bound to the exact incident evidence revision |
 | Remediation | Production writes are disabled by default; enabled writes are allowlisted, idempotent, timeout/retry bounded, and credential isolated |
@@ -79,6 +81,20 @@ Any non-demo production startup now requires **both** records. Changing the metr
 - treats missing logs as missing corroboration rather than negative evidence.
 
 `runtime/mcp_log_client.py` uses the official Grafana MCP `query_loki_logs` tool and verifies it advertises `readOnlyHint=true`. Loki cannot create a diagnosis or override contradictory metric evidence.
+
+## Gemini incident-commander boundary
+
+`runtime/gemini_commander.py` is the first Gemini/Google Cloud layer above the deterministic evidence core. It intentionally does **not** receive an `IncidentService`, remediation client, credentials, endpoints, PromQL, LogQL, raw log bodies, free-form report summaries, or infrastructure tools.
+
+Instead, `build_commander_context()` projects an already-computed `IncidentReport` into a small schema containing trusted identifiers, deterministic status/confidence, at most six numeric metric evidence slots, bounded missing-evidence classes, Loki corroboration status, and a deterministic next-step policy. The model can produce only five operator-facing fields. Validation rejects extra fields, oversized text, unsafe identifiers, and any attempt to change the deterministic next step:
+
+- `diagnosed` → `seek_human_approval`
+- `abstain` → `collect_more_evidence`
+- `no_incident` → `observe`
+
+The optional `GoogleGenAICommanderModel` uses the current Google Gen AI SDK structured-output path and can be constructed for Vertex AI from `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and Application Default Credentials. `google-genai` is intentionally an optional dependency so the safety core and deterministic tests remain credential-free.
+
+This separation is deliberate: Gemini may explain evidence to an operator, but it cannot manufacture a diagnosis, grant approval, invoke remediation, or declare recovery.
 
 ## Production bootstrap
 
@@ -177,6 +193,7 @@ The deterministic demo can still run without activation artifacts as an explicit
 - `runtime/mcp_metric_client.py` — official Grafana MCP Prometheus adapter
 - `runtime/mcp_log_client.py` — official Grafana MCP Loki adapter
 - `runtime/investigator.py` — deterministic metric diagnosis + fail-closed Loki correlation
+- `runtime/gemini_commander.py` — bounded Gemini advisory/structured operator-briefing boundary
 - `runtime/incident_service.py` — activation-aware lifecycle and append-only audit boundary
 - `runtime/bootstrap.py` — canonical production composition/root of trust
 - `runtime/production_remediation.py` — allowlisted write policy
@@ -194,12 +211,12 @@ python -m unittest discover -s runtime/tests -v
 python -m py_compile runtime/*.py runtime/tests/*.py
 ```
 
-The complete Docker → Grafana → official MCP path requires a Docker-capable host and valid local Grafana credentials. Missing Gemini/Google Cloud credentials do not block the deterministic safety core.
+The complete Docker → Grafana → official MCP path requires a Docker-capable host and valid local Grafana credentials. Missing Gemini/Google Cloud credentials do not block the deterministic safety core or the injected commander-model fixture tests.
 
 ## Near-term roadmap
 
-1. execute the full metric+Loki preflight/activation/investigation path against the pinned official MCP image on a Docker-capable host and capture real tool/latency traces;
-2. put Gemini above the deterministic evidence/safety core for bounded incident explanation and operator communication without giving the model raw infrastructure-write authority;
+1. wire the bounded Gemini commander into the authenticated incident API/runtime as an optional advisory endpoint, preserving the no-write/no-state-mutation boundary;
+2. execute the full metric+Loki preflight/activation/investigation path against the pinned official MCP image on a Docker-capable host and capture real tool/latency traces;
 3. add OIDC/IAP identity, tamper-resistant durable audit storage, operator console, and Google Cloud deployment;
 4. add a real provider-controlled remediation deployment example preserving the same allowlist/idempotency contract.
 
@@ -210,8 +227,10 @@ The complete Docker → Grafana → official MCP path requires a Docker-capable 
 - Grafana MCP tool restriction: https://grafana.com/docs/grafana/latest/developer-resources/mcp/configure/enable-and-disable-tools/
 - Official Grafana MCP repository: https://github.com/grafana/mcp-grafana
 - Official Loki tool implementation: https://github.com/grafana/mcp-grafana/blob/main/tools/loki.go
+- Google Gen AI SDK / structured output: https://ai.google.dev/gemini-api/docs/structured-output
+- Vertex AI Google Gen AI SDK samples: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples
 - Gemini Enterprise Agent Platform Runtime quickstart: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk
 
 ## Project status
 
-StageGuard is under active development. The production safety core now requires independently pinned Prometheus and Loki evidence planes, makes metric+Loki correlation canonical for non-demo production startup, keeps human approval revision-bound, leaves production writes disabled by default, and verifies recovery from Grafana telemetry rather than action acknowledgement.
+StageGuard is under active development. The production safety core requires independently pinned Prometheus and Loki evidence planes, makes metric+Loki correlation canonical for non-demo production startup, keeps human approval revision-bound, leaves production writes disabled by default, verifies recovery from Grafana telemetry rather than action acknowledgement, and now has a bounded Gemini advisory layer that cannot alter deterministic incident authority.
