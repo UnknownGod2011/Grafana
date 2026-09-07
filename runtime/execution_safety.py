@@ -7,6 +7,12 @@ It never retries the remote action. Recovery requires adopting the durable
 checkpoint winner and then collecting a fresh Grafana investigation; production
 adapters that declare reconciliation as required must additionally prove the
 idempotent provider operation is no longer ambiguous.
+
+A restored production checkpoint containing an unused approval is also treated
+as uncertain. The checkpoint alone cannot prove whether a previous process sent
+the deterministic operation before crashing. This conservative restart rule can
+invalidate a genuinely unused approval, but it prevents a process restart from
+turning ambiguous execution into an automatic replay.
 """
 from __future__ import annotations
 
@@ -20,7 +26,7 @@ ReconciliationState = Literal["accepted", "not_found", "unknown"]
 
 
 class ExecutionSafeIncidentService(IncidentService):
-    """IncidentService with a fail-closed post-remediation CAS-conflict state."""
+    """IncidentService with fail-closed remediation execution uncertainty."""
 
     def __init__(self, *args, **kwargs) -> None:
         self._execution_uncertain = False
@@ -28,6 +34,26 @@ class ExecutionSafeIncidentService(IncidentService):
         self._execution_reloaded = False
         self._allow_uncertainty_investigation = False
         super().__init__(*args, **kwargs)
+        self._guard_restored_production_approval()
+
+    def _guard_restored_production_approval(self) -> None:
+        """Treat a restored unused production approval as execution-ambiguous.
+
+        The durable checkpoint intentionally does not persist provider execution
+        detail. After restart, an approval with no outcome therefore cannot prove
+        that the prior process never contacted the remediation provider. For
+        adapters requiring provider reconciliation, derive the same deterministic
+        operation id and force reconciliation plus fresh Grafana evidence before
+        any new approval can become actionable.
+        """
+        snapshot = self._snapshot
+        requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
+        if snapshot is None or snapshot.approval is None or snapshot.outcome is not None or not requires:
+            return
+        self._execution_uncertain = True
+        self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
+        # super().__init__ has already loaded and validated the durable winner.
+        self._execution_reloaded = True
 
     def checkpoint_state(self) -> str:
         with self._lock:
