@@ -14,11 +14,10 @@ DEFAULT_LOOKBACK_SECONDS = 24 * 60 * 60
 MAX_LOOKBACK_SECONDS = 7 * 24 * 60 * 60
 
 
-class LogEntryLike(Protocol):
-    payload: object
-
-
 class EntryReader(Protocol):
+    @property
+    def full_name(self) -> str: ...
+
     def list_entries(
         self,
         *,
@@ -29,9 +28,9 @@ class EntryReader(Protocol):
     ): ...
 
 
-def _literal(value: str) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
-        raise ValueError("incident_id must be a bounded non-empty string")
+def _literal(value: str, *, max_bytes: int, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > max_bytes:
+        raise ValueError(f"{field} must be a bounded non-empty string")
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
     return f'"{escaped}"'
 
@@ -80,7 +79,11 @@ class GoogleCloudAuditReader:
             raise ValueError("audit lookback must be an integer")
         if not 60 <= lookback_seconds <= MAX_LOOKBACK_SECONDS:
             raise ValueError("audit lookback must be between 60 seconds and 7 days")
+        full_name = getattr(logger, "full_name", "")
+        if not isinstance(full_name, str) or not full_name:
+            raise ValueError("audit logger must expose its fully qualified log name")
         self._logger = logger
+        self._log_literal = _literal(full_name, max_bytes=1024, field="log name")
         self._lookback_seconds = lookback_seconds
         self._clock_ms = clock_ms
 
@@ -103,7 +106,7 @@ class GoogleCloudAuditReader:
         return cls(client.logger(normalized_name), lookback_seconds=lookback_seconds)
 
     def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
-        incident_literal = _literal(incident_id)
+        incident_literal = _literal(incident_id, max_bytes=256, field="incident_id")
         if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
             raise ValueError("after_sequence must be a non-negative integer")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_READ_RESULTS:
@@ -115,6 +118,7 @@ class GoogleCloudAuditReader:
         cutoff_ms = max(0, now_ms - self._lookback_seconds * 1000)
         filter_ = " AND ".join(
             (
+                f"logName={self._log_literal}",
                 'jsonPayload.schema="stageguard.audit.v1"',
                 f"jsonPayload.incident_id={incident_literal}",
                 f"jsonPayload.sequence>{after_sequence}",
