@@ -9,7 +9,6 @@ queries, or credentials.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Mapping, Protocol
 
 from incident_service import AuditEvent
@@ -17,6 +16,7 @@ from incident_service import AuditEvent
 
 MAX_AUDIT_ENTRY_BYTES = 16 * 1024
 MAX_AUDIT_PAYLOAD_KEYS = 32
+MAX_NESTED_KEYS = 16
 _BLOCKED_KEY_FRAGMENTS = (
     "authorization",
     "credential",
@@ -36,23 +36,45 @@ class StructuredLogger(Protocol):
     def log_struct(self, info: Mapping[str, object], *, severity: str = "NOTICE") -> None: ...
 
 
+def _validate_key(key: object) -> str:
+    if not isinstance(key, str) or not key or len(key) > 128:
+        raise ValueError("audit payload keys must be bounded strings")
+    lowered = key.lower()
+    if any(fragment in lowered for fragment in _BLOCKED_KEY_FRAGMENTS):
+        raise ValueError(f"audit payload key is not permitted: {key}")
+    return key
+
+
+def _validate_scalar(key: str, value: object) -> object:
+    if value is not None and not isinstance(value, (str, int, float, bool)):
+        raise ValueError(f"unsupported audit payload value: {key}")
+    if isinstance(value, str) and len(value.encode("utf-8")) > 2048:
+        raise ValueError(f"audit payload value is too large: {key}")
+    return value
+
+
 def _validate_payload(payload: Mapping[str, object]) -> dict[str, object]:
     if len(payload) > MAX_AUDIT_PAYLOAD_KEYS:
         raise ValueError("audit payload has too many fields")
     clean: dict[str, object] = {}
-    for key, value in payload.items():
-        if not isinstance(key, str) or not key or len(key) > 128:
-            raise ValueError("audit payload keys must be bounded strings")
-        lowered = key.lower()
-        if any(fragment in lowered for fragment in _BLOCKED_KEY_FRAGMENTS):
-            raise ValueError(f"audit payload key is not permitted: {key}")
-        if isinstance(value, (dict, list, tuple, set, bytes, bytearray)):
-            raise ValueError(f"nested or binary audit payload is not permitted: {key}")
-        if value is not None and not isinstance(value, (str, int, float, bool)):
-            raise ValueError(f"unsupported audit payload value: {key}")
-        if isinstance(value, str) and len(value.encode("utf-8")) > 2048:
-            raise ValueError(f"audit payload value is too large: {key}")
-        clean[key] = value
+    for raw_key, value in payload.items():
+        key = _validate_key(raw_key)
+        if isinstance(value, Mapping):
+            if len(value) > MAX_NESTED_KEYS:
+                raise ValueError(f"nested audit payload has too many fields: {key}")
+            nested: dict[str, object] = {}
+            for raw_nested_key, nested_value in value.items():
+                nested_key = _validate_key(raw_nested_key)
+                if isinstance(nested_value, Mapping):
+                    raise ValueError(f"audit payload nesting is too deep: {nested_key}")
+                if isinstance(nested_value, (list, tuple, set, bytes, bytearray)):
+                    raise ValueError(f"collection or binary audit payload is not permitted: {nested_key}")
+                nested[nested_key] = _validate_scalar(nested_key, nested_value)
+            clean[key] = nested
+            continue
+        if isinstance(value, (list, tuple, set, bytes, bytearray)):
+            raise ValueError(f"collection or binary audit payload is not permitted: {key}")
+        clean[key] = _validate_scalar(key, value)
     return clean
 
 
