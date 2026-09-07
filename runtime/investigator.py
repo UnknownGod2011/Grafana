@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Bounded StageGuard incident investigator.
 
-The investigator is deterministic: a read-only evidence source executes exactly
-six policy-selected PromQL queries, then policy code decides whether telemetry
-supports the bounded diagnosis. Telemetry names/labels are configurable only
-through a validated TelemetryProfile; callers never submit raw PromQL.
+The metric investigator is deterministic: a read-only evidence source executes
+exactly six policy-selected PromQL queries. A stricter corroborated mode adds
+one policy-selected Loki query only after the metric evidence independently
+supports the configured diagnosis. Callers never submit raw PromQL or LogQL.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from log_evidence import LogCorroboration, LogQueryClient, corroborate_uplink_loss
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile, investigation_queries
 
 PRODUCTION_ID = DEFAULT_TELEMETRY_PROFILE.production_id
@@ -43,6 +44,7 @@ class IncidentReport:
     summary: str
     missing_evidence: tuple[str, ...]
     evidence: tuple[Evidence, ...]
+    log_corroboration: LogCorroboration | None = None
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -51,7 +53,7 @@ class IncidentReport:
 
 
 def investigate(client: MetricQueryClient, profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE) -> IncidentReport:
-    """Collect six fixed semantic evidence slots and return a bounded diagnosis."""
+    """Collect six fixed semantic metric evidence slots and return a diagnosis."""
     queries = investigation_queries(profile)
     values = {name: client.instant(query) for name, (query, _) in queries.items()}
 
@@ -92,3 +94,46 @@ def investigate(client: MetricQueryClient, profile: TelemetryProfile = DEFAULT_T
 
     return IncidentReport("abstain", profile.production_id, profile.affected_feed, None, 0.0,
         "The symptom is real, but the required evidence does not support the configured uplink hypothesis.", (), items)
+
+
+def investigate_with_log_corroboration(
+    metrics: MetricQueryClient,
+    logs: LogQueryClient,
+    profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
+) -> IncidentReport:
+    """Require one independent bounded Loki corroboration for metric diagnosis.
+
+    Loki is queried only when all six metric reads already support the diagnosis.
+    Missing, truncated, or scope-inconsistent log evidence converts the result to
+    an abstention; it never weakens a metric contradiction or creates a diagnosis.
+    """
+    metric_report = investigate(metrics, profile)
+    if metric_report.status != "diagnosed":
+        return metric_report
+
+    corroboration = corroborate_uplink_loss(logs, profile)
+    if corroboration.status != "corroborated":
+        missing = ("causal_log",) if corroboration.status == "missing" else ()
+        return IncidentReport(
+            "abstain",
+            profile.production_id,
+            profile.affected_feed,
+            None,
+            0.0,
+            "Metric evidence supports the configured uplink hypothesis, but bounded Loki corroboration is unavailable or ambiguous.",
+            missing,
+            metric_report.evidence,
+            corroboration,
+        )
+
+    return IncidentReport(
+        metric_report.status,
+        metric_report.production_id,
+        metric_report.affected_feed,
+        metric_report.hypothesis,
+        metric_report.confidence,
+        metric_report.summary + " Loki packet-loss alarm evidence independently corroborates the causal path.",
+        metric_report.missing_evidence,
+        metric_report.evidence,
+        corroboration,
+    )
