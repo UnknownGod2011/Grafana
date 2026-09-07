@@ -14,6 +14,7 @@ from activation import ActivationRecord, load_activation_record
 from api import _is_loopback, make_server
 from cloud_audit import GoogleCloudLoggingAuditSink
 from durable_audit_reader import GoogleCloudAuditReader
+from execution_safety import ExecutionSafeIncidentService
 from gemini_commander import GeminiCommander, GoogleGenAICommanderModel
 from http_remediation_transport import HttpRemediationTransport
 from identity import GoogleIapIdentityProvider, IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
@@ -201,7 +202,7 @@ def build_runtime(
             remediation = DisabledRemediationClient()
 
         commander = commander_factory() if enable_gemini else None
-        service = IncidentService(
+        service = ExecutionSafeIncidentService(
             metrics, remediation, audit, audit_reader=audit_reader, checkpoint_store=checkpoint_store,
             telemetry_profile=profile, activation_record=activation,
             datasource_identity=metrics.datasource_uid if activation is not None else None,
