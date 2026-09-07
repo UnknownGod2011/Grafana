@@ -14,6 +14,7 @@ from typing import Any
 
 from identity import AuthenticationError, IdentityProvider, LocalDevelopmentIdentityProvider, OperatorIdentity
 from incident_service import IncidentService
+from readiness import EvidencePlaneReadinessProbe
 
 
 MAX_BODY_BYTES = 16 * 1024
@@ -56,10 +57,28 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def _service_readiness(service: IncidentService) -> dict[str, object]:
+    """Build a bounded readiness view from the service-owned evidence plane.
+
+    The API intentionally exposes only coarse check states. Private service
+    members are read here solely to avoid duplicating production ownership of
+    the metric/log clients; no raw profile, query, datasource, or error value is
+    serialized into the response.
+    """
+    probe = EvidencePlaneReadinessProbe(
+        service._profile,
+        service._activation,
+        service._log_activation,
+        service._metrics,
+        service._logs,
+    )
+    return probe.check().to_dict()
+
+
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.3"
+    server_version = "StageGuard/0.4"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -85,6 +104,21 @@ class StageGuardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
             self._send(200, {"ok": True})
+            return
+        if self.path == "/readyz":
+            try:
+                readiness = _service_readiness(self.service)
+            except Exception:
+                readiness = {
+                    "ready": False,
+                    "checks": {
+                        "metric_activation": "failed",
+                        "loki_activation": "failed",
+                        "prometheus_mcp": "failed",
+                        "loki_mcp": "failed",
+                    },
+                }
+            self._send(200 if readiness["ready"] else 503, readiness)
             return
         if self.path != "/v1/incident":
             self._error(404, "not_found", "unknown endpoint")
