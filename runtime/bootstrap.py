@@ -17,6 +17,7 @@ from typing import Callable
 
 from activation import ActivationRecord, load_activation_record
 from api import _is_loopback, make_server
+from gemini_commander import GeminiCommander, GoogleGenAICommanderModel
 from http_remediation_transport import HttpRemediationTransport
 from identity import IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
 from incident_service import IncidentService, JsonlAuditLog
@@ -88,6 +89,10 @@ def _production_remediation_from_env(
     )
 
 
+def _gemini_commander_from_environment() -> GeminiCommander:
+    return GeminiCommander(GoogleGenAICommanderModel.from_vertex_ai_environment())
+
+
 def build_runtime(
     *,
     telemetry_config: str | Path,
@@ -104,13 +109,15 @@ def build_runtime(
     enable_production_remediation: bool = False,
     remediation_endpoint_env: str = "STAGEGUARD_REMEDIATION_ENDPOINT",
     remediation_token_env: str = "STAGEGUARD_REMEDIATION_TOKEN",
+    enable_gemini: bool = False,
+    commander_factory: Callable[[], GeminiCommander] = _gemini_commander_from_environment,
     activation_now_unix: int | None = None,
 ) -> RuntimeBundle:
-    """Construct the runtime and enforce both metric and log evidence activation.
+    """Construct the runtime and enforce pinned evidence plus optional advisory AI.
 
-    A non-demo production requires a fresh metric activation and a fresh Loki
-    activation. Datasource identities are read from the actual MCP clients, so a
-    runtime cannot silently swap either evidence plane after preflight.
+    Gemini is disabled by default. Enabling it constructs only the advisory
+    commander; failure to configure the optional Google dependency/ADC fails
+    startup only when the explicit opt-in is present.
     """
     profile = load_telemetry_profile(telemetry_config)
     metrics = metrics_factory()
@@ -166,6 +173,7 @@ def build_runtime(
         else:
             remediation = DisabledRemediationClient()
 
+        commander = commander_factory() if enable_gemini else None
         service = IncidentService(
             metrics,
             remediation,
@@ -175,6 +183,7 @@ def build_runtime(
             datasource_identity=metrics.datasource_uid if activation is not None else None,
             logs=logs,
             log_activation_record=log_activation,
+            commander=commander,
             activation_now_unix=activation_now_unix,
         )
         server = make_server(service, host, port, identity_provider=identity)
@@ -198,6 +207,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=9110)
     parser.add_argument("--token-env", default="STAGEGUARD_API_TOKEN", help="name of env var containing bearer token")
     parser.add_argument("--subject-env", default="STAGEGUARD_API_SUBJECT", help="name of env var containing operator subject")
+    parser.add_argument(
+        "--enable-gemini",
+        action="store_true",
+        help="enable revision-bound advisory Gemini briefings using Vertex AI environment/ADC",
+    )
     parser.add_argument(
         "--enable-production-remediation",
         action="store_true",
@@ -228,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             token_env=args.token_env,
             subject_env=args.subject_env,
+            enable_gemini=args.enable_gemini,
             enable_production_remediation=args.enable_production_remediation,
             remediation_endpoint_env=args.remediation_endpoint_env,
             remediation_token_env=args.remediation_token_env,
