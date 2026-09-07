@@ -44,7 +44,24 @@ class CloudAuditTests(unittest.TestCase):
         self.assertNotIn("message", document)
         self.assertNotIn("text", document)
 
-    def test_rejects_sensitive_or_query_shaped_payload_keys(self):
+    def test_allows_existing_bounded_remediation_metadata_shape(self):
+        document = audit_event_document(
+            self.event(
+                {
+                    "revision": "abc123",
+                    "status": "recovered",
+                    "action_metadata": {
+                        "adapter": "allowlisted_production",
+                        "operation_id": "sg-0123456789012345678901234567890123456789",
+                        "attempt_count": 1,
+                        "transport_status": 202,
+                    },
+                }
+            )
+        )
+        self.assertEqual("allowlisted_production", document["payload"]["action_metadata"]["adapter"])
+
+    def test_rejects_sensitive_or_query_shaped_payload_keys_at_any_supported_depth(self):
         blocked = (
             "authorization",
             "api_token",
@@ -61,9 +78,17 @@ class CloudAuditTests(unittest.TestCase):
             with self.subTest(key=key):
                 with self.assertRaises(ValueError):
                     audit_event_document(self.event({key: "must-not-be-written"}))
+                with self.assertRaises(ValueError):
+                    audit_event_document(self.event({"action_metadata": {key: "must-not-be-written"}}))
 
-    def test_rejects_nested_payloads_and_oversized_values(self):
-        for payload in ({"nested": {"x": 1}}, {"items": [1, 2]}, {"value": "x" * 2049}):
+    def test_rejects_collections_deep_nesting_and_oversized_values(self):
+        payloads = (
+            {"items": [1, 2]},
+            {"nested": {"items": [1]}},
+            {"nested": {"too_deep": {"x": 1}}},
+            {"value": "x" * 2049},
+        )
+        for payload in payloads:
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
                     audit_event_document(self.event(payload))
