@@ -37,6 +37,7 @@ CONSOLE_HTML = """<!doctype html>
       <article class="card"><h2>Deterministic diagnosis</h2><p id="summary"></p><p><strong>Hypothesis:</strong> <span id="hypothesis"></span></p><p><strong>Production:</strong> <span id="production"></span> · <strong>Feed:</strong> <span id="feed"></span></p></article>
       <article class="card"><h2>Evidence</h2><div class="table-wrap"><table><thead><tr><th>Class</th><th>Value</th><th>Threshold</th><th>Supports</th></tr></thead><tbody id="evidence"></tbody></table></div></article>
       <article id="briefing-card" class="card" hidden><h2>Gemini advisory briefing</h2><p class="notice">Advisory only. It cannot alter incident or remediation state.</p><pre id="briefing-output"></pre></article>
+      <article class="card"><h2>Incident timeline</h2><p class="notice">Redacted lifecycle provenance for this incident. Provider details, raw evidence, queries, targets, endpoints, activation IDs, and operator identities are excluded.</p><div class="table-wrap"><table><thead><tr><th>Seq</th><th>Time</th><th>Event</th><th>Actor ref</th><th>Details</th></tr></thead><tbody id="timeline"></tbody></table></div><div class="actions"><button id="timeline-more" disabled>Load more</button></div></article>
       <article class="card danger-zone"><h2>Revision-bound approval</h2><p>Approval is valid only for the exact evidence revision shown above. Type the full revision to unlock approval.</p><input id="approval-revision" autocomplete="off" spellcheck="false" placeholder="Current revision"><div class="actions"><button id="approve" disabled>Approve remediation</button><button id="execute" disabled>Execute approved action</button></div><p id="approval-state" class="notice"></p></article>
       <article id="recovery-card" class="card" hidden><h2>Recovery verification</h2><pre id="recovery"></pre></article>
     </section>
@@ -46,13 +47,15 @@ CONSOLE_HTML = """<!doctype html>
 </html>
 """
 
-CONSOLE_CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0b0d10;color:#f4f6f8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#171b22,#0b0d10 48%);min-height:100vh}main{max-width:1120px;margin:0 auto;padding:32px 20px 64px}header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}h1{font-size:40px;margin:2px 0}h2{font-size:18px;margin:0 0 12px}.eyebrow,.label{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:#9ca7b5;margin:0}.pill{padding:8px 12px;border:1px solid #39414c;border-radius:999px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 20px}button,input{font:inherit;border-radius:8px;border:1px solid #3a4350;background:#151a21;color:#f4f6f8;padding:10px 14px}button{cursor:pointer}button.primary{background:#f2f4f7;color:#11151a;border-color:#f2f4f7;font-weight:700}button:disabled{opacity:.4;cursor:not-allowed}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:#11151b;border:1px solid #272e38;border-radius:12px;padding:18px;margin:12px 0;box-shadow:0 12px 28px rgba(0,0,0,.16)}.card p:last-child{margin-bottom:0}.mono,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.mono{font-size:13px;overflow-wrap:anywhere}.notice{color:#aeb8c5;font-size:13px}#message{min-height:24px;color:#f3cb72}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #252c35;padding:10px 8px}th{color:#aeb8c5;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e12;border-radius:8px;padding:14px;font-size:13px;line-height:1.5}.danger-zone{border-color:#514327}.danger-zone input{width:min(360px,100%)}@media(max-width:760px){.grid{grid-template-columns:1fr 1fr}header{align-items:flex-start;flex-direction:column}}@media(max-width:460px){.grid{grid-template-columns:1fr}h1{font-size:32px}}
+CONSOLE_CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0b0d10;color:#f4f6f8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#171b22,#0b0d10 48%);min-height:100vh}main{max-width:1120px;margin:0 auto;padding:32px 20px 64px}header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}h1{font-size:40px;margin:2px 0}h2{font-size:18px;margin:0 0 12px}.eyebrow,.label{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:#9ca7b5;margin:0}.pill{padding:8px 12px;border:1px solid #39414c;border-radius:999px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 20px}button,input{font:inherit;border-radius:8px;border:1px solid #3a4350;background:#151a21;color:#f4f6f8;padding:10px 14px}button{cursor:pointer}button.primary{background:#f2f4f7;color:#11151a;border-color:#f2f4f7;font-weight:700}button:disabled{opacity:.4;cursor:not-allowed}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:#11151b;border:1px solid #272e38;border-radius:12px;padding:18px;margin:12px 0;box-shadow:0 12px 28px rgba(0,0,0,.16)}.card p:last-child{margin-bottom:0}.mono,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.mono{font-size:13px;overflow-wrap:anywhere}.notice{color:#aeb8c5;font-size:13px}#message{min-height:24px;color:#f3cb72}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #252c35;padding:10px 8px;vertical-align:top}th{color:#aeb8c5;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e12;border-radius:8px;padding:14px;font-size:13px;line-height:1.5}.danger-zone{border-color:#514327}.danger-zone input{width:min(360px,100%)}@media(max-width:760px){.grid{grid-template-columns:1fr 1fr}header{align-items:flex-start;flex-direction:column}}@media(max-width:460px){.grid{grid-template-columns:1fr}h1{font-size:32px}}
 """
 
 CONSOLE_JS = r"""(() => {
 'use strict';
 const q = id => document.getElementById(id);
 let current = null;
+let timelineAfter = 0;
+let timelineLoading = false;
 const message = text => { q('message').textContent = text || ''; };
 const scalar = value => value === null || value === undefined ? '—' : String(value);
 async function request(path, options = {}) {
@@ -73,12 +76,41 @@ function renderEvidence(items) {
     body.appendChild(row);
   });
 }
+function appendTimeline(items) {
+  const body = q('timeline');
+  (Array.isArray(items) ? items : []).forEach(item => {
+    const row = document.createElement('tr');
+    const when = Number.isFinite(item.timestamp_unix_ms) ? new Date(item.timestamp_unix_ms).toISOString() : '—';
+    const details = item.payload && typeof item.payload === 'object' ? JSON.stringify(item.payload) : '{}';
+    [item.sequence, when, item.event_type, item.actor_ref, details].forEach(value => {
+      const cell = document.createElement('td'); cell.textContent = scalar(value); row.appendChild(cell);
+    });
+    body.appendChild(row);
+  });
+}
+async function loadTimeline(reset = false) {
+  if (!current || timelineLoading) return;
+  const incidentId = current.incident_id;
+  if (reset) { timelineAfter = 0; q('timeline').replaceChildren(); }
+  timelineLoading = true; q('timeline-more').disabled = true;
+  try {
+    const path = `/v1/audit?incident_id=${encodeURIComponent(incidentId)}&after_sequence=${timelineAfter}&limit=25`;
+    const data = await request(path);
+    if (!current || current.incident_id !== incidentId) return;
+    const timeline = data.timeline || {};
+    appendTimeline(timeline.events);
+    timelineAfter = Number.isInteger(timeline.next_after_sequence) ? timeline.next_after_sequence : timelineAfter;
+    q('timeline-more').disabled = !timeline.has_more;
+  } catch (err) { message(err.message); }
+  finally { timelineLoading = false; }
+}
 function render(snapshot) {
+  const previousId = current?.incident_id;
   current = snapshot || null;
   q('empty').hidden = !!current; q('incident').hidden = !current;
   q('briefing-card').hidden = true; q('briefing-output').textContent = '';
   q('approval-revision').value = ''; q('approve').disabled = true;
-  if (!current) { q('briefing').disabled = true; return; }
+  if (!current) { q('briefing').disabled = true; q('timeline').replaceChildren(); q('timeline-more').disabled = true; timelineAfter = 0; return; }
   const report = current.report || {};
   q('incident-id').textContent = scalar(current.incident_id); q('revision').textContent = scalar(current.revision);
   q('status').textContent = scalar(report.status); q('confidence').textContent = Number.isFinite(report.confidence) ? `${Math.round(report.confidence*100)}%` : '—';
@@ -90,14 +122,16 @@ function render(snapshot) {
   q('approval-state').textContent = approval ? `Approved for ${scalar(approval.action)} on ${scalar(approval.target)}.` : 'Not approved.';
   q('execute').disabled = !approval || !!current.outcome;
   q('recovery-card').hidden = !current.outcome; q('recovery').textContent = current.outcome ? JSON.stringify(current.outcome, null, 2) : '';
+  loadTimeline(previousId !== current.incident_id || timelineAfter === 0);
 }
 async function refresh() { message('Refreshing incident status…'); try { const data=await request('/v1/incident'); render(data.incident); q('connection').textContent='Authenticated'; message(''); } catch(err) { q('connection').textContent='Unavailable'; message(err.message); } }
 q('refresh').addEventListener('click', refresh);
-q('investigate').addEventListener('click', async () => { message('Collecting bounded Grafana evidence…'); try { const data=await request('/v1/investigate',{method:'POST',body:{}}); render(data.incident); message('Investigation complete.'); } catch(err) { message(err.message); } });
-q('briefing').addEventListener('click', async () => { if(!current) return; const binding={incident_id:current.incident_id,revision:current.revision}; message('Generating advisory briefing for this revision…'); try { const data=await request('/v1/briefing',{method:'POST',body:binding}); if(!current || data.revision!==current.revision){message('Briefing discarded because the incident revision changed.');return;} q('briefing-output').textContent=JSON.stringify(data.briefing,null,2); q('briefing-card').hidden=false; message(''); } catch(err) { message(err.message); } });
+q('timeline-more').addEventListener('click', () => loadTimeline(false));
+q('investigate').addEventListener('click', async () => { message('Collecting bounded Grafana evidence…'); try { const data=await request('/v1/investigate',{method:'POST',body:{}}); render(data.incident); await loadTimeline(true); message('Investigation complete.'); } catch(err) { message(err.message); } });
+q('briefing').addEventListener('click', async () => { if(!current) return; const binding={incident_id:current.incident_id,revision:current.revision}; message('Generating advisory briefing for this revision…'); try { const data=await request('/v1/briefing',{method:'POST',body:binding}); if(!current || data.revision!==current.revision){message('Briefing discarded because the incident revision changed.');return;} q('briefing-output').textContent=JSON.stringify(data.briefing,null,2); q('briefing-card').hidden=false; await loadTimeline(true); message(''); } catch(err) { message(err.message); } });
 q('approval-revision').addEventListener('input', event => { q('approve').disabled = !current || event.target.value !== current.revision || current.report?.status !== 'diagnosed'; });
-q('approve').addEventListener('click', async () => { if(!current || q('approval-revision').value!==current.revision) return; const binding={incident_id:current.incident_id,revision:current.revision}; if(!window.confirm(`Approve remediation for evidence revision ${current.revision}?`)) return; message('Recording explicit approval…'); try { const data=await request('/v1/approve',{method:'POST',body:binding}); render(data.incident); message('Remediation approved for the current revision.'); } catch(err) { message(err.message); } });
-q('execute').addEventListener('click', async () => { if(!current?.approval || current.outcome) return; if(!window.confirm('Execute the already-approved remediation and verify recovery telemetry?')) return; message('Executing approved remediation and verifying recovery…'); try { const data=await request('/v1/execute',{method:'POST',body:{}}); render(data.incident); message('Execution finished; recovery state updated.'); } catch(err) { message(err.message); } });
+q('approve').addEventListener('click', async () => { if(!current || q('approval-revision').value!==current.revision) return; const binding={incident_id:current.incident_id,revision:current.revision}; if(!window.confirm(`Approve remediation for evidence revision ${current.revision}?`)) return; message('Recording explicit approval…'); try { const data=await request('/v1/approve',{method:'POST',body:binding}); render(data.incident); await loadTimeline(true); message('Remediation approved for the current revision.'); } catch(err) { message(err.message); } });
+q('execute').addEventListener('click', async () => { if(!current?.approval || current.outcome) return; if(!window.confirm('Execute the already-approved remediation and verify recovery telemetry?')) return; message('Executing approved remediation and verifying recovery…'); try { const data=await request('/v1/execute',{method:'POST',body:{}}); render(data.incident); await loadTimeline(true); message('Execution finished; recovery state updated.'); } catch(err) { message(err.message); } });
 refresh();
 })();
 """
