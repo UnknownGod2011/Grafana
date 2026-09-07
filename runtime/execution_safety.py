@@ -8,17 +8,17 @@ checkpoint winner and then collecting a fresh Grafana investigation; production
 adapters that declare reconciliation as required must additionally prove the
 idempotent provider operation is no longer ambiguous.
 
-A restored production checkpoint containing an unused approval is also treated
-as uncertain. The checkpoint alone cannot prove whether a previous process sent
-the deterministic operation before crashing. This conservative restart rule can
-invalidate a genuinely unused approval, but it prevents a process restart from
-turning ambiguous execution into an automatic replay.
+Checkpoint schema v2 persists a provider-detail-free execution phase. A durable
+``approved`` phase proves the side effect was not dispatched and can safely
+survive restart. ``dispatching`` means the provider may have been contacted and
+therefore requires reconciliation. Legacy v1 pending approvals remain ambiguous
+because they contain no pre-side-effect phase marker.
 """
 from __future__ import annotations
 
 from typing import Literal
 
-from incident_checkpoint import CheckpointConflictError
+from incident_checkpoint import CheckpointConflictError, IncidentCheckpoint
 from incident_service import IncidentService, IncidentSnapshot
 from remediation import remediation_operation_id
 
@@ -36,23 +36,51 @@ class ExecutionSafeIncidentService(IncidentService):
         super().__init__(*args, **kwargs)
         self._guard_restored_production_approval()
 
-    def _guard_restored_production_approval(self) -> None:
-        """Treat a restored unused production approval as execution-ambiguous.
+    def _phase_capable_store(self):
+        store = self._checkpoint_store
+        if store is None or not bool(getattr(store, "supports_execution_phase", False)):
+            return None
+        return store
 
-        The durable checkpoint intentionally does not persist provider execution
-        detail. After restart, an approval with no outcome therefore cannot prove
-        that the prior process never contacted the remediation provider. For
-        adapters requiring provider reconciliation, derive the same deterministic
-        operation id and force reconciliation plus fresh Grafana evidence before
-        any new approval can become actionable.
+    def _restored_execution_phase(self) -> str | None:
+        """Read the authenticated phase from a phase-capable durable store.
+
+        The base constructor has already loaded and validated the checkpoint. A
+        second load is deliberate: production stores pin the same current
+        generation while exposing the schema-v2 phase to this safety layer.
+        """
+        store = self._phase_capable_store()
+        snapshot = self._snapshot
+        if store is None or snapshot is None:
+            return None
+        checkpoint = store.load()
+        if checkpoint is None:
+            raise RuntimeError("restored incident checkpoint became unavailable")
+        if checkpoint.incident_id != snapshot.incident_id or checkpoint.revision != snapshot.revision:
+            raise RuntimeError("restored incident checkpoint changed during safety validation")
+        return checkpoint.execution_phase
+
+    def _guard_restored_production_approval(self) -> None:
+        """Apply restart semantics from the durable execution phase.
+
+        A v2 ``approved`` checkpoint is safe to execute after restart because
+        StageGuard persisted it before the dispatch barrier. ``dispatching`` and
+        v1 ``legacy_unknown`` are fail-closed and require reconciliation plus
+        fresh Grafana evidence. Custom stores without phase support retain the
+        older conservative behavior.
         """
         snapshot = self._snapshot
         requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
         if snapshot is None or snapshot.approval is None or snapshot.outcome is not None or not requires:
             return
+        phase = self._restored_execution_phase()
+        if phase == "approved":
+            return
+        if phase not in {"dispatching", "legacy_unknown", None}:
+            raise RuntimeError("invalid pending remediation execution phase")
         self._execution_uncertain = True
         self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
-        # super().__init__ has already loaded and validated the durable winner.
+        # Construction has already adopted and validated this durable state.
         self._execution_reloaded = True
 
     def checkpoint_state(self) -> str:
@@ -68,29 +96,65 @@ class ExecutionSafeIncidentService(IncidentService):
             )
         super()._require_checkpoint_consistency()
 
+    def _persist_dispatching_barrier(self, snapshot: IncidentSnapshot) -> bool:
+        """Persist ``dispatching`` before any reconciliation-required side effect.
+
+        Returns True when the durable barrier was written. A CAS conflict here
+        occurs before provider contact and therefore remains an ordinary
+        checkpoint conflict rather than execution uncertainty.
+        """
+        requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
+        store = self._phase_capable_store()
+        if not requires or store is None:
+            return False
+        checkpoint = IncidentCheckpoint(
+            snapshot.incident_id,
+            snapshot.revision,
+            snapshot.report,
+            snapshot.approval,
+            snapshot.outcome,
+            self._sequence,
+            "dispatching",
+        )
+        try:
+            store.save(checkpoint)
+        except CheckpointConflictError:
+            self._checkpoint_conflicted = True
+            raise
+        return True
+
     def execute_approved(self, *, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
             snapshot = self._snapshot
             if snapshot is None or snapshot.approval is None:
                 return super().execute_approved(actor=actor)
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
+            dispatch_barrier = self._persist_dispatching_barrier(snapshot)
             try:
                 return super().execute_approved(actor=actor)
             except CheckpointConflictError:
-                # At this point IncidentService has already returned from
-                # remediate_and_verify(), so the provider was contacted. Never
-                # infer whether it executed from the losing checkpoint write.
-                self._execution_uncertain = True
-                self._execution_uncertain_operation_id = operation_id
-                self._execution_reloaded = False
+                # If the pre-dispatch barrier itself lost CAS, no provider was
+                # contacted and _persist_dispatching_barrier already marked a
+                # normal checkpoint conflict. Otherwise this conflict happened
+                # after remediate_and_verify returned and execution is ambiguous.
+                if dispatch_barrier:
+                    self._execution_uncertain = True
+                    self._execution_uncertain_operation_id = operation_id
+                    self._execution_reloaded = False
+                raise
+            except Exception:
+                if dispatch_barrier:
+                    # Once dispatching is durable, any provider/verification
+                    # exception is ambiguous. Never retry the action in-process.
+                    self._execution_uncertain = True
+                    self._execution_uncertain_operation_id = operation_id
+                    self._execution_reloaded = True
                 raise
 
     def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
         with self._lock:
             snapshot = super().reload_checkpoint_after_conflict()
             if self._execution_uncertain:
-                # Durable winner adoption resolves checkpoint ownership only.
-                # It does not resolve the remote side-effect ambiguity.
                 self._execution_reloaded = True
             return snapshot
 
@@ -136,15 +200,10 @@ class ExecutionSafeIncidentService(IncidentService):
             if provider_state == "unknown":
                 raise RuntimeError("remediation provider idempotency state is unresolved")
 
-            # Fresh investigation is the only allowed lifecycle mutation while
-            # uncertain. IncidentService.investigate deterministically clears the
-            # old approval/outcome and persists the new evidence revision.
             self._allow_uncertainty_investigation = True
             try:
                 snapshot = super().investigate(actor=actor)
             except Exception:
-                # Any failure, including another checkpoint conflict, leaves the
-                # uncertainty block in place.
                 raise
             else:
                 self._execution_uncertain = False
