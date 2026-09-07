@@ -39,27 +39,29 @@ def build_bootstrap_argv(environ: Mapping[str, str] | None = None) -> list[str]:
     telemetry = _required(env, "STAGEGUARD_TELEMETRY_CONFIG")
     metric_activation = _required(env, "STAGEGUARD_METRIC_ACTIVATION")
     log_activation = _required(env, "STAGEGUARD_LOG_ACTIVATION")
-
-    # Require the IAP audience here as well as in bootstrap so a container cannot
-    # accidentally start internet-facing and then discover identity drift later.
     _required(env, "STAGEGUARD_IAP_AUDIENCE")
 
     argv = [
-        "--telemetry-config",
-        telemetry,
-        "--activation",
-        metric_activation,
-        "--log-activation",
-        log_activation,
-        "--identity-mode",
-        "iap",
-        "--audit-backend",
-        "cloud-logging",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(_port(env)),
+        "--telemetry-config", telemetry,
+        "--activation", metric_activation,
+        "--log-activation", log_activation,
+        "--identity-mode", "iap",
+        "--audit-backend", "cloud-logging",
+        "--host", "0.0.0.0",
+        "--port", str(_port(env)),
     ]
+
+    checkpoint_bucket = env.get("STAGEGUARD_CHECKPOINT_BUCKET", "").strip()
+    if checkpoint_bucket:
+        # The bucket name itself remains deployment-owned environment config; the
+        # browser cannot choose a bucket/object. ADC is used by the server only.
+        argv.extend(["--checkpoint-backend", "gcs"])
+        checkpoint_object = env.get("STAGEGUARD_CHECKPOINT_OBJECT", "").strip()
+        if checkpoint_object:
+            argv.extend(["--checkpoint-object", checkpoint_object])
+    else:
+        # Never pretend ephemeral container storage is restart durability.
+        argv.extend(["--checkpoint-backend", "none"])
 
     if env.get("STAGEGUARD_ENABLE_GEMINI", "").strip().lower() in _TRUE:
         argv.append("--enable-gemini")
