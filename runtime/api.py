@@ -80,7 +80,12 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
 
 
 def _service_metrics(service: IncidentService) -> str:
-    return _get_readiness_probe(service).prometheus_metrics()
+    metrics = _get_readiness_probe(service).prometheus_metrics()
+    checkpoint_store = getattr(service, "_checkpoint_store", None)
+    exporter = getattr(checkpoint_store, "prometheus_metrics", None)
+    if callable(exporter):
+        metrics += exporter()
+    return metrics
 
 
 def _single_query_value(query: dict[str, list[str]], name: str, *, required: bool = False) -> str | None:
@@ -97,7 +102,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.7"
+    server_version = "StageGuard/0.8"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -182,7 +187,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             try:
                 metrics = _service_metrics(self.service)
             except Exception:
-                metrics = "# StageGuard readiness metrics unavailable\n"
+                metrics = "# StageGuard metrics unavailable\n"
             self._send_text(200, metrics, "text/plain; version=0.0.4; charset=utf-8")
             return
         if self._serve_operator_console():
