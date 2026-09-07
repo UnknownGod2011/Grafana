@@ -14,6 +14,7 @@ Core invariants:
 - Production GCS checkpoints require HMAC-SHA-256 authenticity plus strict pinned-generation compare-and-swap.
 - Generation conflicts fail closed; losing state is never merged or retried automatically.
 - A CAS conflict after remediation contact is execution ambiguity and remains unready until durable-winner reload, provider reconciliation where required, and fresh Grafana evidence.
+- A restored production checkpoint with approval but no outcome is also treated as execution-ambiguous; restart can never make that approval executable without provider reconciliation and fresh evidence.
 - Reconciliation never replays remediation; the deterministic operation id remains server-owned and is never accepted from the browser/API caller.
 - Provider metadata, credentials, Gemini output, Grafana secrets, checkpoint signing material, and provider reconciliation detail are not exposed to the browser.
 - `/healthz` proves process liveness only; `/readyz` proves bounded evidence-plane and lifecycle consistency.
@@ -35,77 +36,102 @@ Core invariants:
 - Restart-safe operator recovery UX exposing only `clear`, `reload_required`, or `reloaded`.
 - Provider-neutral, read-only HTTP idempotency reconciliation transport contract with bounded result states.
 - Explicit production remediation now requires and wires a dedicated read-only reconciliation endpoint.
+- Concrete HTTP transport lifecycle coverage for accepted/not-found/timeout/malformed/repeated reconciliation without remediation replay.
+- Restart-safe production approval recovery: restored approval-without-outcome checkpoints fail closed before any external action can be replayed.
 
-## Run log — 2026-09-08 — production reconciliation bootstrap wiring
+## Run log — 2026-09-08 — concrete reconciliation lifecycle + restart-safe approval boundary
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- repository metadata/default branch;
-- `runtime/bootstrap.py`;
-- `runtime/tests/test_bootstrap.py`;
-- `runtime/http_remediation_transport.py`;
+- `runtime/execution_safety.py`;
 - `runtime/production_remediation.py`;
-- `REMEDIATION_RECONCILIATION.md`.
+- `runtime/http_remediation_transport.py`;
+- `runtime/tests/test_execution_safety.py`;
+- `runtime/incident_service.py`;
+- `runtime/telemetry.py`;
+- `runtime/incident_checkpoint.py`;
+- `EXECUTION_UNCERTAINTY.md`.
 
-The highest-value gap matched the prior handoff: the concrete HTTPS transport already supported read-only provider idempotency lookup, but the production bootstrap did not pass a reconciliation endpoint into it. A real deployment could therefore execute remediation but remain permanently fail-closed after an ambiguous post-provider checkpoint CAS race.
+The prior handoff requested full execution-uncertainty tests through the concrete HTTPS transport. While tracing that path, a higher-severity restart gap was found: execution uncertainty existed only in process memory. A process restart with a persisted production approval and no outcome could not prove whether the previous process had already contacted the remediation provider, so restoring that approval as executable risked replaying an external action.
 
 ### Exact changes made
 
-Updated `runtime/bootstrap.py`:
+Added `runtime/tests/test_execution_safety_http_transport.py`:
 
-- added `remediation_reconciliation_endpoint_env`, defaulting to `STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT`;
-- explicit production remediation now requires that environment variable in addition to the execution endpoint and bearer credential;
-- passes the dedicated endpoint to `HttpRemediationTransport(reconciliation_endpoint=...)`;
-- added CLI option `--remediation-reconciliation-endpoint-env` so deployments can rename the environment variable without putting an endpoint value directly on the command line;
-- retained the existing prohibition on explicit production remediation for the demo telemetry profile;
-- retained separation between custom `remediation_factory` and explicit production remediation.
+- exercises `ExecutionSafeIncidentService` through `AllowlistedProductionRemediationClient` and concrete `HttpRemediationTransport`;
+- verifies execution uses exactly one POST before a forced post-provider checkpoint conflict;
+- verifies accepted reconciliation uses a bodyless GET, collects fresh evidence, clears stale approval/outcome, and never replays execution;
+- verifies reconciliation HTTP 404 maps to bounded `not_found` and never replays execution;
+- verifies timeout keeps `execution_uncertain` fail-closed;
+- verifies malformed provider documents keep uncertainty blocked and provider detail does not escape the coarse error;
+- verifies repeated reconciliation after success performs no provider network request and no remediation replay.
 
-Added `runtime/tests/test_production_reconciliation_bootstrap.py`:
+Corrected the concrete lifecycle fixture to the real default telemetry allowlist (`broadcast-alpha` / `uplink-b`) so the production adapter reaches its transport rather than rejecting the target early.
 
-- verifies explicit production remediation fails closed when the reconciliation endpoint is absent;
-- verifies the execution and reconciliation endpoints are wired separately into the concrete HTTP transport;
-- verifies an insecure HTTP reconciliation endpoint is rejected before any network call.
+Updated `runtime/execution_safety.py`:
 
-Updated `REMEDIATION_RECONCILIATION.md`:
+- after base checkpoint restoration/validation, production-style adapters declaring `requires_operation_reconciliation = True` now inspect restored state;
+- if the durable checkpoint contains an approval with no outcome, StageGuard derives the deterministic operation id from the restored report + approval and immediately enters `execution_uncertain`;
+- the reconciliation phase is `reloaded` because construction already loaded and validated the durable winner;
+- `execute_approved()` is therefore blocked after restart before the remediation provider can be contacted;
+- reconciliation still requires provider `accepted` or `not_found` plus a fresh Grafana investigation, which clears the stale approval and requires a new human approval for any future execution;
+- local/simulator adapters that do not require reconciliation keep their existing restart semantics.
 
-- documents the now-required production environment variable;
-- documents separate writer/read endpoint examples;
-- documents CLI environment-variable indirection;
-- removes the stale statement that production bootstrap wiring remained incomplete.
+Expanded `runtime/tests/test_execution_safety.py`:
+
+- verifies a restored pending production approval enters `execution_uncertain` without any remediation execution call;
+- verifies provider reconciliation + fresh evidence clears that restored approval while execution call count remains zero;
+- verifies local adapter restart behavior is unchanged.
+
+Updated `EXECUTION_UNCERTAINTY.md`:
+
+- documents the crash/restart ambiguity boundary;
+- documents why a restored approval-without-outcome cannot safely prove that the provider was never contacted;
+- documents the conservative production restart policy and its deliberate tradeoff: a genuinely unused approval may be invalidated after restart rather than risking duplicate external side effects;
+- documents the new concrete HTTPS lifecycle regression coverage.
 
 ### Commits produced this run
 
-- `bc69f7ac` — wire production remediation reconciliation endpoint
-- `1fedeba7` — test production reconciliation bootstrap wiring
-- `12c4b5ae` — document production reconciliation bootstrap wiring
+- `48b1f66b` — add concrete remediation transport uncertainty lifecycle tests
+- `c4c1c34a` — fix concrete remediation test telemetry allowlist
+- `903cc62a` — fail closed on restored production approvals after restart
+- `0848340d` — test restart-safe production approval recovery
+- `a9db7219` — document restart-safe execution uncertainty
 
 ### Tests / checks / results
 
-Attempted a credential-free local validation with:
+Attempted credential-free local validation with:
 
 ```text
-python -m unittest tests.test_production_reconciliation_bootstrap tests.test_http_remediation_transport tests.test_production_remediation
+python -m unittest tests.test_execution_safety_http_transport tests.test_execution_safety tests.test_http_remediation_transport tests.test_production_remediation
 ```
 
-The checkout failed before Python started because the execution container could not resolve `github.com` (`Could not resolve host: github.com`). Therefore the Python suite is **not claimed as executed successfully** in this run.
+The checkout failed before Python started because the execution container still could not resolve `github.com` (`Could not resolve host: github.com`). Therefore the Python suite is **not claimed as executed successfully** in this run.
+
+Static review caught and fixed one concrete fixture error before handoff: the production client originally used a non-default target and would have rejected execution before transport invocation.
 
 No GitHub Actions workflow was intentionally triggered, rerun, or modified. No Grafana, Loki, Gemini, IAP, Cloud Logging, GCS, Secret Manager, operator, or remediation credential/resource was used.
 
 ### Decisions made
 
-1. **Production remediation must be recoverable before it can be enabled.** Missing reconciliation configuration is now a startup error rather than a latent permanent-block condition.
-2. **Execution and reconciliation endpoints remain distinct deployment authorities.** The writer command URL and read-only idempotency lookup URL are separately configured even if a deployment chooses to serve both from the same provider.
-3. **Endpoint values stay out of incident/browser input.** Only environment-variable names are configurable through the CLI.
-4. **Existing reconciliation semantics remain unchanged.** Lookup is GET-only, bodyless, bounded to `accepted` / `not_found` / `unknown`, and never replays remediation.
+1. **Restart ambiguity is equivalent to execution ambiguity for production adapters.** If durable state cannot prove that a pending approved action was never sent, StageGuard must not make it executable after process restart.
+2. **Safety beats approval preservation.** A genuinely unused production approval may be discarded after restart through reconciliation + fresh evidence; silently replaying a potentially completed external action is unacceptable.
+3. **The durable checkpoint remains provider-detail-free.** Restart safety derives the deterministic operation id from already-authenticated report + approval state rather than persisting provider responses or credentials.
+4. **Local development remains ergonomic.** Simulator/local adapters are not forced through provider reconciliation on ordinary restart.
+5. **Concrete reconciliation is read-only and replay-proof.** Accepted, not-found, timeout, malformed, and repeated reconciliation paths are tested around the transport boundary without constructing a second remediation command.
 
 ### Current blockers / unknowns
 
 - The deterministic Python suite remains unexecuted in this environment because the container cannot resolve GitHub for checkout.
-- End-to-end `ExecutionSafeIncidentService` coverage with the concrete HTTP reconciliation transport should still prove accepted/not-found/timeout/malformed/repeated reconciliation across an actual uncertainty lifecycle.
 - Real-GCS two-instance acceptance, Cloud Run/IAP browser acceptance, real provider idempotency lookup, and real Grafana MCP metric+Loki acceptance still require external credentials/resources.
+- The restart-safe rule is intentionally conservative because checkpoint schema v1 does not persist a durable pre-execution/side-effect phase marker. A future schema evolution could preserve unused approvals more precisely while retaining replay safety.
 
 ## Single best next step
 
-**Add end-to-end execution-uncertainty tests using the concrete `HttpRemediationTransport` through `AllowlistedProductionRemediationClient`, proving `accepted`, `not_found`, timeout/error, malformed provider responses, and repeated reconciliation never invoke the remediation execution endpoint a second time and always require fresh Grafana evidence before lifecycle recovery.**
+**Introduce a durable, authenticated remediation execution-phase marker in checkpoint schema v2 (for example `approved`, `dispatching`, `resolved`) with backward-compatible v1 restore semantics, so StageGuard can distinguish a genuinely unused restored approval from a possibly dispatched operation without weakening the current fail-closed restart guarantee. Add migration/round-trip/tamper tests and keep provider response detail out of the checkpoint.**
+
+## Previous run — 2026-09-08 — production reconciliation bootstrap wiring
+
+Production bootstrap was updated so explicit remediation requires and wires `STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT`, with separate execution/reconciliation endpoints and fail-closed HTTPS validation. Targeted local validation could not run because the container could not resolve GitHub. The next handoff from that run requested concrete transport lifecycle coverage, completed above.
