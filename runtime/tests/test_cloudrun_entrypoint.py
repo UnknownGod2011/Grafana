@@ -24,14 +24,18 @@ class CloudRunEntrypointTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "none")
         self.assertNotIn("--enable-production-remediation", argv)
 
-    def test_checkpoint_bucket_enables_durable_gcs_store(self) -> None:
+    def test_checkpoint_bucket_requires_hmac_secret_and_enables_gcs(self) -> None:
         env = self._env()
         env["STAGEGUARD_CHECKPOINT_BUCKET"] = "stageguard-state-prod"
+        with self.assertRaisesRegex(ValueError, "STAGEGUARD_CHECKPOINT_HMAC_KEY"):
+            build_bootstrap_argv(env)
+        env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 32
         env["STAGEGUARD_CHECKPOINT_OBJECT"] = "prod/current.json"
         argv = build_bootstrap_argv(env)
         self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "gcs")
         self.assertEqual(argv[argv.index("--checkpoint-object") + 1], "prod/current.json")
-        self.assertNotIn("stageguard-state-prod", argv)  # bucket stays environment-owned
+        self.assertNotIn("stageguard-state-prod", argv)
+        self.assertNotIn("k" * 32, argv)
 
     def test_gemini_is_opt_in(self) -> None:
         env = self._env()
