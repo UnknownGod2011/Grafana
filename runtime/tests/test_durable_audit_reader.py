@@ -10,6 +10,8 @@ NOW_MS = 1_700_000_000_000
 
 
 class FakeLogger:
+    full_name = "projects/test-project/logs/stageguard-audit"
+
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.calls = []
@@ -56,6 +58,7 @@ class DurableAuditReaderTests(unittest.TestCase):
         self.assertEqual([1, 2], [event.sequence for event in events])
         self.assertEqual(1, len(logger.calls))
         call = logger.calls[0]
+        self.assertIn('logName="projects/test-project/logs/stageguard-audit"', call["filter_"])
         self.assertIn('jsonPayload.schema="stageguard.audit.v1"', call["filter_"])
         self.assertIn('jsonPayload.incident_id="incident-1"', call["filter_"])
         self.assertIn("jsonPayload.sequence>0", call["filter_"])
@@ -111,16 +114,15 @@ class DurableAuditReaderTests(unittest.TestCase):
 class DurableTimelineMergeTests(unittest.TestCase):
     def test_service_merges_durable_and_local_events_without_exposing_extra_fields(self):
         durable = AuditEvent(
-            1,
-            NOW_MS - 10,
+            2,
+            NOW_MS + 1,
             "incident-1",
-            "investigation_completed",
+            "remediation_approved",
             "operator@example.com",
             {
-                "revision": "old-revision",
-                "status": "diagnosed",
-                "confidence": 0.8,
-                "evidence_mode": "metric+loki",
+                "revision": "rev-1",
+                "action": "recover_uplink",
+                "target": "private-target",
                 "activation_profile_sha256": "private",
             },
         )
@@ -140,8 +142,10 @@ class DurableTimelineMergeTests(unittest.TestCase):
         service.investigate(actor="operator@example.com")
 
         timeline = service.audit_timeline(incident_id="incident-1", limit=10)
-        self.assertEqual([1], [event["sequence"] for event in timeline["events"]])
-        payload = timeline["events"][0]["payload"]
+        self.assertEqual([1, 2], [event["sequence"] for event in timeline["events"]])
+        payload = timeline["events"][1]["payload"]
+        self.assertEqual("recover_uplink", payload["action"])
+        self.assertNotIn("target", payload)
         self.assertNotIn("activation_profile_sha256", payload)
 
     def test_service_fails_closed_on_conflicting_durable_and_local_sequence(self):
