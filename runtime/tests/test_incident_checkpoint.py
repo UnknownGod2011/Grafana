@@ -1,9 +1,10 @@
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from incident_checkpoint import JsonCheckpointStore, checkpoint_document
+from incident_checkpoint import JsonCheckpointStore, checkpoint_document, parse_checkpoint_document
 from incident_service import IncidentService, MemoryAuditLog
 from remediation import ActionResult
 
@@ -56,6 +57,7 @@ class IncidentCheckpointTests(unittest.TestCase):
             snapshot = first.investigate()
             first.approve(incident_id=snapshot.incident_id, revision=snapshot.revision, approved_by="operator@example.com")
             self.assertEqual([], first_action.calls)
+            self.assertEqual("approved", store.load().execution_phase)
 
             second_action = FakeRemediation()
             restored = self.service(recovery(), second_action, store)
@@ -64,6 +66,7 @@ class IncidentCheckpointTests(unittest.TestCase):
             final = restored.execute_approved()
             self.assertEqual("recovered", final.outcome.status)
             self.assertEqual(1, len(second_action.calls))
+            self.assertEqual("resolved", store.load().execution_phase)
 
             third = self.service([], FakeRemediation(), store)
             with self.assertRaises(RuntimeError):
@@ -77,6 +80,7 @@ class IncidentCheckpointTests(unittest.TestCase):
             service.approve(incident_id=first.incident_id, revision=first.revision, approved_by="operator@example.com")
             refreshed = service.investigate()
             self.assertIsNone(refreshed.approval)
+            self.assertEqual("none", store.load().execution_phase)
 
             restored = self.service([], FakeRemediation(), store)
             self.assertIsNone(restored.status().approval)
@@ -117,8 +121,41 @@ class IncidentCheckpointTests(unittest.TestCase):
             service.investigate()
             checkpoint = store.load()
             document = checkpoint_document(checkpoint)
-            self.assertEqual("stageguard.incident-checkpoint.v1", document["schema"])
+            self.assertEqual("stageguard.incident-checkpoint.v2", document["schema"])
+            self.assertEqual("none", document["state"]["execution_phase"])
             self.assertEqual(64, len(document["sha256"]))
+
+    def test_v1_pending_approval_restores_as_legacy_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JsonCheckpointStore(Path(directory) / "checkpoint.json")
+            service = self.service(diagnosed(), FakeRemediation(), store)
+            snapshot = service.investigate()
+            service.approve(incident_id=snapshot.incident_id, revision=snapshot.revision, approved_by="operator@example.com")
+            v2 = checkpoint_document(store.load())
+            state = dict(v2["state"])
+            state.pop("execution_phase")
+            canonical = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            v1 = {
+                "schema": "stageguard.incident-checkpoint.v1",
+                "state": state,
+                "sha256": hashlib.sha256(canonical).hexdigest(),
+                "hmac_sha256": None,
+            }
+            restored = parse_checkpoint_document(v1)
+            self.assertEqual("legacy_unknown", restored.execution_phase)
+
+    def test_signed_execution_phase_tamper_fails_authenticity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JsonCheckpointStore(Path(directory) / "checkpoint.json")
+            service = self.service(diagnosed(), FakeRemediation(), store)
+            service.investigate()
+            key = b"k" * 32
+            document = checkpoint_document(store.load(), signing_key=key)
+            document["state"]["execution_phase"] = "approved"
+            canonical = json.dumps(document["state"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+            document["sha256"] = hashlib.sha256(canonical).hexdigest()
+            with self.assertRaisesRegex(ValueError, "authenticity"):
+                parse_checkpoint_document(document, signing_key=key, require_signature=True)
 
 
 if __name__ == "__main__":
