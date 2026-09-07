@@ -2,8 +2,8 @@
 """Production-oriented StageGuard runtime bootstrap.
 
 This module turns validated files + process-owned secrets into the bounded
-StageGuard runtime. It does not accept PromQL, datasource IDs, actions, or
-remediation targets over HTTP.
+StageGuard runtime. It does not accept PromQL, LogQL, datasource IDs, actions,
+or remediation targets over HTTP.
 """
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from api import _is_loopback, make_server
 from http_remediation_transport import HttpRemediationTransport
 from identity import IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
 from incident_service import IncidentService, JsonlAuditLog
+from log_activation import LogActivationRecord, load_log_activation_record, verify_log_activation_record
+from mcp_log_client import McpLokiLogClient
 from mcp_metric_client import McpPrometheusMetricClient
 from onboarding import load_telemetry_profile
 from production_remediation import AllowlistedProductionRemediationClient
@@ -38,11 +40,14 @@ class DisabledRemediationClient:
 class RuntimeBundle:
     service: IncidentService
     metrics: McpPrometheusMetricClient
+    logs: McpLokiLogClient | None
     identity_provider: IdentityProvider
     server: ThreadingHTTPServer
 
     def close(self) -> None:
         self.server.server_close()
+        if self.logs is not None:
+            self.logs.close()
         self.metrics.close()
 
 
@@ -54,7 +59,6 @@ def _read_required_secret(env_name: str) -> str:
 
 
 def _identity_provider(host: str, *, token_env: str, subject_env: str) -> IdentityProvider:
-    """Use implicit local identity only on loopback; otherwise require bearer auth."""
     if _is_loopback(host):
         token = os.getenv(token_env, "")
         if not token:
@@ -88,35 +92,58 @@ def build_runtime(
     *,
     telemetry_config: str | Path,
     activation_path: str | Path | None,
+    log_activation_path: str | Path | None = None,
     audit_path: str | Path,
     host: str = "127.0.0.1",
     port: int = 9110,
     token_env: str = "STAGEGUARD_API_TOKEN",
     subject_env: str = "STAGEGUARD_API_SUBJECT",
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
+    logs_factory: Callable[[], McpLokiLogClient] = McpLokiLogClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
     enable_production_remediation: bool = False,
     remediation_endpoint_env: str = "STAGEGUARD_REMEDIATION_ENDPOINT",
     remediation_token_env: str = "STAGEGUARD_REMEDIATION_TOKEN",
     activation_now_unix: int | None = None,
 ) -> RuntimeBundle:
-    """Construct the complete runtime and enforce startup trust boundaries.
+    """Construct the runtime and enforce both metric and log evidence activation.
 
-    Production mappings always require a matching activation artifact. The
-    datasource identity is taken from the actual MCP metric client instance and
-    therefore cannot drift from the identity verified by ``IncidentService``.
-    Production writes remain disabled unless the host injects a factory or the
-    CLI explicitly opts into the credential-isolated HTTPS transport.
+    A non-demo production requires a fresh metric activation and a fresh Loki
+    activation. Datasource identities are read from the actual MCP clients, so a
+    runtime cannot silently swap either evidence plane after preflight.
     """
     profile = load_telemetry_profile(telemetry_config)
     metrics = metrics_factory()
+    logs: McpLokiLogClient | None = None
     activation: ActivationRecord | None = None
+    log_activation: LogActivationRecord | None = None
     server: ThreadingHTTPServer | None = None
     try:
         if activation_path is not None:
             activation = load_activation_record(activation_path)
         elif profile != DEFAULT_TELEMETRY_PROFILE:
             raise ValueError("non-default production telemetry requires --activation")
+
+        if profile != DEFAULT_TELEMETRY_PROFILE:
+            if log_activation_path is None:
+                raise ValueError("non-default production telemetry requires --log-activation")
+            log_activation = load_log_activation_record(log_activation_path)
+            logs = logs_factory()
+            verify_log_activation_record(
+                log_activation,
+                profile,
+                logs.datasource_uid,
+                now_unix=activation_now_unix,
+            )
+        elif log_activation_path is not None:
+            log_activation = load_log_activation_record(log_activation_path)
+            logs = logs_factory()
+            verify_log_activation_record(
+                log_activation,
+                profile,
+                logs.datasource_uid,
+                now_unix=activation_now_unix,
+            )
 
         if remediation_factory is not None and enable_production_remediation:
             raise ValueError("choose either remediation_factory or explicit production remediation, not both")
@@ -146,13 +173,17 @@ def build_runtime(
             telemetry_profile=profile,
             activation_record=activation,
             datasource_identity=metrics.datasource_uid if activation is not None else None,
+            logs=logs,
+            log_activation_record=log_activation,
             activation_now_unix=activation_now_unix,
         )
         server = make_server(service, host, port, identity_provider=identity)
-        return RuntimeBundle(service, metrics, identity, server)
+        return RuntimeBundle(service, metrics, logs, identity, server)
     except Exception:
         if server is not None:
             server.server_close()
+        if logs is not None:
+            logs.close()
         metrics.close()
         raise
 
@@ -160,7 +191,8 @@ def build_runtime(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Start the StageGuard incident API")
     parser.add_argument("--telemetry-config", required=True, help="strict versioned telemetry mapping JSON")
-    parser.add_argument("--activation", help="fresh activation artifact produced by preflight")
+    parser.add_argument("--activation", help="fresh metric activation artifact produced by preflight")
+    parser.add_argument("--log-activation", help="fresh Loki evidence activation artifact produced by preflight")
     parser.add_argument("--audit-log", default=".stageguard/audit.jsonl", help="append-only local audit path")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9110)
@@ -190,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         bundle = build_runtime(
             telemetry_config=args.telemetry_config,
             activation_path=args.activation,
+            log_activation_path=args.log_activation,
             audit_path=args.audit_log,
             host=args.host,
             port=args.port,
