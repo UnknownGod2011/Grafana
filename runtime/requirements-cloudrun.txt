@@ -1,0 +1,4 @@
+# Production-only Google integrations. Core StageGuard remains standard-library-only.
+google-auth>=2.35,<3
+google-cloud-logging>=3.11,<4
+google-genai>=1.30,<2
