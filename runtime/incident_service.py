@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from activation import ActivationRecord, verify_activation_record
+from gemini_commander import GeminiCommander, IncidentBriefing
 from investigator import IncidentReport, MetricQueryClient, investigate, investigate_with_log_corroboration
 from log_activation import LogActivationRecord
 from log_evidence import LogQueryClient
@@ -84,13 +85,19 @@ def _revision(report: IncidentReport) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def _briefing_digest(briefing: IncidentBriefing) -> str:
+    canonical = json.dumps(briefing.to_dict(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class IncidentService:
     """Single-profile incident lifecycle with fail-closed approval semantics.
 
     The built-in deterministic demo profile may run without activation artifacts.
     Every non-default production mapping must present a matching metric activation
     record. Canonical production bootstrap also injects a verified Loki client and
-    log activation, making correlated investigation mandatory there.
+    log activation, making correlated investigation mandatory there. Gemini, when
+    configured, is advisory only and can brief only the exact current revision.
     """
 
     def __init__(
@@ -104,6 +111,7 @@ class IncidentService:
         datasource_identity: str | None = None,
         logs: LogQueryClient | None = None,
         log_activation_record: LogActivationRecord | None = None,
+        commander: GeminiCommander | None = None,
         activation_now_unix: int | None = None,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
@@ -141,6 +149,7 @@ class IncidentService:
         self._profile = telemetry_profile
         self._activation = activation_record
         self._log_activation = log_activation_record
+        self._commander = commander
         self._clock_ms = clock_ms
         self._id_factory = id_factory
         self._recovery_sleep = recovery_sleep
@@ -185,6 +194,55 @@ class IncidentService:
                 payload,
             )
             return snapshot
+
+    def briefing(
+        self,
+        *,
+        incident_id: str,
+        revision: str,
+        actor: str = "stageguard",
+    ) -> IncidentBriefing:
+        """Generate an advisory briefing for exactly the current evidence revision.
+
+        The model call executes while holding the lifecycle lock. A concurrent
+        investigation therefore cannot advance the revision between validation and
+        generation. No incident, approval, remediation, or recovery state is changed.
+        """
+        with self._lock:
+            snapshot = self._snapshot
+            if snapshot is None:
+                raise RuntimeError("no incident has been investigated")
+            if incident_id != snapshot.incident_id or revision != snapshot.revision:
+                raise ValueError("briefing request does not match the current incident evidence revision")
+            if self._commander is None:
+                raise RuntimeError("Gemini briefing is not configured")
+
+            normalized_actor = actor.strip() or "stageguard"
+            try:
+                briefing = self._commander.brief(snapshot.report)
+            except Exception as exc:
+                self._record(
+                    snapshot.incident_id,
+                    "briefing_failed",
+                    normalized_actor,
+                    {
+                        "revision": snapshot.revision,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise RuntimeError("Gemini briefing generation failed") from exc
+
+            self._record(
+                snapshot.incident_id,
+                "briefing_generated",
+                normalized_actor,
+                {
+                    "revision": snapshot.revision,
+                    "briefing_sha256": _briefing_digest(briefing),
+                    "next_step": briefing.next_step,
+                },
+            )
+            return briefing
 
     def approve(self, *, incident_id: str, revision: str, approved_by: str) -> IncidentSnapshot:
         with self._lock:
