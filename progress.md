@@ -4,7 +4,7 @@
 
 StageGuard is a personal open-source incident commander for live media workflows. The executable production path now covers:
 
-`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded audit → Cloud Run/IAP deployment → independent liveness/readiness → bounded readiness cache/backoff + StageGuard self-observability → authenticated same-origin operator cockpit`
+`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → Cloud Run/IAP deployment → independent liveness/readiness → bounded readiness cache/backoff + self-observability → authenticated same-origin operator cockpit → bounded redacted incident timeline`
 
 Core invariants:
 
@@ -15,10 +15,11 @@ Core invariants:
 - A previous external success may be reported as `stale` only within a short fixed grace window after a transient refresh failure; once that window expires StageGuard becomes unready.
 - A local activation failure is never masked by cached or stale external reachability.
 - Gemini remains advisory only and cannot mutate diagnosis, approval, remediation, or recovery state.
-- Operator UI requests are same-origin and server-authoritative; the browser receives no Grafana, Gemini, remediation, or infrastructure credential.
-- Human approval remains bound to the exact incident evidence revision; the cockpit adds an explicit typed-revision confirmation without weakening server-side enforcement.
+- Operator UI requests are same-origin and server-authoritative; the browser receives no Grafana, Gemini, remediation, Cloud Logging, or infrastructure credential.
+- Human approval remains bound to the exact incident evidence revision; the cockpit adds explicit typed-revision confirmation without weakening server-side enforcement.
+- Operator audit reads are incident-scoped and derived from a bounded redacted lifecycle projection; the browser never receives generic Cloud Logging read access.
 - Production writes remain disabled in the standard Cloud Run composition.
-- `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed, non-sensitive StageGuard readiness telemetry.
+- `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed non-sensitive readiness telemetry.
 
 ## Completed milestones
 
@@ -34,94 +35,110 @@ Core invariants:
 - `/healthz` liveness + fail-closed `/readyz` using read-only MCP `get_datasource` checks.
 - Persistent readiness probe with external-probe TTL, failure backoff, bounded stale-on-transient-failure semantics, single-flight locking, and Prometheus-format self-observability.
 - Authenticated same-origin operator cockpit for deterministic evidence, Gemini briefing, revision-bound approval, execution, and recovery state.
+- Bounded incident-scoped audit timeline with sequence pagination, actor pseudonymization, event-specific payload allow-lists, and same-origin cockpit rendering.
 
-## Run log — 2026-09-07 — authenticated operator cockpit
+## Run log — 2026-09-07 — bounded operator audit timeline
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Then inspected:
+Read `progress.md` completely before choosing work. Then inspected the current repository and relevant implementation surfaces including:
 
 - `runtime/api.py`
 - `runtime/incident_service.py`
-- `runtime/investigator.py`
-- `runtime/identity.py`
-- `runtime/tests/test_readiness_api.py`
-- `README.md`
+- `runtime/operator_console.py`
+- `runtime/cloud_audit.py`
+- `runtime/tests/test_operator_console.py`
+- `OPERATOR_CONSOLE.md`
 
-The highest-value gap matched the previous handoff: StageGuard had a production-capable API and identity boundary but no operator-facing incident cockpit.
+The highest-value gap matched the previous handoff: lifecycle events were already written to bounded/durable audit sinks, but authenticated incident commanders had no safe incident-scoped provenance view and would otherwise need direct Cloud Logging access.
 
 ### Exact changes made
 
-Added `runtime/operator_console.py`:
+Updated `runtime/incident_service.py`:
 
-- dependency-free HTML/CSS/JavaScript operator cockpit served by StageGuard itself;
-- renders incident ID, exact evidence revision, diagnosis status/confidence, production/feed scope, deterministic evidence, approval state, and recovery outcome;
-- calls only the existing same-origin authenticated API;
-- supports bounded investigation and revision-bound Gemini briefing;
-- discards a Gemini briefing client-side if the displayed revision changed while generation was in flight;
-- requires the operator to type the complete current revision before the approval control enables, followed by an explicit confirmation dialog;
-- exposes execute only when a server-side approval exists and no outcome has consumed it;
-- uses DOM `textContent` for dynamic incident/model data and no HTML interpretation;
-- uses no localStorage/sessionStorage and embeds no provider credentials, datasource configuration, query language, target, endpoint, or actor field.
+- lifecycle events are now also retained in a process-local bounded projection capped at 512 entries;
+- `_record()` constructs one canonical `AuditEvent`, appends it to the configured durable audit sink, and only then appends it to the operator projection;
+- added `audit_timeline(incident_id, after_sequence, limit)` with exact current-incident binding;
+- pagination is deterministic by monotonically increasing audit sequence;
+- `after_sequence` must be a non-negative integer and `limit` is hard-bounded to 1..100;
+- timeline output contains sequence, timestamp, event type, a 12-character SHA-256-derived pseudonymous actor reference, and an event-specific safe payload allow-list;
+- investigation timeline metadata exposes revision/status/confidence/evidence mode while excluding activation identifiers;
+- Gemini timeline metadata exposes revision, briefing digest, and bounded next-step classification;
+- approval metadata exposes revision and action name while deliberately dropping action target;
+- remediation metadata exposes revision, recovery status, sample count, and action acceptance while dropping arbitrary action metadata;
+- unknown payload keys are dropped by default, so future audit fields are not automatically exposed to the UI.
 
 Updated `runtime/api.py`:
 
-- serves authenticated `GET /console`, `/assets/operator.css`, and `/assets/operator.js`;
-- applies identity validation independently to every cockpit asset request;
-- adds strict same-origin CSP for cockpit assets: no default external loads, only self script/style/connect, no forms/base override/framing;
-- adds `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY` alongside existing no-store/nosniff response controls;
-- leaves `/healthz`, `/readyz`, and `/metrics` platform behavior unchanged;
-- increments server version to `StageGuard/0.6`.
+- added authenticated `GET /v1/audit`;
+- query contract is `incident_id` plus optional `after_sequence` and `limit`;
+- duplicate, unsupported, malformed, negative, and oversized pagination parameters fail closed;
+- the endpoint delegates all incident scoping and output redaction to `IncidentService.audit_timeline()`;
+- platform endpoints remain unauthenticated as before, while incident/timeline surfaces require the configured identity provider;
+- URL path parsing is now explicit so query strings cannot interfere with endpoint routing;
+- server version advanced to `StageGuard/0.7`.
 
-Added `runtime/tests/test_operator_console.py`:
+Updated `runtime/operator_console.py`:
 
-- proves cockpit HTML and both static assets require operator authentication;
-- proves same-origin CSP/no-store behavior;
-- checks that no Grafana/Gemini/bearer credential markers are embedded in browser assets;
-- checks exact current-revision binding for Gemini and approval UI logic;
-- checks no local/session browser persistence is used;
-- confirms `/healthz` and `/metrics` remain independent of operator authentication.
+- added an incident timeline card to the authenticated same-origin cockpit;
+- timeline rows are rendered only with DOM `textContent`;
+- pagination uses a 25-event page size and the opaque monotonic sequence cursor supplied by the API;
+- timeline data is refreshed after investigation, briefing, approval, and remediation lifecycle transitions;
+- no Cloud Logging URL, credential, raw actor identity, provider exception, datasource identifier, query, target, endpoint, or raw evidence is added to browser assets.
 
-Added `OPERATOR_CONSOLE.md` documenting the operator flow, browser trust boundary, same-origin/IAP composition, CSP, storage policy, and credential-free regression coverage.
+Added `runtime/tests/test_audit_timeline.py`:
 
-Updated `README.md` so the executable vertical slice, safety table, HTTP surfaces, repository map, status, and roadmap all reflect the implemented cockpit rather than listing it as future work.
+- verifies deterministic sequence pagination;
+- verifies incident scoping;
+- verifies 1..100 page bounds and non-negative cursor validation;
+- verifies pseudonymous actor references do not expose raw identity;
+- verifies activation IDs, target, endpoint, token, and arbitrary payload fields do not escape the allow-list;
+- verifies `/v1/audit` requires authentication;
+- verifies malformed, ambiguous, unsupported, and unbounded query strings fail with `invalid_request`.
+
+Updated `OPERATOR_CONSOLE.md`:
+
+- documents the timeline HTTP contract and pagination bounds;
+- documents the process-local projection vs durable Cloud Logging boundary;
+- documents exactly what timeline metadata may and may not reach the browser;
+- explicitly states that a process restart empties the operational read projection while durable Cloud Logging remains the audit sink of record.
 
 ### Commits produced this run
 
-- `bbc5f0d0` — authenticated StageGuard operator cockpit assets
-- `3577ccbc` — authenticated same-origin API serving + browser security headers
-- `cea9d68d` — operator cockpit HTTP/security regression coverage
-- `0357212b` — operator cockpit security/usage documentation
-- `a96eefd6` — initial run handoff
-- `94673dce` — README coherence refresh
+- `5d80dad4` — bounded incident audit timeline read model
+- `f0cd597b` — authenticated `/v1/audit` endpoint
+- `02a3cf34` — cockpit timeline rendering
+- `1a233899` — authorization/pagination/redaction regression coverage
+- `2c65c57d` — operator timeline documentation
 
 ### Tests / checks / results
 
 Attempted a clean checkout and targeted suite with:
 
-`PYTHONPATH=runtime python -m unittest runtime.tests.test_operator_console runtime.tests.test_readiness_api -v`
+`PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_timeline runtime.tests.test_operator_console runtime.tests.test_readiness_api -v`
 
-The environment failed before Python started because `github.com` DNS resolution is unavailable. The new tests are therefore **not claimed as passing** in this runtime.
+The environment failed before Python started because `github.com` DNS resolution is unavailable to the local execution container. The new tests are therefore **not claimed as passing** in this runtime.
 
 No GitHub Actions workflow was created, triggered, rerun, or used as a workaround. No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credential was used. No production Cloud Run or Grafana resource was changed.
 
 ### Decisions made
 
-1. **Same process, same origin, same identity boundary.** The cockpit is intentionally not a second frontend service and introduces no browser-side secret boundary.
-2. **Browser UX never replaces server authorization.** Typed-revision confirmation improves operator intent while `IncidentService.approve()` remains authoritative.
-3. **No third-party frontend dependencies.** This avoids CDN supply-chain exposure and keeps CSP narrow.
-4. **No browser persistence.** Incident/model responses are held only in current page memory.
-5. **Dynamic values are text only.** No incident or Gemini string is interpreted as HTML.
-6. **Production remediation remains disabled in the standard Cloud Run composition.** The cockpit cannot enable it.
+1. **Do not give the cockpit Cloud Logging query capability.** The runtime keeps a narrow lifecycle projection instead of turning `/v1/audit` into a generic logs proxy.
+2. **Allow-list timeline payloads by event type.** New audit fields stay private unless intentionally promoted to the operator contract.
+3. **Pseudonymize actor identity.** Operators can correlate repeated lifecycle actions without exposing the raw authenticated subject in browser state.
+4. **Keep pagination sequence-based and bounded.** This is deterministic, simple to test, and cannot expand into arbitrary log search.
+5. **Treat the process-local timeline as operational context, not durable history.** Cloud Logging remains the durable sink of record.
+6. **Preserve remediation safety.** Production remediation remains disabled in the standard Cloud Run composition and the timeline adds no mutation path.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted because this environment cannot resolve `github.com` for a runnable checkout.
+- The deterministic Python suite remains unexecuted because the local execution environment cannot resolve `github.com` for a runnable checkout.
 - `Dockerfile.api` still needs a real Docker build acceptance on a Docker-capable host.
 - The cockpit has not yet been exercised through a real Cloud Run + IAP browser session.
 - Cache/stale readiness behavior has not yet been exercised against a real `mcp-grafana:1.3.0` + Grafana Cloud/self-hosted instance.
 - Optional Gemini has not yet been exercised against live Vertex AI ADC.
+- The new operator timeline intentionally does not replay durable historical audit entries after a process restart.
 
 ## Single best next step
 
-**Add a bounded incident timeline/audit read model for operators: expose a redacted, incident-scoped lifecycle timeline (investigation → briefing digest/next-step metadata → approval → remediation/recovery) without exposing raw Cloud Logging access or provider strings, render it in the cockpit, and add deterministic pagination/authorization tests. This gives real incident commanders trustworthy provenance while keeping audit storage and credentials server-side.**
+**Make the incident timeline restart-safe without broadening the browser trust boundary: add a narrowly scoped server-side durable audit reader that can reconstruct only `stageguard.audit.v1` entries for one exact incident ID from the dedicated StageGuard Cloud Logging log, enforce strict time/result/page bounds and the same event-field allow-list, keep Cloud Logging credentials server-side, and fall back cleanly to the current in-process projection for local/free development. Add fake-client contract tests before any live Google Cloud exercise.**
