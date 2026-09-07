@@ -20,6 +20,7 @@ from readiness import EvidencePlaneReadinessProbe
 
 
 MAX_BODY_BYTES = 16 * 1024
+_EXECUTION_RECONCILIATION_STATES = {"clear", "reload_required", "reloaded"}
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -74,6 +75,34 @@ def _get_readiness_probe(service: IncidentService) -> EvidencePlaneReadinessProb
     return probe
 
 
+def _execution_reconciliation_state(service: IncidentService) -> str:
+    """Return the operator-safe, low-cardinality reconciliation phase.
+
+    Base runtimes do not have an execution-uncertainty state machine, so they are
+    always ``clear``. A safer runtime may expose the bounded method. Any
+    unexpected value fails closed to ``reload_required`` rather than leaking
+    provider details or accidentally enabling reconciliation.
+    """
+    getter = getattr(service, "execution_reconciliation_state", None)
+    if not callable(getter):
+        return "clear"
+    try:
+        state = getter()
+    except Exception:
+        return "reload_required"
+    return state if state in _EXECUTION_RECONCILIATION_STATES else "reload_required"
+
+
+def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
+    if snapshot is None:
+        snapshot = service.status()
+    return {
+        "incident": None if snapshot is None else snapshot.to_dict(),
+        "checkpoint_state": service.checkpoint_state(),
+        "execution_reconciliation_state": _execution_reconciliation_state(service),
+    }
+
+
 def _service_readiness(service: IncidentService) -> dict[str, object]:
     """Build a bounded readiness view from evidence-plane and lifecycle consistency state."""
     readiness = _get_readiness_probe(service).check().to_dict()
@@ -118,7 +147,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.10"
+    server_version = "StageGuard/0.11"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -234,11 +263,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 )
                 self._send(200, {"timeline": timeline})
                 return
-            snapshot = self.service.status()
-            self._send(200, {
-                "incident": None if snapshot is None else snapshot.to_dict(),
-                "checkpoint_state": self.service.checkpoint_state(),
-            })
+            self._send(200, _lifecycle_view(self.service))
         except AuthenticationError as exc:
             self._error(401, "unauthorized", str(exc), authenticate=True)
         except ValueError as exc:
@@ -294,10 +319,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             if self.path == "/v1/checkpoint/reload":
                 _only(payload, set())
                 snapshot = self.service.reload_checkpoint_after_conflict()
-                self._send(200, {
-                    "incident": snapshot.to_dict(),
-                    "checkpoint_state": self.service.checkpoint_state(),
-                })
+                self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
             if self.path == "/v1/execution/reconcile":
@@ -306,10 +328,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 if not callable(reconcile):
                     raise RuntimeError("execution reconciliation is not supported by this runtime")
                 snapshot = reconcile(actor=identity.subject)
-                self._send(200, {
-                    "incident": snapshot.to_dict(),
-                    "checkpoint_state": self.service.checkpoint_state(),
-                })
+                self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
             self._error(404, "not_found", "unknown endpoint")
