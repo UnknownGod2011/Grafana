@@ -15,6 +15,7 @@ class FakeBlob:
         self.data = None
         self.generation = None
         self.uploads = []
+        self.downloads = []
         self.force_conflict = False
 
     def exists(self):
@@ -24,9 +25,12 @@ class FakeBlob:
         if self.data is None:
             raise AssertionError("reload called for missing blob")
 
-    def download_as_bytes(self):
+    def download_as_bytes(self, *, if_generation_match=None):
         if self.data is None:
             raise FileNotFoundError
+        if if_generation_match is not None and if_generation_match != self.generation:
+            raise PreconditionFailed("generation mismatch")
+        self.downloads.append(if_generation_match)
         return self.data
 
     def upload_from_string(self, data, *, content_type, if_generation_match):
@@ -68,7 +72,7 @@ class GcsCheckpointTests(unittest.TestCase):
         self.assertEqual(("application/json", 0), blob.uploads[0])
         self.assertEqual(1, store.load().sequence)
 
-    def test_update_uses_current_generation_precondition(self):
+    def test_update_uses_generation_pinned_by_previous_success(self):
         bucket = FakeBucket()
         store = GoogleCloudStorageCheckpointStore(bucket, KEY)
         store.save(checkpoint(1))
@@ -76,6 +80,35 @@ class GcsCheckpointTests(unittest.TestCase):
         blob = bucket.blob("stageguard/incident-checkpoint.json")
         self.assertEqual(("application/json", 1), blob.uploads[1])
         self.assertEqual(2, store.load().sequence)
+        self.assertEqual(2, blob.downloads[-1])
+
+    def test_two_stale_writers_cannot_silently_overwrite_winner(self):
+        bucket = FakeBucket()
+        seed = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        seed.save(checkpoint(1))
+
+        writer_a = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        writer_b = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        self.assertEqual(1, writer_a.load().sequence)
+        self.assertEqual(1, writer_b.load().sequence)
+
+        writer_a.save(checkpoint(2))
+        with self.assertRaisesRegex(CheckpointConflictError, "concurrent update conflict"):
+            writer_b.save(checkpoint(3))
+
+        verifier = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        self.assertEqual(2, verifier.load().sequence)
+        blob = bucket.blob("stageguard/incident-checkpoint.json")
+        self.assertEqual(2, blob.generation)
+
+    def test_fresh_store_cannot_overwrite_existing_object_without_loading(self):
+        bucket = FakeBucket()
+        writer = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        writer.save(checkpoint(1))
+        stale_uninitialized = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        with self.assertRaises(CheckpointConflictError):
+            stale_uninitialized.save(checkpoint(2))
+        self.assertEqual(1, writer.load().sequence)
 
     def test_generation_precondition_failure_has_bounded_conflict_type(self):
         bucket = FakeBucket()
