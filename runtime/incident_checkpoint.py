@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Versioned integrity-checked StageGuard incident checkpoint persistence.
-
-Checkpoints are server-side lifecycle state only. They intentionally exclude
-provider credentials, remediation metadata, arbitrary HTTP/provider details,
-and Gemini content. Local JSON is credential-free; GCS is an optional durable
-production adapter using ADC and optimistic object-generation preconditions.
-"""
+"""Versioned integrity/authenticity checked StageGuard incident checkpoints."""
 from __future__ import annotations
 
 import hashlib
@@ -45,9 +39,7 @@ def _safe_outcome_dict(outcome: RemediationOutcome | None) -> dict | None:
         return None
     return {
         "status": outcome.status,
-        "action_result": None if outcome.action_result is None else {
-            "accepted": bool(outcome.action_result.accepted),
-        },
+        "action_result": None if outcome.action_result is None else {"accepted": bool(outcome.action_result.accepted)},
         "samples": [asdict(sample) for sample in outcome.samples],
         "summary": outcome.summary,
     }
@@ -77,8 +69,8 @@ def _outcome_from_dict(value: dict | None) -> RemediationOutcome | None:
     return RemediationOutcome(str(value["status"]), action, samples, str(value["summary"]))
 
 
-def checkpoint_document(checkpoint: IncidentCheckpoint) -> dict:
-    state = {
+def _state(checkpoint: IncidentCheckpoint) -> dict:
+    return {
         "incident_id": checkpoint.incident_id,
         "revision": checkpoint.revision,
         "report": checkpoint.report.to_dict(),
@@ -86,21 +78,39 @@ def checkpoint_document(checkpoint: IncidentCheckpoint) -> dict:
         "outcome": _safe_outcome_dict(checkpoint.outcome),
         "sequence": checkpoint.sequence,
     }
-    canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
-    return {"schema": SCHEMA, "state": state, "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
 
 
-def parse_checkpoint_document(document: dict) -> IncidentCheckpoint:
-    if set(document) != {"schema", "state", "sha256"} or document.get("schema") != SCHEMA:
+def checkpoint_document(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> dict:
+    state = _state(checkpoint)
+    canonical = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()
+    signature = None if signing_key is None else hmac.new(signing_key, canonical, hashlib.sha256).hexdigest()
+    return {"schema": SCHEMA, "state": state, "sha256": digest, "hmac_sha256": signature}
+
+
+def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = None, require_signature: bool = False) -> IncidentCheckpoint:
+    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") != SCHEMA:
         raise ValueError("unsupported incident checkpoint document")
     state = document.get("state")
     digest = document.get("sha256")
+    signature = document.get("hmac_sha256")
     if not isinstance(state, dict) or not isinstance(digest, str) or len(digest) != 64:
         raise ValueError("invalid incident checkpoint document")
-    canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
-    actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    canonical = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    actual = hashlib.sha256(canonical).hexdigest()
     if not hmac.compare_digest(actual, digest):
         raise ValueError("incident checkpoint integrity check failed")
+    if require_signature and signing_key is None:
+        raise ValueError("checkpoint signing key is required")
+    if signing_key is not None:
+        if not isinstance(signature, str) or len(signature) != 64:
+            raise ValueError("incident checkpoint signature is required")
+        expected = hmac.new(signing_key, canonical, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise ValueError("incident checkpoint authenticity check failed")
+    elif require_signature or signature is not None:
+        raise ValueError("signed incident checkpoint cannot be verified")
+
     required = {"incident_id", "revision", "report", "approval", "outcome", "sequence"}
     if set(state) != required:
         raise ValueError("invalid incident checkpoint state")
@@ -120,14 +130,14 @@ def parse_checkpoint_document(document: dict) -> IncidentCheckpoint:
     return IncidentCheckpoint(incident_id, revision, report, approval, outcome, sequence)
 
 
-def _encode(checkpoint: IncidentCheckpoint) -> bytes:
-    encoded = (json.dumps(checkpoint_document(checkpoint), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+def _encode(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> bytes:
+    encoded = (json.dumps(checkpoint_document(checkpoint, signing_key=signing_key), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if len(encoded) > _MAX_BYTES:
         raise ValueError("incident checkpoint exceeds size limit")
     return encoded
 
 
-def _decode(raw: bytes) -> IncidentCheckpoint:
+def _decode(raw: bytes, *, signing_key: bytes | None = None, require_signature: bool = False) -> IncidentCheckpoint:
     if len(raw) > _MAX_BYTES:
         raise ValueError("incident checkpoint exceeds size limit")
     try:
@@ -136,7 +146,7 @@ def _decode(raw: bytes) -> IncidentCheckpoint:
         raise ValueError("invalid incident checkpoint JSON") from exc
     if not isinstance(document, dict):
         raise ValueError("invalid incident checkpoint JSON")
-    return parse_checkpoint_document(document)
+    return parse_checkpoint_document(document, signing_key=signing_key, require_signature=require_signature)
 
 
 class JsonCheckpointStore:
@@ -170,30 +180,38 @@ class JsonCheckpointStore:
 
 
 class GoogleCloudStorageCheckpointStore:
-    """Durable single-object checkpoint store with optimistic concurrency.
+    """Durable authenticated single-object checkpoint store with optimistic concurrency."""
 
-    The bucket and object name are deployment-owned configuration. The adapter
-    never accepts a browser-supplied object path and imports google-cloud-storage
-    lazily so local/free development stays lightweight.
-    """
-
-    def __init__(self, bucket, object_name: str = "stageguard/incident-checkpoint.json") -> None:
+    def __init__(self, bucket, signing_key: bytes, object_name: str = "stageguard/incident-checkpoint.json") -> None:
         name = object_name.strip().lstrip("/")
         if not name or ".." in name.split("/") or len(name) > 512:
             raise ValueError("invalid checkpoint object name")
+        if not isinstance(signing_key, bytes) or len(signing_key) < 32:
+            raise ValueError("checkpoint signing key must be at least 32 bytes")
         self._bucket = bucket
         self._object_name = name
+        self._signing_key = signing_key
 
     @classmethod
-    def from_environment(cls, *, bucket_name: str, project: str | None = None, object_name: str = "stageguard/incident-checkpoint.json"):
+    def from_environment(
+        cls,
+        *,
+        bucket_name: str,
+        signing_key: str,
+        project: str | None = None,
+        object_name: str = "stageguard/incident-checkpoint.json",
+    ):
         if not bucket_name.strip():
             raise ValueError("checkpoint bucket name is required")
+        key = signing_key.encode("utf-8")
+        if len(key) < 32:
+            raise ValueError("checkpoint signing key must be at least 32 bytes")
         try:
             from google.cloud import storage
         except ImportError as exc:
             raise RuntimeError("google-cloud-storage is required for GCS checkpoints") from exc
         client = storage.Client(project=project)
-        return cls(client.bucket(bucket_name.strip()), object_name)
+        return cls(client.bucket(bucket_name.strip()), key, object_name)
 
     def load(self) -> IncidentCheckpoint | None:
         blob = self._bucket.blob(self._object_name)
@@ -203,10 +221,10 @@ class GoogleCloudStorageCheckpointStore:
             raw = blob.download_as_bytes()
         except Exception as exc:
             raise RuntimeError("incident checkpoint read failed") from exc
-        return _decode(raw)
+        return _decode(raw, signing_key=self._signing_key, require_signature=True)
 
     def save(self, checkpoint: IncidentCheckpoint) -> None:
-        encoded = _encode(checkpoint)
+        encoded = _encode(checkpoint, signing_key=self._signing_key)
         blob = self._bucket.blob(self._object_name)
         try:
             exists = blob.exists()
