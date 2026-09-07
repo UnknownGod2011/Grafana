@@ -18,6 +18,7 @@ from typing import Callable
 from activation import ActivationRecord, load_activation_record
 from api import _is_loopback, make_server
 from cloud_audit import GoogleCloudLoggingAuditSink
+from durable_audit_reader import GoogleCloudAuditReader
 from gemini_commander import GeminiCommander, GoogleGenAICommanderModel
 from http_remediation_transport import HttpRemediationTransport
 from identity import (
@@ -26,7 +27,7 @@ from identity import (
     LocalDevelopmentIdentityProvider,
     StaticBearerIdentityProvider,
 )
-from incident_service import AuditSink, IncidentService, JsonlAuditLog
+from incident_service import AuditReader, AuditSink, IncidentService, JsonlAuditLog
 from log_activation import LogActivationRecord, load_log_activation_record, verify_log_activation_record
 from mcp_log_client import McpLokiLogClient
 from mcp_metric_client import McpPrometheusMetricClient
@@ -116,6 +117,21 @@ def _audit_sink(
     if normalized == "cloud-logging":
         project = os.getenv(cloud_project_env, "").strip() or None
         return GoogleCloudLoggingAuditSink.from_environment(project=project, log_name=cloud_log_name)
+    raise ValueError("audit backend must be jsonl or cloud-logging")
+
+
+def _audit_reader(
+    *,
+    backend: str,
+    cloud_project_env: str,
+    cloud_log_name: str,
+) -> AuditReader | None:
+    normalized = backend.strip().lower()
+    if normalized == "jsonl":
+        return None
+    if normalized == "cloud-logging":
+        project = os.getenv(cloud_project_env, "").strip() or None
+        return GoogleCloudAuditReader.from_environment(project=project, log_name=cloud_log_name)
     raise ValueError("audit backend must be jsonl or cloud-logging")
 
 
@@ -220,6 +236,11 @@ def build_runtime(
             cloud_project_env=cloud_project_env,
             cloud_log_name=cloud_log_name,
         )
+        audit_reader = _audit_reader(
+            backend=audit_backend,
+            cloud_project_env=cloud_project_env,
+            cloud_log_name=cloud_log_name,
+        )
 
         if remediation_factory is not None:
             remediation = remediation_factory(profile)
@@ -239,6 +260,7 @@ def build_runtime(
             metrics,
             remediation,
             audit,
+            audit_reader=audit_reader,
             telemetry_profile=profile,
             activation_record=activation,
             datasource_identity=metrics.datasource_uid if activation is not None else None,
