@@ -4,7 +4,7 @@
 
 StageGuard is a personal open-source incident commander for live media workflows. The executable path now covers:
 
-`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → authenticated operator cockpit/timeline → durable Cloud Logging reconstruction → versioned incident lifecycle checkpoints → signed GCS persistence with strict generation CAS → bounded checkpoint observability → Cloud Run/IAP deployment → liveness/readiness/self-observability`
+`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → authenticated operator cockpit/timeline → durable Cloud Logging reconstruction → versioned incident lifecycle checkpoints → signed GCS persistence with strict generation CAS → bounded checkpoint observability → safe real-bucket CAS acceptance harness → Cloud Run/IAP deployment → liveness/readiness/self-observability`
 
 Core invariants:
 
@@ -17,6 +17,7 @@ Core invariants:
 - Production GCS checkpoints require HMAC-SHA-256 authenticity plus strict object-generation compare-and-swap.
 - A StageGuard instance may only replace the exact GCS generation it previously loaded or successfully wrote; it never re-reads the latest generation inside save and silently overwrites a winner.
 - Generation conflicts fail closed and are observable separately from provider/storage failures.
+- The GCS acceptance harness uses only a UUID-scoped `stageguard/acceptance/` object and never reads or writes the production checkpoint object.
 - Checkpoint metrics use only fixed labels and never expose bucket/object names, generations, incident IDs, revisions, credentials, provider exceptions, or signing material.
 - Provider remediation metadata/details, credentials, Gemini output, Grafana secrets, and checkpoint signing material are not persisted.
 - Standard Cloud Run production remediation remains disabled.
@@ -41,79 +42,91 @@ Core invariants:
 - GCS checkpoint store with ADC, fixed deployment-owned object mapping, HMAC authenticity, generation-bound reads, and strict pinned-generation compare-and-swap writes.
 - Restart restoration of incident report/revision/approval/consumed outcome with fail-closed scope/revision validation.
 - Bounded checkpoint conflict classification and Prometheus load/save/latency observability.
+- Operator-runnable real-GCS two-writer CAS acceptance harness with isolated object namespace and generation-bound cleanup.
 
-## Run log — 2026-09-07 — strict GCS compare-and-swap hardening
+## Run log — 2026-09-07 — real-GCS CAS acceptance harness
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/incident_checkpoint.py`
-- `runtime/incident_service.py`
-- `runtime/tests/test_gcs_checkpoint.py`
-- `INCIDENT_CHECKPOINTS.md`
+- repository metadata/default branch;
+- root repository contents and `scripts/`;
+- `runtime/incident_checkpoint.py`;
+- `runtime/tests/test_gcs_checkpoint.py`;
+- `INCIDENT_CHECKPOINTS.md`.
 
-The previous handoff called for a two-instance GCS race acceptance. While reviewing the code needed for that test, I found a correctness flaw that had to be fixed first: `GoogleCloudStorageCheckpointStore.save()` re-read the object's *current* generation immediately before every upload. Two instances could therefore both load generation `N`; instance A could write `N+1`; then instance B could reload `N+1` inside `save()` and overwrite it successfully. That is last-writer-wins behavior, not optimistic concurrency, and is unsafe for approval-bearing lifecycle state.
+The previous handoff correctly identified that the strongest remaining checkpoint increment was empirical two-instance GCS acceptance. No Google Cloud credentials are available in this runtime, so the most useful unblocked progress was to make that acceptance deterministic, safe, and operator-runnable using the production checkpoint adapter rather than a parallel test implementation.
 
 ### Exact changes made
 
-Updated `runtime/incident_checkpoint.py`:
+Added `scripts/gcs_checkpoint_race_acceptance.py`:
 
-- GCS store now maintains a process-local generation token protected by a lock;
-- a fresh store starts with expected generation `0`, meaning create-only until it successfully loads an existing object;
-- successful `load()` reloads object metadata, validates the generation, and downloads bytes with `if_generation_match=<that generation>`;
-- only after the HMAC/document is successfully decoded is that generation accepted as the store's next compare-and-swap token;
-- successful `save()` uses the previously pinned generation directly and never performs an `exists()`/`reload()` just before upload;
-- after a successful upload, the returned blob generation becomes the next expected generation;
-- HTTP 412 on a generation-bound read or write remains a bounded `CheckpointConflictError`;
-- conflicts do not advance the local generation token and no automatic retry/merge/overwrite is attempted;
-- provider exception text remains hidden.
-
-Updated `runtime/tests/test_gcs_checkpoint.py`:
-
-- fake downloads now enforce optional generation-match preconditions;
-- renamed the normal update test to assert use of the generation pinned by the prior successful operation;
-- added a two-writer stale-state regression: both instances load generation 1, writer A creates generation 2, writer B must conflict when still attempting generation 1, and the winner remains persisted;
-- added a regression proving a fresh store cannot overwrite an existing object without first loading it;
-- retained bounded conflict, HMAC, forgery, traversal, and signing-key tests.
+- uses the production `GoogleCloudStorageCheckpointStore` and `ObservableCheckpointStore` implementations;
+- requires `STAGEGUARD_CHECKPOINT_HMAC_KEY` from the environment and rejects keys shorter than 32 bytes;
+- uses Application Default Credentials through `google-cloud-storage`;
+- creates exactly one UUID-scoped object under `stageguard/acceptance/checkpoint-cas-<uuid>.json`;
+- refuses to reuse a pre-existing acceptance object;
+- seeds generation 1 with synthetic, non-production incident state;
+- creates two independent store instances and requires both to load the same generation;
+- writer A persists sequence 2;
+- stale writer B attempts sequence 3 and must receive `CheckpointConflictError`;
+- verifies a fresh reader still sees sequence 2, proving the stale writer did not replace the winner;
+- verifies `stageguard_checkpoint_saves_total{result="conflict"} 1` from the losing observable store;
+- by default deletes only the exact UUID-scoped object it created, with a generation-match delete precondition;
+- supports `--keep` for deliberate operator inspection;
+- surfaces cleanup failure with the isolated object URI while never scanning or touching the production checkpoint object.
 
 Updated `INCIDENT_CHECKPOINTS.md`:
 
-- corrected the prior documentation that said updates reload the current generation before upload;
-- documented exact pinned-generation CAS semantics and why re-reading during save is unsafe;
-- documented generation-bound reads and fail-closed conflict behavior;
-- updated validation coverage to include stale-writer and fresh-writer cases.
+- added the safe two-writer acceptance contract;
+- documented exact environment/CLI usage;
+- documented isolated object namespace and cleanup behavior;
+- documented least-privilege guidance and the fact that the harness never uses `STAGEGUARD_CHECKPOINT_OBJECT`.
 
 ### Commits produced this run
 
-- `61b57f3d` — fix GCS checkpoint compare-and-swap semantics
-- `670321a4` — test stale GCS checkpoint writer conflicts
-- `0cdffb56` — document strict GCS checkpoint CAS boundary
+- `a1430e77` — add safe GCS checkpoint race acceptance harness
+- `5cc89a2c` — document GCS checkpoint race acceptance
 
 ### Tests / checks / results
 
 No GitHub Actions workflow was created, triggered, or rerun.
 
-The authenticated GitHub connector allowed direct repository inspection and edits, but this automation environment still does not expose a runnable repository checkout. Therefore the Python suite is **not claimed as passing in this run**. No Grafana, Loki, Gemini, IAP, Cloud Logging, Cloud Storage, Secret Manager, operator, or remediation credential was used, and no production resource was changed.
+Attempted a clean local validation with:
+
+```text
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
+PYTHONPATH=runtime python -m unittest runtime.tests.test_gcs_checkpoint runtime.tests.test_checkpoint_observability -v
+```
+
+The container failed before checkout with:
+
+```text
+Could not resolve host: github.com
+```
+
+Therefore the Python suite and the new script are **not claimed as executed successfully in this runtime**. The script itself was re-read from GitHub after creation to verify the committed source. No Grafana, Loki, Gemini, IAP, Cloud Logging, Cloud Storage, Secret Manager, operator, or remediation credential was used, and no production/cloud resource was changed.
 
 ### Decisions made
 
-1. **CAS must be based on restored state, not latest state.** The generation used for a write is the generation this process previously validated, not whatever generation exists when the write starts.
-2. **Fresh writers are create-only.** A new process cannot overwrite an existing object until it has loaded and validated that object first.
-3. **Reads are generation-bound.** The bytes whose HMAC is validated must correspond to the same generation that becomes the next write precondition.
-4. **No blind conflict retry.** A 412 remains a hard lifecycle conflict until the caller reloads and revalidates state explicitly.
-5. **Do not change readiness policy yet.** Persistence contention should not be conflated with Grafana evidence-plane readiness until empirical multi-instance behavior is measured.
+1. **Acceptance must exercise production code.** The harness imports the real GCS checkpoint store and observability wrapper rather than duplicating CAS logic.
+2. **Never test against the production checkpoint key.** Every run uses a random `stageguard/acceptance/` object.
+3. **Cleanup must itself be concurrency-safe.** Default deletion uses the exact current generation precondition and only the unique object created by that invocation.
+4. **Acceptance verifies observability as well as correctness.** A stale-writer 412 must become both `CheckpointConflictError` and the bounded conflict metric.
+5. **No credential should enter source or argv.** The HMAC key is environment-only; ADC handles Google authentication.
+6. **No blind conflict retry was introduced.** The production lifecycle remains fail-closed after contention.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted in this environment because there is no runnable checkout path.
+- The deterministic Python suite remains unexecuted in this environment because the container cannot resolve `github.com` for checkout.
+- The new GCS race harness still needs execution against an actual private bucket with ADC/service-account permissions.
 - `Dockerfile.api` still needs a real Docker build acceptance on a Docker-capable host.
-- GCS fake-client coverage is stronger, but the adapter still needs acceptance against an actual private bucket/service account.
 - A real deployment still needs secure injection of `STAGEGUARD_CHECKPOINT_HMAC_KEY`.
-- Cloud Run multi-instance behavior still needs empirical testing with two actual processes/instances sharing one object.
+- Cloud Run multi-instance behavior still needs empirical testing with two actual processes/instances sharing one production checkpoint object after the isolated harness passes.
 - The cockpit still needs real Cloud Run + IAP browser acceptance.
 - Grafana MCP readiness and the full metric+Loki investigation path still need acceptance against a real Grafana Cloud or self-hosted instance.
 
 ## Single best next step
 
-**Run the now-correct two-instance GCS acceptance in a runnable environment: have both StageGuard instances load the same signed checkpoint generation, let one persist the next lifecycle state, verify the stale writer receives `CheckpointConflictError` and increments `stageguard_checkpoint_saves_total{result="conflict"}`, then explicitly reload and revalidate the winning state. Only after that evidence should any narrowly scoped retry policy be considered, and never for replaying approval-bearing state blindly.**
+**Run `scripts/gcs_checkpoint_race_acceptance.py` against a private acceptance bucket with least-privilege ADC and a secret-backed HMAC key. Require all three PASS conditions (winner preserved, stale writer conflicts, conflict metric increments) and successful generation-bound cleanup. If that passes, add a bounded conflict-recovery state to `IncidentService` that forces explicit checkpoint reload + full lifecycle revalidation before the instance can accept another approval/remediation command; do not implement automatic replay of the failed write.**
