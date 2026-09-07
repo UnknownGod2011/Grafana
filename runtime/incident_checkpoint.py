@@ -8,6 +8,7 @@ remediation metadata are excluded.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -82,7 +83,7 @@ def parse_checkpoint_document(document: dict) -> IncidentCheckpoint:
         raise ValueError("invalid incident checkpoint document")
     canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
     actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    if not hashlib.compare_digest(actual, digest):
+    if not hmac.compare_digest(actual, digest):
         raise ValueError("incident checkpoint integrity check failed")
     required = {"incident_id", "revision", "report", "approval", "outcome", "sequence"}
     if set(state) != required:
