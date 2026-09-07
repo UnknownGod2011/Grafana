@@ -35,9 +35,22 @@ The HMAC key is deployment-owned secret material, is read only server-side, is n
 
 The GCS adapter uses Application Default Credentials and a fixed server-owned bucket/object mapping. The browser cannot choose bucket names, object names, generations, signatures, or storage operations.
 
-Each GCS write also uses an object-generation precondition. Creation uses `if_generation_match=0`; updates reload the current object generation and require that exact generation on upload. A competing writer therefore fails instead of silently overwriting newer lifecycle state. This follows Google Cloud Storage's documented generation-precondition pattern for avoiding races and data corruption.
+Each GCS write also uses an object-generation precondition. Creation uses `if_generation_match=0`; updates reload the current object generation and require that exact generation on upload. A competing writer therefore fails instead of silently overwriting newer lifecycle state. HTTP 412 generation-precondition failures are mapped to the bounded `CheckpointConflictError`; provider exception text is not exposed through that public error.
 
 Use the narrowest bucket/object IAM available. Bucket write permission alone is intentionally insufficient to forge lifecycle authorization because a valid HMAC is also required.
+
+## Checkpoint observability
+
+Configured JSON and GCS stores are wrapped by `ObservableCheckpointStore`. `/metrics` now includes fixed-label checkpoint telemetry alongside evidence-plane readiness metrics:
+
+- `stageguard_checkpoint_last_operation_ok`
+- `stageguard_checkpoint_loads_total{result="ok|empty|failed"}`
+- `stageguard_checkpoint_saves_total{result="ok|conflict|failed"}`
+- `stageguard_checkpoint_last_operation_latency_seconds{operation="load|save"}`
+
+These metrics intentionally contain no bucket names, object names, generations, incident IDs, evidence revisions, actor IDs, credentials, exception strings, signing material, or provider details. A concurrency conflict is counted separately from a storage/provider failure so operators can distinguish expected optimistic-concurrency contention from an unavailable persistence plane.
+
+Checkpoint conflicts remain fail-closed. The observability wrapper does not retry, merge, or overwrite newer state; it re-raises the conflict to the lifecycle caller. Any future retry policy must first reload and revalidate current lifecycle state rather than blindly replaying an approval-bearing checkpoint.
 
 ## Approval/restart safety
 
@@ -49,6 +62,6 @@ There is one unavoidable distributed-systems boundary: a process can terminate a
 
 ## Current validation status
 
-Credential-free unit coverage exists for local restart restoration, approval invalidation, consumed-approval restoration, checkpoint tamper rejection, provider-metadata stripping, GCS create/update generation preconditions, wrong-HMAC rejection, unsigned/forged-state rejection, short-key rejection, object-name bounds, and the Cloud Run startup requirement for a signing secret.
+Credential-free unit coverage exists for local restart restoration, approval invalidation, consumed-approval restoration, checkpoint tamper rejection, provider-metadata stripping, GCS create/update generation preconditions, bounded 412 conflict classification, wrong-HMAC rejection, unsigned/forged-state rejection, short-key rejection, object-name bounds, checkpoint metric privacy/result classification, and the Cloud Run startup requirement for a signing secret.
 
 A real GCS/Cloud Run acceptance test still requires a Google Cloud project, private bucket, ADC/service-account permissions, injected checkpoint HMAC secret, and a runnable checkout environment.
