@@ -14,6 +14,7 @@ from typing import Any
 
 from identity import AuthenticationError, IdentityProvider, LocalDevelopmentIdentityProvider, OperatorIdentity
 from incident_service import IncidentService
+from operator_console import CONSOLE_CSS, CONSOLE_HTML, CONSOLE_JS
 from readiness import EvidencePlaneReadinessProbe
 
 
@@ -84,30 +85,39 @@ def _service_metrics(service: IncidentService) -> str:
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.5"
+    server_version = "StageGuard/0.6"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
+
+    def _security_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
 
     def _send(self, status: int, payload: dict[str, Any], *, authenticate: bool = False) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self._security_headers()
         if authenticate:
             self.send_header("WWW-Authenticate", 'Bearer realm="stageguard"')
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_text(self, status: int, body_text: str, content_type: str) -> None:
+    def _send_text(self, status: int, body_text: str, content_type: str, *, console_asset: bool = False) -> None:
         body = body_text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self._security_headers()
+        if console_asset:
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            )
         self.end_headers()
         self.wfile.write(body)
 
@@ -116,6 +126,23 @@ class StageGuardHandler(BaseHTTPRequestHandler):
 
     def _identity(self) -> OperatorIdentity:
         return self.identity_provider.authenticate(self)
+
+    def _serve_operator_console(self) -> bool:
+        assets = {
+            "/console": (CONSOLE_HTML, "text/html; charset=utf-8"),
+            "/assets/operator.css": (CONSOLE_CSS, "text/css; charset=utf-8"),
+            "/assets/operator.js": (CONSOLE_JS, "text/javascript; charset=utf-8"),
+        }
+        asset = assets.get(self.path)
+        if asset is None:
+            return False
+        try:
+            self._identity()
+        except AuthenticationError as exc:
+            self._error(401, "unauthorized", str(exc), authenticate=True)
+            return True
+        self._send_text(200, asset[0], asset[1], console_asset=True)
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
@@ -142,6 +169,8 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             except Exception:
                 metrics = "# StageGuard readiness metrics unavailable\n"
             self._send_text(200, metrics, "text/plain; version=0.0.4; charset=utf-8")
+            return
+        if self._serve_operator_console():
             return
         if self.path != "/v1/incident":
             self._error(404, "not_found", "unknown endpoint")
