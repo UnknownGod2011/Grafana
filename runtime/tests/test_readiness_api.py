@@ -34,13 +34,19 @@ class ReadinessApiTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
-    def get(self, path):
+    def get_raw(self, path):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
         connection.request("GET", path)
         response = connection.getresponse()
-        payload = json.loads(response.read().decode("utf-8"))
+        body = response.read().decode("utf-8")
+        status = response.status
+        content_type = response.getheader("Content-Type")
         connection.close()
-        return response.status, payload
+        return status, content_type, body
+
+    def get(self, path):
+        status, _content_type, body = self.get_raw(path)
+        return status, json.loads(body)
 
     def test_healthz_remains_cheap_and_independent_of_readiness(self):
         with patch("api._service_readiness", side_effect=RuntimeError("must not run")):
@@ -62,6 +68,21 @@ class ReadinessApiTests(unittest.TestCase):
             status, payload = self.get("/readyz")
         self.assertEqual(200, status)
         self.assertEqual(value, payload)
+
+    def test_readyz_accepts_bounded_stale_external_state(self):
+        value = {
+            "ready": True,
+            "checks": {
+                "metric_activation": "ok",
+                "loki_activation": "ok",
+                "prometheus_mcp": "stale",
+                "loki_mcp": "ok",
+            },
+        }
+        with patch("api._service_readiness", return_value=value):
+            status, payload = self.get("/readyz")
+        self.assertEqual(200, status)
+        self.assertEqual("stale", payload["checks"]["prometheus_mcp"])
 
     def test_readyz_returns_503_without_authentication_and_without_error_detail(self):
         value = {
@@ -86,6 +107,22 @@ class ReadinessApiTests(unittest.TestCase):
         self.assertFalse(payload["ready"])
         self.assertNotIn("secret", str(payload))
         self.assertNotIn("private", str(payload))
+
+    def test_metrics_surface_is_prometheus_text_and_never_requires_operator_auth(self):
+        text = "stageguard_readiness_ready 1\n"
+        with patch("api._service_metrics", return_value=text):
+            status, content_type, body = self.get_raw("/metrics")
+        self.assertEqual(200, status)
+        self.assertTrue(content_type.startswith("text/plain"))
+        self.assertEqual(text, body)
+
+    def test_metrics_failure_is_redacted(self):
+        with patch("api._service_metrics", side_effect=RuntimeError("token=secret https://private")):
+            status, _content_type, body = self.get_raw("/metrics")
+        self.assertEqual(200, status)
+        self.assertIn("metrics unavailable", body)
+        self.assertNotIn("secret", body)
+        self.assertNotIn("private", body)
 
 
 if __name__ == "__main__":
