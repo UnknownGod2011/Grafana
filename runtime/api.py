@@ -79,7 +79,7 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     readiness = _get_readiness_probe(service).check().to_dict()
     checkpoint_state = service.checkpoint_state()
     readiness["checks"]["checkpoint"] = checkpoint_state
-    if checkpoint_state == "conflicted":
+    if checkpoint_state in {"conflicted", "execution_uncertain"}:
         readiness["ready"] = False
     return readiness
 
@@ -90,11 +90,16 @@ def _service_metrics(service: IncidentService) -> str:
     exporter = getattr(checkpoint_store, "prometheus_metrics", None)
     if callable(exporter):
         metrics += exporter()
-    blocked = 1 if service.checkpoint_state() == "conflicted" else 0
+    checkpoint_state = service.checkpoint_state()
+    conflict_blocked = 1 if checkpoint_state == "conflicted" else 0
+    execution_uncertain = 1 if checkpoint_state == "execution_uncertain" else 0
     metrics += (
         "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
         "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
-        f"stageguard_checkpoint_conflict_blocked {blocked}\n"
+        f"stageguard_checkpoint_conflict_blocked {conflict_blocked}\n"
+        "# HELP stageguard_remediation_execution_uncertain Whether remediation provider execution is ambiguous and lifecycle work is blocked.\n"
+        "# TYPE stageguard_remediation_execution_uncertain gauge\n"
+        f"stageguard_remediation_execution_uncertain {execution_uncertain}\n"
     )
     return metrics
 
@@ -113,7 +118,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.9"
+    server_version = "StageGuard/0.10"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -289,6 +294,18 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             if self.path == "/v1/checkpoint/reload":
                 _only(payload, set())
                 snapshot = self.service.reload_checkpoint_after_conflict()
+                self._send(200, {
+                    "incident": snapshot.to_dict(),
+                    "checkpoint_state": self.service.checkpoint_state(),
+                })
+                return
+
+            if self.path == "/v1/execution/reconcile":
+                _only(payload, set())
+                reconcile = getattr(self.service, "reconcile_execution_uncertainty", None)
+                if not callable(reconcile):
+                    raise RuntimeError("execution reconciliation is not supported by this runtime")
+                snapshot = reconcile(actor=identity.subject)
                 self._send(200, {
                     "incident": snapshot.to_dict(),
                     "checkpoint_state": self.service.checkpoint_state(),
