@@ -36,6 +36,10 @@ class HttpRemediationTransportTests(unittest.TestCase):
             HttpRemediationTransport("https://writer.example/recover", "")
         with self.assertRaisesRegex(ValueError, "query or fragment"):
             HttpRemediationTransport("https://writer.example/recover?target=x", "secret")
+        with self.assertRaisesRegex(ValueError, "reconciliation endpoint must use HTTPS"):
+            HttpRemediationTransport(
+                "https://writer.example/recover", "secret", "http://writer.example/operations"
+            )
 
     def test_sends_server_idempotency_key_and_strict_body(self) -> None:
         body = json.dumps({"accepted": True, "operation_id": self.request.operation_id}).encode()
@@ -104,6 +108,83 @@ class HttpRemediationTransportTests(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=FakeResponse(200, b"not-json")):
             result = transport.execute(self.request, timeout_seconds=1.0)
             self.assertFalse(result.accepted)
+
+    def test_reconcile_is_read_only_and_uses_only_server_owned_operation_id(self) -> None:
+        operation_id = self.request.operation_id
+        body = json.dumps({"operation_id": operation_id, "state": "accepted"}).encode()
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["request"] = req
+            captured["timeout"] = timeout
+            return FakeResponse(200, body)
+
+        transport = HttpRemediationTransport(
+            "https://writer.example/v1/recover",
+            "top-secret",
+            "https://writer.example/v1/operations",
+        )
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            state = transport.reconcile(operation_id, timeout_seconds=1.25)
+
+        request = captured["request"]
+        self.assertEqual("accepted", state)
+        self.assertEqual("GET", request.get_method())
+        self.assertIsNone(request.data)
+        self.assertEqual(1.25, captured["timeout"])
+        self.assertEqual(
+            f"https://writer.example/v1/operations/{operation_id}", request.full_url
+        )
+        self.assertEqual("Bearer top-secret", request.get_header("Authorization"))
+        self.assertNotIn("recover_uplink", request.full_url)
+        self.assertNotIn("prod-1", request.full_url)
+        self.assertNotIn("uplink-a", request.full_url)
+
+    def test_reconcile_maps_404_to_not_found_without_retry_or_replay(self) -> None:
+        transport = HttpRemediationTransport(
+            "https://writer.example/v1/recover",
+            "secret",
+            "https://writer.example/v1/operations",
+        )
+        error = urllib.error.HTTPError(
+            "https://writer.example/v1/operations/x", 404, "missing", {}, None
+        )
+        with patch("urllib.request.urlopen", side_effect=error) as urlopen:
+            state = transport.reconcile(self.request.operation_id, timeout_seconds=1.0)
+        self.assertEqual("not_found", state)
+        self.assertEqual(1, urlopen.call_count)
+        self.assertEqual("GET", urlopen.call_args.args[0].get_method())
+
+    def test_reconcile_failures_and_malformed_documents_are_unknown(self) -> None:
+        transport = HttpRemediationTransport(
+            "https://writer.example/v1/recover",
+            "secret",
+            "https://writer.example/v1/operations",
+        )
+        cases = (
+            TimeoutError("timeout"),
+            urllib.error.URLError("secret at writer.example"),
+            FakeResponse(200, b"not-json"),
+            FakeResponse(200, json.dumps({"operation_id": self.request.operation_id, "state": "pending"}).encode()),
+            FakeResponse(200, json.dumps({"operation_id": "sg-" + "b" * 40, "state": "accepted"}).encode()),
+            FakeResponse(200, json.dumps({"operation_id": self.request.operation_id, "state": "accepted", "detail": "x"}).encode()),
+            FakeResponse(200, b"x" * (16 * 1024 + 1)),
+        )
+        for result in cases:
+            with self.subTest(result=type(result).__name__), patch(
+                "urllib.request.urlopen",
+                side_effect=result if isinstance(result, BaseException) else None,
+                return_value=None if isinstance(result, BaseException) else result,
+            ):
+                state = transport.reconcile(self.request.operation_id, timeout_seconds=1.0)
+                self.assertEqual("unknown", state)
+
+    def test_reconcile_without_endpoint_or_with_invalid_operation_id_fails_closed(self) -> None:
+        transport = HttpRemediationTransport("https://writer.example/v1/recover", "secret")
+        with patch("urllib.request.urlopen") as urlopen:
+            self.assertEqual("unknown", transport.reconcile(self.request.operation_id, timeout_seconds=1.0))
+            self.assertEqual("unknown", transport.reconcile("attacker-controlled", timeout_seconds=1.0))
+        urlopen.assert_not_called()
 
 
 if __name__ == "__main__":
