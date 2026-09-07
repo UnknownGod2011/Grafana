@@ -2,6 +2,8 @@
 
 StageGuard treats a checkpoint compare-and-swap conflict **after** a remediation adapter was contacted as a distinct safety condition. The losing process must not infer whether the provider executed the action from its failed checkpoint write, and it must never replay the same approval automatically.
 
+StageGuard also treats a **restored production checkpoint with an approval but no outcome** as execution-ambiguous. A checkpoint cannot prove whether the previous process crashed before or after contacting the provider. For production adapters that require reconciliation, restart therefore fails closed instead of making the restored approval executable again.
+
 ## State machine
 
 `ExecutionSafeIncidentService` adds an `execution_uncertain` state on top of the existing checkpoint-conflict boundary.
@@ -17,6 +19,21 @@ StageGuard treats a checkpoint compare-and-swap conflict **after** a remediation
 9. StageGuard then performs a fresh Grafana investigation. The fresh evidence revision clears the stale approval/outcome before another remediation can ever be approved.
 
 The implementation intentionally does not merge the losing in-memory outcome into the durable winner and does not retry the failed checkpoint save.
+
+## Restart safety
+
+A process can terminate at any instruction boundary after a production approval has been persisted. If the durable checkpoint contains `approval != null` and `outcome == null`, StageGuard cannot distinguish these cases from checkpoint state alone:
+
+- the action was never sent;
+- the action was sent but the process crashed before receiving the response;
+- the provider accepted the action but the process crashed before persisting the outcome;
+- a CAS conflict occurred after provider contact and before the in-memory uncertainty flag could be observed again.
+
+For remediation adapters declaring `requires_operation_reconciliation = True`, a newly constructed `ExecutionSafeIncidentService` therefore derives the deterministic operation id from the restored report + approval and immediately enters `execution_uncertain` with reconciliation phase `reloaded`. The restored checkpoint has already been loaded and validated during construction, so an additional checkpoint reload is not required before provider reconciliation.
+
+This policy is deliberately conservative: a genuinely unused production approval may be invalidated after restart. That cost is preferable to silently replaying a potentially completed external side effect. Successful `accepted` or `not_found` reconciliation still requires fresh Grafana evidence, clears the old approval, and forces a new human approval before any later remediation can execute.
+
+Local/simulator adapters that do not require provider reconciliation keep their existing restart behavior.
 
 ## Runtime health and observability
 
@@ -47,17 +64,29 @@ It must return only one of:
 
 If a transport does not implement reconciliation, the production adapter returns `unknown`; StageGuard remains blocked. Provider response bodies, credentials, endpoint details, and exception strings are not surfaced through the reconciliation result.
 
+The concrete `HttpRemediationTransport` uses a separate GET-only reconciliation endpoint. Its lookup sends no remediation command body, target, production id, or action; malformed responses, timeouts, unexpected status codes, provider errors, oversized bodies, wrong operation-id echoes, and unknown states all collapse to `unknown`.
+
 ## Local development
 
-Local/simulator adapters do not declare provider reconciliation as mandatory. They still require durable-winner reload and a fresh Grafana investigation after an uncertain execution, but no external idempotency lookup is required.
+Local/simulator adapters do not declare provider reconciliation as mandatory. They still require durable-winner reload and a fresh Grafana investigation after an in-process uncertain execution, but no external idempotency lookup is required. A normal local restart with a pending approval does not automatically enter the production restart-safety state.
 
 ## Regression coverage
 
-`runtime/tests/test_execution_safety.py` exercises the lifecycle state machine directly. `runtime/tests/test_execution_safety_api.py` exercises the HTTP safety boundary and proves that:
+`runtime/tests/test_execution_safety.py` exercises the lifecycle state machine directly, including restart of a persisted pending production approval and preservation of local-adapter restart semantics.
+
+`runtime/tests/test_execution_safety_http_transport.py` exercises the concrete HTTPS writer + read-only reconciliation transport through `AllowlistedProductionRemediationClient` and proves that:
+
+- accepted reconciliation collects fresh evidence and never sends a second remediation POST;
+- provider 404 maps only to bounded `not_found` and still never replays execution;
+- timeout and malformed responses remain fail-closed;
+- reconciliation GET requests are bodyless;
+- repeated reconciliation after success performs no provider network call and no remediation replay.
+
+`runtime/tests/test_execution_safety_api.py` exercises the HTTP safety boundary and proves that:
 
 - execution uncertainty forces readiness to fail closed;
 - the uncertainty metric contains no deterministic operation id;
-- reconciliation cannot run before durable-winner reload;
+- reconciliation cannot run before durable-winner reload for an in-process CAS conflict;
 - the endpoint is authenticated and argument-free;
 - reload keeps execution uncertainty active;
 - successful reconciliation collects fresh evidence and clears the stale approval/outcome;
