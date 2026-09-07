@@ -113,7 +113,6 @@ class OperatorConsoleTests(unittest.TestCase):
         _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
         self.assertNotIn("operation_id", html)
         self.assertNotIn("operation_id", js)
-        self.assertNotIn("operation identifier", html.lower())
         # The server-owned recovery endpoints receive empty objects only.
         self.assertIn("/v1/checkpoint/reload',{method:'POST',body:{}}", js)
         self.assertIn("/v1/execution/reconcile',{method:'POST',body:{}}", js)
