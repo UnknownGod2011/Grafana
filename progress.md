@@ -4,7 +4,7 @@
 
 StageGuard is a personal open-source incident commander for live media workflows. The executable production path now covers:
 
-`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → authenticated operator cockpit/timeline → durable Cloud Logging timeline reconstruction → versioned incident lifecycle checkpoints with local atomic storage or signed/GCS persistence → Cloud Run/IAP deployment → independent liveness/readiness + bounded readiness cache/backoff/self-observability`
+`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → authenticated operator cockpit/timeline → durable Cloud Logging timeline reconstruction → versioned incident lifecycle checkpoints with local atomic storage or signed/GCS persistence → bounded checkpoint conflict/health observability → Cloud Run/IAP deployment → independent liveness/readiness + bounded readiness cache/backoff/self-observability`
 
 Core invariants:
 
@@ -17,9 +17,11 @@ Core invariants:
 - Restored checkpoints must match the configured telemetry scope and recompute to the persisted evidence revision.
 - Local checkpoints are atomic owner-only JSON and are never presented as Cloud Run durability.
 - Production GCS checkpoints require both object-generation preconditions and HMAC-SHA-256 authenticity; bucket write permission alone is insufficient to forge an approved state.
+- GCS generation conflicts fail closed and are observable separately from provider/storage failures.
+- Checkpoint metrics contain only fixed labels and never bucket/object names, generations, incident IDs, revisions, credentials, provider exceptions, or signing material.
 - Provider remediation metadata/details, credentials, Gemini output, Grafana secrets, and the checkpoint signing secret are not persisted in lifecycle checkpoints.
 - Standard Cloud Run production remediation remains disabled.
-- `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed non-sensitive readiness telemetry.
+- `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed non-sensitive readiness and checkpoint telemetry.
 
 ## Completed milestones
 
@@ -40,159 +42,106 @@ Core invariants:
 - Credential-free atomic JSON checkpoint store for local development.
 - Optional Google Cloud Storage checkpoint store using ADC, fixed deployment-owned object mapping, optimistic generation preconditions, and HMAC-SHA-256 authenticity.
 - Restart restoration of incident report/revision/approval/consumed outcome with fail-closed scope/revision validation.
+- Bounded checkpoint conflict classification and Prometheus self-observability for checkpoint loads/saves/latency.
 
-## Run log — 2026-09-07 — restart-safe incident lifecycle checkpoints
+## Run log — 2026-09-07 — checkpoint conflict/health observability
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Then inspected the repository surfaces most relevant to the previous handoff:
+Read `progress.md` completely before selecting work. Then inspected the repository surfaces directly relevant to the previous handoff:
 
+- `runtime/incident_checkpoint.py`
+- `runtime/readiness.py`
+- `runtime/api.py`
 - `runtime/incident_service.py`
-- `runtime/remediation.py`
-- `runtime/production_remediation.py`
-- `runtime/investigator.py`
-- `runtime/log_evidence.py`
 - `runtime/bootstrap.py`
-- `runtime/cloudrun_entrypoint.py`
-- `runtime/requirements-cloudrun.txt`
-- existing incident/bootstrap/Cloud Run tests
-- `README.md`
-- `.gitignore`
+- `runtime/tests/test_gcs_checkpoint.py`
+- `INCIDENT_CHECKPOINTS.md`
 
-The highest-value gap was exactly the previous handoff: durable audit provenance survived a restart, but the current `IncidentSnapshot`, evidence revision, approval-consumption boundary and recovery state did not.
-
-### Research / attribution checked
-
-Verified current official Google Cloud Storage documentation before finalizing the production adapter. Google documents generation-match preconditions as the mechanism for avoiding races/data corruption: use `if_generation_match=0` for create-only writes and the current object generation for updates. The Python client documentation also confirms object generations change on each upload and can be used as conditional parameters.
-
-References:
-
-- https://docs.cloud.google.com/storage/docs/uploading-objects
-- https://docs.cloud.google.com/python/docs/reference/storage/latest/generation_metageneration
+The previous handoff identified real multi-instance GCS acceptance as the next empirical gate. External credentials/resources are not available in this run, so the highest-value unblocked increment was to harden the exact observable failure semantics needed for that test: distinguish optimistic-concurrency conflicts from generic checkpoint failures, expose bounded metrics, and preserve fail-closed behavior.
 
 ### Exact changes made
 
-Added `runtime/incident_checkpoint.py`:
+Updated `runtime/incident_checkpoint.py`:
 
-- introduced `IncidentCheckpoint` and `CheckpointStore` abstraction;
-- defined strict versioned `stageguard.incident-checkpoint.v1` canonical state;
-- persists only incident ID, deterministic revision/report, matching approval, bounded consumed outcome and audit sequence;
-- SHA-256 detects corruption of canonical state;
-- production mode additionally signs canonical state with HMAC-SHA-256;
-- production HMAC key must be at least 32 bytes and is never stored in the checkpoint;
-- malformed, oversized, wrong-schema, wrong-digest, wrong-HMAC and unverifiable signed documents fail closed;
-- provider remediation `detail` and arbitrary `metadata` are stripped from persisted state;
-- restored action detail becomes the fixed string `restored checkpoint` and metadata becomes `{}`;
-- `JsonCheckpointStore` uses owner-only mode, temporary-file write, `fsync`, and atomic `os.replace`;
-- local checkpoint paths reject symlinks on read;
-- `GoogleCloudStorageCheckpointStore` uses a fixed deployment-owned object name, lazy `google-cloud-storage` import, ADC, signed state, and object-generation preconditions;
-- GCS create uses `if_generation_match=0`; updates reload the current generation and require that exact generation;
-- traversal-like checkpoint object names are rejected.
-
-Updated `runtime/incident_service.py`:
-
-- accepts an optional checkpoint store;
-- restores lifecycle state during service construction before serving requests;
-- recomputes the deterministic report revision and rejects mismatch;
-- rejects restored production/feed scope drift;
-- reconstructs the policy-owned approval and rejects action/production/target drift;
-- rejects outcomes with no approval;
-- restores audit sequence and, when a durable audit reader is available, advances to the highest bounded durable sequence observed to avoid trivial sequence reuse after a checkpoint/audit timing gap;
-- persists state after every lifecycle audit record so investigation, briefing sequence advancement, approval and remediation/recovery transitions update the checkpoint;
-- a fresh investigation continues to construct a new snapshot with `approval=None, outcome=None`, so a previous approval cannot survive new evidence;
-- a persisted outcome remains single-use after restart because `execute_approved()` refuses any snapshot with an existing outcome.
+- introduced `CheckpointConflictError`, a bounded public concurrency-failure type;
+- added `_http_status()` to classify provider failures by numeric HTTP status without copying provider exception text;
+- GCS HTTP 412 generation-precondition failures now raise `CheckpointConflictError("incident checkpoint concurrent update conflict")`;
+- all other GCS write failures remain bounded `RuntimeError("incident checkpoint write failed")`;
+- added `ObservableCheckpointStore`, a thread-safe decorator for any checkpoint backend;
+- records checkpoint load results as `ok`, `empty`, or `failed`;
+- records checkpoint save results as `ok`, `conflict`, or `failed`;
+- records only last load/save latency and a coarse latest-operation success gauge;
+- re-raises every underlying exception unchanged by policy; no retry, merge, or overwrite is attempted;
+- emitted Prometheus metrics use only fixed operation/result labels and contain no dynamic storage or incident identities.
 
 Updated `runtime/bootstrap.py`:
 
-- added `none`, `json`, and `gcs` checkpoint backends;
-- programmatic `build_runtime()` keeps checkpointing disabled by default to avoid changing existing test/caller state unexpectedly;
-- CLI local development defaults to `.stageguard/incident-checkpoint.json`;
-- GCS mode reads bucket name and signing secret from environment-owned settings rather than CLI values;
-- production signing secret defaults to `STAGEGUARD_CHECKPOINT_HMAC_KEY` and never enters argv or browser state;
-- added lazy GCS checkpoint construction alongside existing Cloud Logging/IAP/Gemini optional integrations.
+- JSON and GCS checkpoint backends are now wrapped in `ObservableCheckpointStore` automatically;
+- `none` remains no-store/no-metrics checkpoint mode;
+- credential and signing-key handling is unchanged.
 
-Updated `runtime/cloudrun_entrypoint.py`:
+Updated `runtime/api.py`:
 
-- Cloud Run enables GCS lifecycle persistence only when `STAGEGUARD_CHECKPOINT_BUCKET` is configured;
-- when a bucket is configured, startup also requires `STAGEGUARD_CHECKPOINT_HMAC_KEY` before bootstrap;
-- without a bucket, Cloud Run explicitly passes `--checkpoint-backend none` rather than using ephemeral container storage and calling it durable;
-- optional `STAGEGUARD_CHECKPOINT_OBJECT` remains deployment-owned;
-- production remediation remains impossible to enable through this standard entrypoint.
+- `/metrics` now combines existing evidence-plane readiness metrics with checkpoint metrics when the configured store exports them;
+- no new HTTP endpoint or caller-controlled metric labels were added;
+- bumped server version to `StageGuard/0.8`;
+- fallback text now says StageGuard metrics are unavailable rather than implying only readiness metrics exist.
 
-Updated production dependencies:
+Added `runtime/tests/test_checkpoint_observability.py`:
 
-- added `google-cloud-storage>=2.18,<4` to `runtime/requirements-cloudrun.txt`.
+- verifies empty load and successful save counters;
+- verifies bounded latency metrics;
+- verifies concurrency conflict is counted separately from generic failure;
+- verifies generic load/save failures are counted;
+- verifies provider exception text, incident ID, and production ID do not appear in metrics.
 
-Added/hardened tests:
+Updated `runtime/tests/test_gcs_checkpoint.py`:
 
-- `runtime/tests/test_incident_checkpoint.py` covers approval restoration, one-time post-restart execution, consumed approval after a second restart, fresh-investigation invalidation, tamper rejection, provider-metadata stripping, and versioned documents;
-- `runtime/tests/test_gcs_checkpoint.py` covers create/update generation preconditions, wrong-HMAC failure, forged-state failure, short signing keys, and object-name bounds;
-- `runtime/tests/test_cloudrun_entrypoint.py` now verifies no-checkpoint Cloud Run default, GCS opt-in, mandatory HMAC secret, secret non-disclosure in argv, and fixed safe production composition.
+- added a fake HTTP-412 precondition failure;
+- verifies a GCS generation race becomes `CheckpointConflictError`;
+- verifies provider exception detail is not exposed by the bounded conflict exception.
 
-Documentation / repository hygiene:
+Updated `INCIDENT_CHECKPOINTS.md`:
 
-- added `INCIDENT_CHECKPOINTS.md` with local/GCS deployment and trust-boundary guidance;
-- updated `README.md` so the executable vertical slice, safety model, repository structure and roadmap include lifecycle checkpoints;
-- `.stageguard/` is now ignored by Git so local lifecycle/audit/config state cannot be committed accidentally.
+- documented the 412 conflict contract;
+- documented all checkpoint metric names and bounded labels;
+- documented privacy exclusions;
+- explicitly states that conflicts remain fail-closed and are not blindly retried.
 
 ### Commits produced this run
 
-- `c6212531` — add integrity-checked incident checkpoint store
-- `6e3f8a21` — fix checkpoint digest verification
-- `27440687` — restore and persist incident lifecycle checkpoints
-- `33f05757` — harden checkpoint privacy and add durable GCS store
-- `81ecaf1a` — add incident checkpoint restart safety tests
-- `4fa124ea` — add optional Cloud Storage checkpoint dependency
-- `19e8de82` — wire local and GCS lifecycle checkpoints into runtime
-- `0e04bc00` — make Cloud Run checkpoint persistence explicit
-- `f71b2575` — test explicit Cloud Run checkpoint mode
-- `b2732985` — ignore local StageGuard runtime state
-- `1db83eca` — add GCS checkpoint concurrency tests
-- `3e2b7acd` — document restart-safe incident checkpoints
-- `38c3491b` — document restart-safe incident lifecycle
-- `c07c82bb` — require HMAC authenticity for production checkpoints
-- `5377f1d0` — require checkpoint signing secret for GCS state
-- `6a6f7e8b` — test signed GCS checkpoint authenticity
-- `abe88c22` — fail closed without checkpoint HMAC secret
-- `92565427` — test checkpoint HMAC startup boundary
-- `ebe11d00` — document signed production checkpoint state
+- `6142d7cf` — add bounded checkpoint conflict observability
+- `2569b448` — wire checkpoint observability into runtime
+- `6b51f5ed` — expose bounded checkpoint metrics
+- `8a3d1a23` — test checkpoint observability and conflict metrics
+- `7f684e59` — test bounded GCS checkpoint conflict classification
+- `acdfbff4` — document checkpoint conflict observability
 
 ### Tests / checks / results
 
-Attempted a clean checkout and targeted suite with:
+No GitHub Actions workflow was created, triggered, or rerun.
 
-`PYTHONPATH=runtime python -m unittest runtime.tests.test_incident_checkpoint runtime.tests.test_gcs_checkpoint runtime.tests.test_cloudrun_entrypoint -v`
-
-The execution container again failed before Python started because DNS resolution for `github.com` is unavailable:
-
-`fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com`
-
-Therefore the new tests and `py_compile` are **not claimed as passing** in this runtime. No GitHub Actions workflow was created, triggered, or rerun as a workaround.
-
-No Grafana, Loki, Gemini, IAP, Cloud Logging, Cloud Storage, Secret Manager, operator, or remediation credential was used. No production resource was changed.
+The repository is accessible through the authenticated GitHub connector, but this automation environment still does not provide a normal local checkout from which the Python suite can be executed. Therefore the new tests are **not claimed as passing in this run**. No Grafana, Loki, Gemini, IAP, Cloud Logging, Cloud Storage, Secret Manager, operator, or remediation credential was used, and no production resource was changed.
 
 ### Decisions made
 
-1. **Separate audit persistence from lifecycle persistence.** Audit history is an append-only provenance stream; restart state is a compact current-state checkpoint.
-2. **Never trust a persisted revision string by itself.** Restoration recomputes the revision from the deterministic report before accepting approval state.
-3. **Do not persist provider remediation metadata.** It is not required to enforce single-use approval and may contain infrastructure/provider details.
-4. **Do not claim local disk as Cloud Run durability.** The production entrypoint selects no checkpoint unless a durable bucket is explicitly configured.
-5. **Use GCS generation preconditions.** Competing writers fail rather than silently overwriting newer state, matching current Google guidance.
-6. **Require checkpoint authenticity, not only corruption detection.** SHA-256 alone would let a bucket writer recompute a forged approved state; production GCS therefore requires HMAC-SHA-256 with a separate server-owned secret.
-7. **Keep the HMAC key out of argv and persisted state.** It is read from environment-owned secret configuration only when GCS mode is selected.
-8. **Preserve remediation idempotency across the remaining crash window.** A crash can still happen after the external action accepts but before checkpoint commit; the production remediation operation ID is deterministic for the same report/action so retry uses the same idempotency identity.
-9. **Keep local/free development lightweight.** JSON checkpoints remain standard-library-only and unsigned because their trust boundary is owner-only local filesystem state, not a shared cloud authorization object.
+1. **Classify 412 conflicts separately.** A generation-precondition conflict means another writer won the optimistic-concurrency race; it is operationally different from storage unavailability.
+2. **Remain fail-closed.** A conflict is re-raised. StageGuard does not retry an approval-bearing checkpoint without first reloading and revalidating current state.
+3. **Observe through a decorator.** Checkpoint storage semantics remain separate from telemetry concerns, and local/GCS backends share the same bounded metrics contract.
+4. **Keep labels fixed.** No bucket, object, generation, incident, revision, actor, production/feed, credential, exception, or provider string becomes a Prometheus label/value.
+5. **Do not add checkpoint failure to `/readyz` yet.** Readiness currently proves the evidence plane. Treating one historical checkpoint conflict as permanent traffic ineligibility would be incorrect; a production health policy should be based on bounded recent failure state and must be designed after real multi-instance acceptance data.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted because the local execution environment cannot resolve `github.com` for a runnable checkout.
+- The deterministic Python suite remains unexecuted in this environment because there is no runnable checkout path available here.
 - `Dockerfile.api` still needs a real Docker build acceptance on a Docker-capable host.
-- The new GCS adapter has fake-client coverage but has not yet been exercised against an actual private bucket/service account.
-- A real deployment still needs a secure injection mechanism for `STAGEGUARD_CHECKPOINT_HMAC_KEY` (for example Cloud Run secret-backed environment configuration); no secret was created or modified in this run.
-- Multi-instance Cloud Run behavior has not yet been empirically exercised. Generation preconditions prevent silent checkpoint overwrite, and deterministic remediation operation IDs protect the external mutation retry boundary, but real concurrent operator traffic still needs acceptance testing.
-- The cockpit has not yet been exercised through a real Cloud Run + IAP browser session.
-- Grafana MCP readiness and full metric+Loki investigation have not yet been exercised against a real Grafana Cloud/self-hosted production instance in this environment.
+- The GCS adapter has fake-client coverage but has not yet been exercised against an actual private bucket/service account.
+- A real deployment still needs secure injection of `STAGEGUARD_CHECKPOINT_HMAC_KEY`.
+- Multi-instance Cloud Run behavior still needs empirical testing; StageGuard now has the bounded conflict telemetry needed to observe that test safely.
+- The cockpit still needs a real Cloud Run + IAP browser acceptance.
+- Grafana MCP readiness and full metric+Loki investigation still need acceptance against a real Grafana Cloud/self-hosted production instance.
 
 ## Single best next step
 
-**Run the checkpoint path in a real executable environment and harden from evidence: first execute the new local crash/restart tests plus full `py_compile`/unittest discovery; then perform one private-GCS acceptance using a least-privilege service account and secret-backed `STAGEGUARD_CHECKPOINT_HMAC_KEY`, including two concurrent service instances racing to update the same approval checkpoint, and use the observed failure semantics to add explicit checkpoint health/conflict telemetry and any required retry policy without weakening fail-closed approval behavior.**
+**Perform a private multi-instance GCS acceptance in a runnable environment: start two StageGuard instances against the same signed checkpoint object, create one exact-revision approval, deliberately race lifecycle writes, confirm one writer succeeds and the other produces `stageguard_checkpoint_saves_total{result="conflict"}`, then reload/revalidate the winning checkpoint before deciding whether a narrow compare-and-retry policy is safe for non-approval transitions. Do not add blind retries.**
