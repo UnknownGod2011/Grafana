@@ -75,8 +75,13 @@ def _get_readiness_probe(service: IncidentService) -> EvidencePlaneReadinessProb
 
 
 def _service_readiness(service: IncidentService) -> dict[str, object]:
-    """Build a bounded readiness view from the service-owned evidence plane."""
-    return _get_readiness_probe(service).check().to_dict()
+    """Build a bounded readiness view from evidence-plane and lifecycle consistency state."""
+    readiness = _get_readiness_probe(service).check().to_dict()
+    checkpoint_state = service.checkpoint_state()
+    readiness["checks"]["checkpoint"] = checkpoint_state
+    if checkpoint_state == "conflicted":
+        readiness["ready"] = False
+    return readiness
 
 
 def _service_metrics(service: IncidentService) -> str:
@@ -85,6 +90,12 @@ def _service_metrics(service: IncidentService) -> str:
     exporter = getattr(checkpoint_store, "prometheus_metrics", None)
     if callable(exporter):
         metrics += exporter()
+    blocked = 1 if service.checkpoint_state() == "conflicted" else 0
+    metrics += (
+        "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
+        "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
+        f"stageguard_checkpoint_conflict_blocked {blocked}\n"
+    )
     return metrics
 
 
@@ -102,7 +113,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.8"
+    server_version = "StageGuard/0.9"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -179,6 +190,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "loki_activation": "failed",
                         "prometheus_mcp": "failed",
                         "loki_mcp": "failed",
+                        "checkpoint": "failed",
                     },
                 }
             self._send(200 if readiness["ready"] else 503, readiness)
@@ -218,7 +230,10 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 self._send(200, {"timeline": timeline})
                 return
             snapshot = self.service.status()
-            self._send(200, {"incident": None if snapshot is None else snapshot.to_dict()})
+            self._send(200, {
+                "incident": None if snapshot is None else snapshot.to_dict(),
+                "checkpoint_state": self.service.checkpoint_state(),
+            })
         except AuthenticationError as exc:
             self._error(401, "unauthorized", str(exc), authenticate=True)
         except ValueError as exc:
@@ -269,6 +284,15 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 _only(payload, set())
                 snapshot = self.service.execute_approved(actor=identity.subject)
                 self._send(200, {"incident": snapshot.to_dict()})
+                return
+
+            if self.path == "/v1/checkpoint/reload":
+                _only(payload, set())
+                snapshot = self.service.reload_checkpoint_after_conflict()
+                self._send(200, {
+                    "incident": snapshot.to_dict(),
+                    "checkpoint_state": self.service.checkpoint_state(),
+                })
                 return
 
             self._error(404, "not_found", "unknown endpoint")
