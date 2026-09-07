@@ -4,21 +4,21 @@
 
 StageGuard is a personal open-source incident commander for live media workflows. The executable production path now covers:
 
-`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → Cloud Run/IAP deployment → independent liveness/readiness → bounded readiness cache/backoff + self-observability → authenticated same-origin operator cockpit → bounded redacted incident timeline → narrowly scoped durable Cloud Logging timeline reconstruction`
+`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded durable audit → authenticated operator cockpit/timeline → durable Cloud Logging timeline reconstruction → versioned incident lifecycle checkpoints with local atomic storage or signed/GCS persistence → Cloud Run/IAP deployment → independent liveness/readiness + bounded readiness cache/backoff/self-observability`
 
 Core invariants:
 
 - Grafana remains the operational evidence plane; infrastructure write credentials remain separate.
 - Production Prometheus and Loki datasource identities and semantic contracts are pinned by expiring activation artifacts.
-- Activation freshness and contract/datasource pins are revalidated locally on every readiness request.
-- External Grafana MCP readiness probes are bounded and cached so frequent health polling cannot stampede Grafana.
-- A previous external success may be reported as `stale` only within a short fixed grace window after a transient refresh failure; once that window expires StageGuard becomes unready.
-- A local activation failure is never masked by cached or stale external reachability.
 - Gemini remains advisory only and cannot mutate diagnosis, approval, remediation, or recovery state.
-- Operator UI requests are same-origin and server-authoritative; the browser receives no Grafana, Gemini, remediation, Cloud Logging, or infrastructure credential.
-- Human approval remains bound to the exact incident evidence revision; the cockpit adds explicit typed-revision confirmation without weakening server-side enforcement.
-- Operator audit reads are incident-scoped, bounded, schema-pinned, and redacted; the browser never receives generic Cloud Logging read access or arbitrary filter capability.
-- Production writes remain disabled in the standard Cloud Run composition.
+- Human approval is single-use and bound to the exact deterministic evidence revision.
+- A fresh investigation always clears prior approval/outcome state before persisting the new revision.
+- Audit history and mutable lifecycle state are separate persistence concerns.
+- Restored checkpoints must match the configured telemetry scope and recompute to the persisted evidence revision.
+- Local checkpoints are atomic owner-only JSON and are never presented as Cloud Run durability.
+- Production GCS checkpoints require both object-generation preconditions and HMAC-SHA-256 authenticity; bucket write permission alone is insufficient to forge an approved state.
+- Provider remediation metadata/details, credentials, Gemini output, Grafana secrets, and the checkpoint signing secret are not persisted in lifecycle checkpoints.
+- Standard Cloud Run production remediation remains disabled.
 - `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed non-sensitive readiness telemetry.
 
 ## Completed milestones
@@ -26,139 +26,173 @@ Core invariants:
 - Deterministic broadcast telemetry simulator + Prometheus + provisioned Grafana local stack.
 - Official Grafana MCP integration with datasource/Prometheus/Loki read tools and writes/proxied tools disabled.
 - Deterministic incident investigation and bounded Loki corroboration.
-- Strict configurable telemetry mapping, metric preflight, Loki preflight, and expiring activation pins.
-- Approval-gated remediation and telemetry-only recovery proof.
-- Credential-isolated HTTPS remediation transport.
+- Strict configurable telemetry mapping, metric/Loki preflight, and expiring activation pins.
+- Approval-gated remediation and Grafana telemetry-only recovery proof.
+- Credential-isolated HTTPS production remediation transport with deterministic idempotency identity.
 - Bounded revision-bound Gemini incident-commander briefing layer.
-- Verified Google IAP identity provider and bounded Google Cloud Logging audit sink.
+- Verified Google IAP identity provider and bounded Cloud Logging audit sink.
 - Dedicated non-root Cloud Run image with embedded official Grafana MCP binary and remediation disabled.
-- `/healthz` liveness + fail-closed `/readyz` using read-only MCP `get_datasource` checks.
-- Persistent readiness probe with external-probe TTL, failure backoff, bounded stale-on-transient-failure semantics, single-flight locking, and Prometheus-format self-observability.
-- Authenticated same-origin operator cockpit for deterministic evidence, Gemini briefing, revision-bound approval, execution, and recovery state.
-- Bounded incident-scoped audit timeline with sequence pagination, actor pseudonymization, event-specific payload allow-lists, and same-origin cockpit rendering.
-- Production Cloud Logging audit reader pinned to the dedicated StageGuard log, `stageguard.audit.v1`, one exact incident ID, a bounded lookback, and a bounded result count; durable and in-process timeline entries are merged by sequence before the same UI redaction allow-list is applied.
+- `/healthz` liveness + fail-closed `/readyz` with cached/read-only MCP datasource reachability.
+- Prometheus-format StageGuard readiness self-observability.
+- Authenticated same-origin operator cockpit for evidence, Gemini briefing, typed revision approval, execution and recovery state.
+- Bounded incident audit timeline with sequence pagination, actor pseudonymization, payload allow-lists, and durable Cloud Logging reconstruction.
+- Versioned `stageguard.incident-checkpoint.v1` lifecycle persistence.
+- Credential-free atomic JSON checkpoint store for local development.
+- Optional Google Cloud Storage checkpoint store using ADC, fixed deployment-owned object mapping, optimistic generation preconditions, and HMAC-SHA-256 authenticity.
+- Restart restoration of incident report/revision/approval/consumed outcome with fail-closed scope/revision validation.
 
-## Run log — 2026-09-07 — durable audit timeline reconstruction
+## Run log — 2026-09-07 — restart-safe incident lifecycle checkpoints
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Then inspected the current repository and the implementation surfaces most relevant to the previous handoff:
+Read `progress.md` completely before choosing work. Then inspected the repository surfaces most relevant to the previous handoff:
 
-- `runtime/cloud_audit.py`
 - `runtime/incident_service.py`
+- `runtime/remediation.py`
+- `runtime/production_remediation.py`
+- `runtime/investigator.py`
+- `runtime/log_evidence.py`
 - `runtime/bootstrap.py`
 - `runtime/cloudrun_entrypoint.py`
-- `runtime/api.py`
-- `runtime/tests/test_audit_timeline.py`
 - `runtime/requirements-cloudrun.txt`
-- `Dockerfile.api`
-- `OPERATOR_CONSOLE.md`
+- existing incident/bootstrap/Cloud Run tests
+- `README.md`
+- `.gitignore`
 
-The highest-value unblocked gap was the previous handoff: Cloud Logging was already the durable sink of record, but the operator timeline could read only the current process-local projection.
+The highest-value gap was exactly the previous handoff: durable audit provenance survived a restart, but the current `IncidentSnapshot`, evidence revision, approval-consumption boundary and recovery state did not.
 
 ### Research / attribution checked
 
-Verified the current official Google Cloud Logging Python client documentation before implementing the reader. `Logger.list_entries()` supports server-side `filter_`, ordering, `max_results`, and `page_size`, which allows StageGuard to keep the provider query bounded rather than downloading broad log history and filtering it in-process:
+Verified current official Google Cloud Storage documentation before finalizing the production adapter. Google documents generation-match preconditions as the mechanism for avoiding races/data corruption: use `if_generation_match=0` for create-only writes and the current object generation for updates. The Python client documentation also confirms object generations change on each upload and can be used as conditional parameters.
 
-- https://docs.cloud.google.com/python/docs/reference/logging/latest/logger
-- https://docs.cloud.google.com/python/docs/reference/logging/latest/client
+References:
 
-Google's current Cloud Logging documentation also distinguishes log-write and log-read permissions; StageGuard continues to keep those capabilities server-side and does not expose a Logs Explorer-style surface to the browser.
+- https://docs.cloud.google.com/storage/docs/uploading-objects
+- https://docs.cloud.google.com/python/docs/reference/storage/latest/generation_metageneration
 
 ### Exact changes made
 
-Added `runtime/durable_audit_reader.py`:
+Added `runtime/incident_checkpoint.py`:
 
-- introduced `GoogleCloudAuditReader` as a narrow read adapter rather than a generic Cloud Logging proxy;
-- binds every provider query to the configured logger's fully qualified `logName`;
-- requires `jsonPayload.schema="stageguard.audit.v1"`;
-- filters one exact `incident_id` and `jsonPayload.sequence > after_sequence`;
-- applies a default 24-hour lookback with a hard seven-day implementation ceiling;
-- caps one provider read at 101 entries so the service can request at most one look-ahead row for pagination;
-- uses ascending provider ordering and then deterministically sorts by audit sequence;
-- rejects blank/oversized incident IDs and escapes Logging filter literals;
-- requires the exact audit-v1 top-level document shape and rejects unknown top-level fields;
-- reuses the existing `audit_event_document()` validator so read-path payload constraints cannot be broader than write-path constraints;
-- rejects wrong-incident entries, old/future timestamps, lower-bound sequence violations, and conflicting duplicate sequences;
-- imports `google-cloud-logging` lazily so local/free development remains credential- and dependency-light.
+- introduced `IncidentCheckpoint` and `CheckpointStore` abstraction;
+- defined strict versioned `stageguard.incident-checkpoint.v1` canonical state;
+- persists only incident ID, deterministic revision/report, matching approval, bounded consumed outcome and audit sequence;
+- SHA-256 detects corruption of canonical state;
+- production mode additionally signs canonical state with HMAC-SHA-256;
+- production HMAC key must be at least 32 bytes and is never stored in the checkpoint;
+- malformed, oversized, wrong-schema, wrong-digest, wrong-HMAC and unverifiable signed documents fail closed;
+- provider remediation `detail` and arbitrary `metadata` are stripped from persisted state;
+- restored action detail becomes the fixed string `restored checkpoint` and metadata becomes `{}`;
+- `JsonCheckpointStore` uses owner-only mode, temporary-file write, `fsync`, and atomic `os.replace`;
+- local checkpoint paths reject symlinks on read;
+- `GoogleCloudStorageCheckpointStore` uses a fixed deployment-owned object name, lazy `google-cloud-storage` import, ADC, signed state, and object-generation preconditions;
+- GCS create uses `if_generation_match=0`; updates reload the current generation and require that exact generation;
+- traversal-like checkpoint object names are rejected.
 
 Updated `runtime/incident_service.py`:
 
-- added an optional `AuditReader` protocol and constructor dependency;
-- `audit_timeline()` now asks the durable reader for at most `limit + 1` entries when configured;
-- durable and process-local events are merged by sequence;
-- identical duplicate events are deduplicated;
-- conflicting events claiming the same sequence fail closed;
-- the existing event-type-specific `_timeline_event()` allow-list remains the only data promoted to the operator response;
-- current-incident binding, 1..100 response bounds, actor pseudonymization, and sequence pagination remain unchanged.
+- accepts an optional checkpoint store;
+- restores lifecycle state during service construction before serving requests;
+- recomputes the deterministic report revision and rejects mismatch;
+- rejects restored production/feed scope drift;
+- reconstructs the policy-owned approval and rejects action/production/target drift;
+- rejects outcomes with no approval;
+- restores audit sequence and, when a durable audit reader is available, advances to the highest bounded durable sequence observed to avoid trivial sequence reuse after a checkpoint/audit timing gap;
+- persists state after every lifecycle audit record so investigation, briefing sequence advancement, approval and remediation/recovery transitions update the checkpoint;
+- a fresh investigation continues to construct a new snapshot with `approval=None, outcome=None`, so a previous approval cannot survive new evidence;
+- a persisted outcome remains single-use after restart because `execute_approved()` refuses any snapshot with an existing outcome.
 
 Updated `runtime/bootstrap.py`:
 
-- Cloud Logging mode now constructs both `GoogleCloudLoggingAuditSink` and `GoogleCloudAuditReader` against the same configured project/log name;
-- the durable reader is injected into `IncidentService` only for the `cloud-logging` backend;
-- JSONL/local development keeps `audit_reader=None` and therefore retains the existing free/process-local behavior;
-- production remediation defaults and credential boundaries were not changed.
+- added `none`, `json`, and `gcs` checkpoint backends;
+- programmatic `build_runtime()` keeps checkpointing disabled by default to avoid changing existing test/caller state unexpectedly;
+- CLI local development defaults to `.stageguard/incident-checkpoint.json`;
+- GCS mode reads bucket name and signing secret from environment-owned settings rather than CLI values;
+- production signing secret defaults to `STAGEGUARD_CHECKPOINT_HMAC_KEY` and never enters argv or browser state;
+- added lazy GCS checkpoint construction alongside existing Cloud Logging/IAP/Gemini optional integrations.
 
-Added and hardened `runtime/tests/test_durable_audit_reader.py`:
+Updated `runtime/cloudrun_entrypoint.py`:
 
-- fake logger verifies the exact dedicated `logName` filter;
-- verifies audit-v1 schema, incident, sequence, time-window, ordering, `max_results`, and `page_size` bounds;
-- verifies wrong incident, unknown document fields, unsafe cursors/result counts, old/future entries, and conflicting duplicate sequences are rejected;
-- verifies durable/local timeline merging still applies the existing payload redaction allow-list;
-- verifies a conflicting durable/local sequence fails closed.
+- Cloud Run enables GCS lifecycle persistence only when `STAGEGUARD_CHECKPOINT_BUCKET` is configured;
+- when a bucket is configured, startup also requires `STAGEGUARD_CHECKPOINT_HMAC_KEY` before bootstrap;
+- without a bucket, Cloud Run explicitly passes `--checkpoint-backend none` rather than using ephemeral container storage and calling it durable;
+- optional `STAGEGUARD_CHECKPOINT_OBJECT` remains deployment-owned;
+- production remediation remains impossible to enable through this standard entrypoint.
 
-Updated `OPERATOR_CONSOLE.md`:
+Updated production dependencies:
 
-- documents the durable reader contract and exact bounds;
-- makes explicit that `/v1/audit` accepts no arbitrary Cloud Logging filters, resource names, log names, time ranges, or query expressions;
-- documents the production durable/local merge and unchanged browser redaction boundary;
-- documents that JSONL/local development still requires no Cloud Logging read capability;
-- explicitly records the remaining limitation: durable audit reconstruction does not yet restore the complete incident state machine after a cold restart.
+- added `google-cloud-storage>=2.18,<4` to `runtime/requirements-cloudrun.txt`.
+
+Added/hardened tests:
+
+- `runtime/tests/test_incident_checkpoint.py` covers approval restoration, one-time post-restart execution, consumed approval after a second restart, fresh-investigation invalidation, tamper rejection, provider-metadata stripping, and versioned documents;
+- `runtime/tests/test_gcs_checkpoint.py` covers create/update generation preconditions, wrong-HMAC failure, forged-state failure, short signing keys, and object-name bounds;
+- `runtime/tests/test_cloudrun_entrypoint.py` now verifies no-checkpoint Cloud Run default, GCS opt-in, mandatory HMAC secret, secret non-disclosure in argv, and fixed safe production composition.
+
+Documentation / repository hygiene:
+
+- added `INCIDENT_CHECKPOINTS.md` with local/GCS deployment and trust-boundary guidance;
+- updated `README.md` so the executable vertical slice, safety model, repository structure and roadmap include lifecycle checkpoints;
+- `.stageguard/` is now ignored by Git so local lifecycle/audit/config state cannot be committed accidentally.
 
 ### Commits produced this run
 
-- `08fedd76` — add bounded durable audit reader
-- `ab8cf407` — merge durable audit history into the operator timeline
-- `0161b30e` — wire durable audit reader into the Cloud Logging runtime
-- `e498bae9` — add durable audit reader contract tests
-- `8b111ba7` — pin durable reads to the dedicated fully qualified StageGuard log
-- `a194ff94` — harden durable reader/merge tests
-- `37d152be` — document durable operator audit reads
+- `c6212531` — add integrity-checked incident checkpoint store
+- `6e3f8a21` — fix checkpoint digest verification
+- `27440687` — restore and persist incident lifecycle checkpoints
+- `33f05757` — harden checkpoint privacy and add durable GCS store
+- `81ecaf1a` — add incident checkpoint restart safety tests
+- `4fa124ea` — add optional Cloud Storage checkpoint dependency
+- `19e8de82` — wire local and GCS lifecycle checkpoints into runtime
+- `0e04bc00` — make Cloud Run checkpoint persistence explicit
+- `f71b2575` — test explicit Cloud Run checkpoint mode
+- `b2732985` — ignore local StageGuard runtime state
+- `1db83eca` — add GCS checkpoint concurrency tests
+- `3e2b7acd` — document restart-safe incident checkpoints
+- `38c3491b` — document restart-safe incident lifecycle
+- `c07c82bb` — require HMAC authenticity for production checkpoints
+- `5377f1d0` — require checkpoint signing secret for GCS state
+- `6a6f7e8b` — test signed GCS checkpoint authenticity
+- `abe88c22` — fail closed without checkpoint HMAC secret
+- `92565427` — test checkpoint HMAC startup boundary
+- `ebe11d00` — document signed production checkpoint state
 
 ### Tests / checks / results
 
 Attempted a clean checkout and targeted suite with:
 
-`PYTHONPATH=runtime python -m unittest runtime.tests.test_durable_audit_reader runtime.tests.test_audit_timeline -v`
+`PYTHONPATH=runtime python -m unittest runtime.tests.test_incident_checkpoint runtime.tests.test_gcs_checkpoint runtime.tests.test_cloudrun_entrypoint -v`
 
-The local execution container again failed before Python started because DNS resolution for `github.com` is unavailable:
+The execution container again failed before Python started because DNS resolution for `github.com` is unavailable:
 
 `fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com`
 
-Therefore the new tests are **not claimed as passing** in this runtime. No GitHub Actions workflow was created, triggered, rerun, or used as a workaround.
+Therefore the new tests and `py_compile` are **not claimed as passing** in this runtime. No GitHub Actions workflow was created, triggered, or rerun as a workaround.
 
-No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credential was used. No production Cloud Run or Grafana resource was changed.
+No Grafana, Loki, Gemini, IAP, Cloud Logging, Cloud Storage, Secret Manager, operator, or remediation credential was used. No production resource was changed.
 
 ### Decisions made
 
-1. **Keep the durable reader narrower than Logs Explorer.** The browser cannot choose a log, filter, resource, time window, or provider query.
-2. **Pin the dedicated log explicitly.** Relying only on schema/incident fields would be unnecessarily broad even though the configured logger is already logically scoped.
-3. **Reuse the write validator on reads.** Durable data is treated as untrusted input and must satisfy the same bounded audit-v1 contract before it reaches the service.
-4. **Keep UI redaction after durable/local merge.** Cloud Logging history never bypasses the event-specific allow-list or actor pseudonymization.
-5. **Use one-row look-ahead pagination.** The provider can return at most 101 entries for an API page capped at 100, enough to determine `has_more` without an unbounded read.
-6. **Keep local/free development unchanged.** The JSONL backend gets no Cloud Logging reader and needs no Google credential.
-7. **Do not confuse audit reconstruction with lifecycle restoration.** The operator can recover bounded durable provenance for the exact current incident, but StageGuard does not yet reconstruct the complete `IncidentSnapshot`, approval, or recovery state after a cold process restart.
+1. **Separate audit persistence from lifecycle persistence.** Audit history is an append-only provenance stream; restart state is a compact current-state checkpoint.
+2. **Never trust a persisted revision string by itself.** Restoration recomputes the revision from the deterministic report before accepting approval state.
+3. **Do not persist provider remediation metadata.** It is not required to enforce single-use approval and may contain infrastructure/provider details.
+4. **Do not claim local disk as Cloud Run durability.** The production entrypoint selects no checkpoint unless a durable bucket is explicitly configured.
+5. **Use GCS generation preconditions.** Competing writers fail rather than silently overwriting newer state, matching current Google guidance.
+6. **Require checkpoint authenticity, not only corruption detection.** SHA-256 alone would let a bucket writer recompute a forged approved state; production GCS therefore requires HMAC-SHA-256 with a separate server-owned secret.
+7. **Keep the HMAC key out of argv and persisted state.** It is read from environment-owned secret configuration only when GCS mode is selected.
+8. **Preserve remediation idempotency across the remaining crash window.** A crash can still happen after the external action accepts but before checkpoint commit; the production remediation operation ID is deterministic for the same report/action so retry uses the same idempotency identity.
+9. **Keep local/free development lightweight.** JSON checkpoints remain standard-library-only and unsigned because their trust boundary is owner-only local filesystem state, not a shared cloud authorization object.
 
 ### Current blockers / unknowns
 
 - The deterministic Python suite remains unexecuted because the local execution environment cannot resolve `github.com` for a runnable checkout.
 - `Dockerfile.api` still needs a real Docker build acceptance on a Docker-capable host.
-- The durable reader has fake-client coverage but has not yet been exercised against a real Cloud Logging project/service account.
+- The new GCS adapter has fake-client coverage but has not yet been exercised against an actual private bucket/service account.
+- A real deployment still needs a secure injection mechanism for `STAGEGUARD_CHECKPOINT_HMAC_KEY` (for example Cloud Run secret-backed environment configuration); no secret was created or modified in this run.
+- Multi-instance Cloud Run behavior has not yet been empirically exercised. Generation preconditions prevent silent checkpoint overwrite, and deterministic remediation operation IDs protect the external mutation retry boundary, but real concurrent operator traffic still needs acceptance testing.
 - The cockpit has not yet been exercised through a real Cloud Run + IAP browser session.
-- Cache/stale readiness behavior has not yet been exercised against a real `mcp-grafana:1.3.0` + Grafana Cloud/self-hosted instance.
-- Optional Gemini has not yet been exercised against live Vertex AI ADC.
-- Cloud Logging reconstruction currently supplements the timeline for an active in-memory incident; it does not restore the incident state machine after a cold restart.
+- Grafana MCP readiness and full metric+Loki investigation have not yet been exercised against a real Grafana Cloud/self-hosted production instance in this environment.
 
 ## Single best next step
 
-**Make the incident lifecycle itself restart-safe, not just its audit timeline: add a bounded versioned incident-checkpoint abstraction with a credential-free local implementation and an optional Google Cloud persistence adapter, persist only the minimum server-side state required to restore the current `IncidentSnapshot`/revision/approval-consumption boundary, integrity-check the checkpoint before use, keep raw Grafana/Gemini/remediation credentials out of it, and add crash/restart tests proving stale approvals can never be replayed against a different evidence revision.**
+**Run the checkpoint path in a real executable environment and harden from evidence: first execute the new local crash/restart tests plus full `py_compile`/unittest discovery; then perform one private-GCS acceptance using a least-privilege service account and secret-backed `STAGEGUARD_CHECKPOINT_HMAC_KEY`, including two concurrent service instances racing to update the same approval checkpoint, and use the observed failure semantics to add explicit checkpoint health/conflict telemetry and any required retry policy without weakening fail-closed approval behavior.**
