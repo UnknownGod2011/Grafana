@@ -87,7 +87,7 @@ class OperatorConsoleTests(unittest.TestCase):
     def test_console_javascript_binds_briefing_and_approval_to_current_revision(self):
         _status, _type, _csp, _cache, body = self.get("/assets/operator.js", authenticated=True)
         self.assertIn("incident_id:current.incident_id,revision:current.revision", body)
-        self.assertIn("event.target.value !== current.revision", body)
+        self.assertIn("event.target.value!==current.revision", body)
         self.assertIn("data.revision!==current.revision", body)
         self.assertIn("window.confirm", body)
         self.assertNotIn("localStorage", body)
@@ -99,30 +99,39 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn('id="lifecycle-recovery"', html)
         self.assertIn('id="reload-checkpoint"', html)
         self.assertIn('id="reconcile-execution"', html)
-        self.assertIn("checkpointState === 'conflicted'", js)
-        self.assertIn("checkpointState === 'execution_uncertain'", js)
-        self.assertIn("q('investigate').disabled = blocked", js)
-        self.assertIn("q('approval-revision').disabled = blocked", js)
-        self.assertIn("lifecycleBlocked() || !approval", js)
+        self.assertIn("checkpointState==='conflicted'", js)
+        self.assertIn("checkpointState==='execution_uncertain'", js)
+        self.assertIn("q('investigate').disabled=blocked", js)
+        self.assertIn("q('approval-revision').disabled=blocked", js)
+        self.assertIn("lifecycleBlocked()||!approval", js)
         self.assertIn("/v1/checkpoint/reload", js)
         self.assertIn("/v1/execution/reconcile", js)
         self.assertIn("This will not replay remediation", js)
+
+    def test_uncertain_execution_controls_are_driven_by_server_reconciliation_phase(self):
+        _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
+        self.assertIn("executionReconciliationState='clear'", js)
+        self.assertIn("data.execution_reconciliation_state", js)
+        self.assertIn("executionReconciliationState==='reload_required'", js)
+        self.assertIn("executionReconciliationState==='reloaded'", js)
+        self.assertIn("q('reload-checkpoint').disabled=!reloadRequired", js)
+        self.assertIn("q('reconcile-execution').disabled=!readyToReconcile", js)
+        self.assertIn("ready to reconcile", js)
+        # Unknown/new values must fail closed instead of enabling reconciliation.
+        self.assertIn("safeReconciliationState", js)
+        self.assertIn("?'reload_required'", js)
 
     def test_console_never_exposes_or_accepts_remediation_operation_id(self):
         _status, _type, _csp, _cache, html = self.get("/console", authenticated=True)
         _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
         self.assertNotIn("operation_id", html)
         self.assertNotIn("operation_id", js)
-        # The server-owned recovery endpoints receive empty objects only.
         self.assertIn("/v1/checkpoint/reload',{method:'POST',body:{}}", js)
         self.assertIn("/v1/execution/reconcile',{method:'POST',body:{}}", js)
 
     def test_mutation_failures_refresh_authoritative_checkpoint_state(self):
         _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
-        # A CAS conflict can be raised after the browser initiated execution.
-        # Every lifecycle mutation catch therefore refreshes authoritative state
-        # rather than leaving stale action controls enabled in the tab.
-        self.assertGreaterEqual(js.count("catch(err) { message(err.message); await refresh(); }"), 6)
+        self.assertGreaterEqual(js.count("catch(err){message(err.message);await refresh();}"), 6)
 
     def test_health_and_metrics_remain_independent_of_operator_authentication(self):
         status, _type, _csp, _cache, _body = self.get("/healthz")
