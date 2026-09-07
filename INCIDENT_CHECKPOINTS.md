@@ -47,6 +47,29 @@ HTTP 412 generation-precondition failures are mapped to bounded `CheckpointConfl
 
 Use the narrowest bucket/object IAM available. Bucket write permission alone is intentionally insufficient to forge lifecycle authorization because a valid HMAC is also required.
 
+### Safe two-writer acceptance
+
+`scripts/gcs_checkpoint_race_acceptance.py` exercises the production GCS adapter against a real private bucket without touching `STAGEGUARD_CHECKPOINT_OBJECT`. Every invocation creates one UUID-scoped object below `stageguard/acceptance/`, seeds generation 1, makes two independent stores load that same generation, lets writer A persist generation 2, and requires writer B to fail with `CheckpointConflictError` while still pinned to generation 1.
+
+The script then verifies that the winner still has sequence 2 and that the losing observable store emitted:
+
+```text
+stageguard_checkpoint_saves_total{result="conflict"} 1
+```
+
+Run it from a checkout that has the runtime requirements installed and Application Default Credentials scoped to the private acceptance bucket:
+
+```bash
+export STAGEGUARD_CHECKPOINT_HMAC_KEY='<high-entropy acceptance secret, at least 32 bytes>'
+PYTHONPATH=runtime python scripts/gcs_checkpoint_race_acceptance.py \
+  --bucket '<private-stageguard-bucket>' \
+  --project '<google-cloud-project>'
+```
+
+By default the harness deletes only the exact UUID-scoped object it created, using a generation precondition. `--keep` retains that synthetic object for operator inspection. A cleanup failure is surfaced with the unique object URI; the script never scans, deletes, rewrites, or reads the production checkpoint object.
+
+For least privilege, use an acceptance-specific bucket or IAM condition/prefix when possible. The harness requires object create/read/update/delete permissions only for its isolated acceptance object namespace and access to the configured HMAC secret through the local environment.
+
 ## Checkpoint observability
 
 Configured JSON and GCS stores are wrapped by `ObservableCheckpointStore`. `/metrics` includes fixed-label checkpoint telemetry alongside evidence-plane readiness metrics:
@@ -72,4 +95,4 @@ There is one unavoidable distributed-systems boundary: a process can terminate a
 
 Credential-free unit coverage exists for local restart restoration, approval invalidation, consumed-approval restoration, checkpoint tamper rejection, provider-metadata stripping, GCS create/update generation preconditions, stale-writer conflict behavior, create-only behavior for a fresh uninitialized writer, generation-bound reads, bounded 412 classification, wrong-HMAC rejection, unsigned/forged-state rejection, short-key rejection, object-name bounds, checkpoint metric privacy/result classification, and the Cloud Run startup requirement for a signing secret.
 
-A real GCS/Cloud Run acceptance test still requires a Google Cloud project, private bucket, ADC/service-account permissions, injected checkpoint HMAC secret, and a runnable checkout environment.
+A safe real-bucket acceptance harness now exists at `scripts/gcs_checkpoint_race_acceptance.py`. It still requires a Google Cloud project, private bucket, ADC/service-account permissions, injected checkpoint HMAC secret, and a runnable checkout to produce empirical GCS evidence; no cloud credential is embedded in the repository.
