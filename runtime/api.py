@@ -59,11 +59,9 @@ def _is_loopback(host: str) -> bool:
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.2"
+    server_version = "StageGuard/0.3"
 
     def log_message(self, _format: str, *_args: object) -> None:
-        # Host applications should provide structured request logging. Avoid
-        # emitting credentials, operator identifiers, or request bodies.
         return
 
     def _send(self, status: int, payload: dict[str, Any], *, authenticate: bool = False) -> None:
@@ -110,6 +108,19 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 self._send(200, {"incident": snapshot.to_dict()})
                 return
 
+            if self.path == "/v1/briefing":
+                _only(payload, {"incident_id", "revision"})
+                required = ("incident_id", "revision")
+                if any(not isinstance(payload.get(name), str) for name in required):
+                    raise ValueError("incident_id and revision are required strings")
+                briefing = self.service.briefing(
+                    incident_id=payload["incident_id"],
+                    revision=payload["revision"],
+                    actor=identity.subject,
+                )
+                self._send(200, {"briefing": briefing.to_dict(), "revision": payload["revision"]})
+                return
+
             if self.path == "/v1/approve":
                 _only(payload, {"incident_id", "revision"})
                 required = ("incident_id", "revision")
@@ -137,7 +148,6 @@ class StageGuardHandler(BaseHTTPRequestHandler):
         except RuntimeError as exc:
             self._error(409, "invalid_state", str(exc))
         except Exception:
-            # Do not leak internal transport/credential details to callers.
             self._error(500, "internal_error", "request failed")
 
 
@@ -148,12 +158,6 @@ def make_server(
     *,
     identity_provider: IdentityProvider | None = None,
 ) -> ThreadingHTTPServer:
-    """Construct a server while enforcing the network/authentication boundary.
-
-    Local development gets a fixed process-configured identity on loopback. A
-    non-loopback bind requires an explicitly configured non-development
-    provider; accidental exposure with implicit/local identity fails closed.
-    """
     provider = identity_provider or LocalDevelopmentIdentityProvider()
     if not _is_loopback(host) and provider.is_development_only:
         raise ValueError("non-loopback bind requires an explicit production-capable identity provider")
@@ -172,5 +176,4 @@ def serve(
     *,
     identity_provider: IdentityProvider | None = None,
 ) -> None:
-    """Serve StageGuard with loopback-safe local identity by default."""
     make_server(service, host, port, identity_provider=identity_provider).serve_forever()
