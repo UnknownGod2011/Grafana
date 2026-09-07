@@ -3,6 +3,8 @@ import unittest
 from incident_checkpoint import GoogleCloudStorageCheckpointStore, IncidentCheckpoint
 from investigator import Evidence, IncidentReport
 
+KEY = b"k" * 32
+
 
 class FakeBlob:
     def __init__(self):
@@ -53,7 +55,7 @@ def checkpoint(sequence=1):
 class GcsCheckpointTests(unittest.TestCase):
     def test_first_write_uses_create_only_generation_precondition(self):
         bucket = FakeBucket()
-        store = GoogleCloudStorageCheckpointStore(bucket)
+        store = GoogleCloudStorageCheckpointStore(bucket, KEY)
         store.save(checkpoint())
         blob = bucket.blob("stageguard/incident-checkpoint.json")
         self.assertEqual(("application/json", 0), blob.uploads[0])
@@ -61,20 +63,43 @@ class GcsCheckpointTests(unittest.TestCase):
 
     def test_update_uses_current_generation_precondition(self):
         bucket = FakeBucket()
-        store = GoogleCloudStorageCheckpointStore(bucket)
+        store = GoogleCloudStorageCheckpointStore(bucket, KEY)
         store.save(checkpoint(1))
         store.save(checkpoint(2))
         blob = bucket.blob("stageguard/incident-checkpoint.json")
         self.assertEqual(("application/json", 1), blob.uploads[1])
         self.assertEqual(2, store.load().sequence)
 
+    def test_wrong_signing_key_fails_closed(self):
+        bucket = FakeBucket()
+        GoogleCloudStorageCheckpointStore(bucket, KEY).save(checkpoint())
+        with self.assertRaises(ValueError):
+            GoogleCloudStorageCheckpointStore(bucket, b"x" * 32).load()
+
+    def test_bucket_writer_cannot_forge_state_without_hmac(self):
+        bucket = FakeBucket()
+        store = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        store.save(checkpoint())
+        blob = bucket.blob("stageguard/incident-checkpoint.json")
+        tampered = bytearray(blob.data)
+        index = tampered.find(b"broadcast-alpha")
+        self.assertGreaterEqual(index, 0)
+        tampered[index:index + len(b"broadcast-alpha")] = b"broadcast-omega"
+        blob.data = bytes(tampered)
+        with self.assertRaises(ValueError):
+            store.load()
+
     def test_object_name_is_fixed_and_traversal_is_rejected(self):
         bucket = FakeBucket()
         with self.assertRaises(ValueError):
-            GoogleCloudStorageCheckpointStore(bucket, "../other.json")
-        store = GoogleCloudStorageCheckpointStore(bucket, "/prod/current.json")
+            GoogleCloudStorageCheckpointStore(bucket, KEY, "../other.json")
+        store = GoogleCloudStorageCheckpointStore(bucket, KEY, "/prod/current.json")
         store.save(checkpoint())
         self.assertIn("prod/current.json", bucket.blobs)
+
+    def test_short_signing_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            GoogleCloudStorageCheckpointStore(FakeBucket(), b"short")
 
 
 if __name__ == "__main__":
