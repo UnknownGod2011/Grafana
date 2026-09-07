@@ -17,7 +17,7 @@ from durable_audit_reader import GoogleCloudAuditReader
 from gemini_commander import GeminiCommander, GoogleGenAICommanderModel
 from http_remediation_transport import HttpRemediationTransport
 from identity import GoogleIapIdentityProvider, IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
-from incident_checkpoint import CheckpointStore, GoogleCloudStorageCheckpointStore, JsonCheckpointStore
+from incident_checkpoint import CheckpointStore, GoogleCloudStorageCheckpointStore, JsonCheckpointStore, ObservableCheckpointStore
 from incident_service import AuditReader, AuditSink, IncidentService, JsonlAuditLog
 from log_activation import LogActivationRecord, load_log_activation_record, verify_log_activation_record
 from mcp_log_client import McpLokiLogClient
@@ -108,17 +108,17 @@ def _checkpoint_store(
     if normalized == "none":
         return None
     if normalized == "json":
-        return JsonCheckpointStore(checkpoint_path)
+        return ObservableCheckpointStore(JsonCheckpointStore(checkpoint_path))
     if normalized == "gcs":
         bucket = _read_required_secret(checkpoint_bucket_env)
         signing_key = _read_required_secret(checkpoint_signing_key_env)
         project = os.getenv(cloud_project_env, "").strip() or None
-        return GoogleCloudStorageCheckpointStore.from_environment(
+        return ObservableCheckpointStore(GoogleCloudStorageCheckpointStore.from_environment(
             bucket_name=bucket,
             signing_key=signing_key,
             project=project,
             object_name=checkpoint_object,
-        )
+        ))
     raise ValueError("checkpoint backend must be none, json, or gcs")
 
 
@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             remediation_token_env=args.remediation_token_env,
         )
     except Exception as exc:
-        print(f"StageGuard startup refused: {exc}", file=sys.stderr)
+        print(f"StageGuard startup failed: {type(exc).__name__}", file=sys.stderr)
         return 2
     try:
         bundle.server.serve_forever()
@@ -282,7 +282,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         bundle.close()
-    return 0
 
 
 if __name__ == "__main__":
