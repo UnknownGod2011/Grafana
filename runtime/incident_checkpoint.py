@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Versioned integrity-checked StageGuard incident checkpoint persistence.
 
-The checkpoint is intentionally server-side and contains only lifecycle state
-needed to restore the current incident. Provider credentials and arbitrary
-remediation metadata are excluded.
+Checkpoints are server-side lifecycle state only. They intentionally exclude
+provider credentials, remediation metadata, arbitrary HTTP/provider details,
+and Gemini content. Local JSON is credential-free; GCS is an optional durable
+production adapter using ADC and optimistic object-generation preconditions.
 """
 from __future__ import annotations
 
@@ -39,7 +40,22 @@ class IncidentCheckpoint:
     sequence: int
 
 
+def _safe_outcome_dict(outcome: RemediationOutcome | None) -> dict | None:
+    if outcome is None:
+        return None
+    return {
+        "status": outcome.status,
+        "action_result": None if outcome.action_result is None else {
+            "accepted": bool(outcome.action_result.accepted),
+        },
+        "samples": [asdict(sample) for sample in outcome.samples],
+        "summary": outcome.summary,
+    }
+
+
 def _report_from_dict(value: dict) -> IncidentReport:
+    if not isinstance(value, dict):
+        raise ValueError("invalid checkpoint report")
     evidence = tuple(Evidence(**item) for item in value.get("evidence", ()))
     log_raw = value.get("log_corroboration")
     log = None if log_raw is None else LogCorroboration(**log_raw)
@@ -53,10 +69,10 @@ def _report_from_dict(value: dict) -> IncidentReport:
 def _outcome_from_dict(value: dict | None) -> RemediationOutcome | None:
     if value is None:
         return None
+    if not isinstance(value, dict):
+        raise ValueError("invalid checkpoint outcome")
     action_raw = value.get("action_result")
-    action = None if action_raw is None else ActionResult(
-        bool(action_raw["accepted"]), str(action_raw["detail"]), dict(action_raw.get("metadata", {}))
-    )
+    action = None if action_raw is None else ActionResult(bool(action_raw["accepted"]), "restored checkpoint", {})
     samples = tuple(RecoverySample(**item) for item in value.get("samples", ()))
     return RemediationOutcome(str(value["status"]), action, samples, str(value["summary"]))
 
@@ -67,7 +83,7 @@ def checkpoint_document(checkpoint: IncidentCheckpoint) -> dict:
         "revision": checkpoint.revision,
         "report": checkpoint.report.to_dict(),
         "approval": None if checkpoint.approval is None else asdict(checkpoint.approval),
-        "outcome": None if checkpoint.outcome is None else checkpoint.outcome.to_dict(),
+        "outcome": _safe_outcome_dict(checkpoint.outcome),
         "sequence": checkpoint.sequence,
     }
     canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
@@ -104,6 +120,25 @@ def parse_checkpoint_document(document: dict) -> IncidentCheckpoint:
     return IncidentCheckpoint(incident_id, revision, report, approval, outcome, sequence)
 
 
+def _encode(checkpoint: IncidentCheckpoint) -> bytes:
+    encoded = (json.dumps(checkpoint_document(checkpoint), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(encoded) > _MAX_BYTES:
+        raise ValueError("incident checkpoint exceeds size limit")
+    return encoded
+
+
+def _decode(raw: bytes) -> IncidentCheckpoint:
+    if len(raw) > _MAX_BYTES:
+        raise ValueError("incident checkpoint exceeds size limit")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid incident checkpoint JSON") from exc
+    if not isinstance(document, dict):
+        raise ValueError("invalid incident checkpoint JSON")
+    return parse_checkpoint_document(document)
+
+
 class JsonCheckpointStore:
     """Credential-free atomic local checkpoint store with owner-only permissions."""
 
@@ -116,22 +151,10 @@ class JsonCheckpointStore:
             return None
         if self.path.is_symlink():
             raise ValueError("incident checkpoint path must not be a symlink")
-        raw = self.path.read_bytes()
-        if len(raw) > _MAX_BYTES:
-            raise ValueError("incident checkpoint exceeds size limit")
-        try:
-            document = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("invalid incident checkpoint JSON") from exc
-        if not isinstance(document, dict):
-            raise ValueError("invalid incident checkpoint JSON")
-        return parse_checkpoint_document(document)
+        return _decode(self.path.read_bytes())
 
     def save(self, checkpoint: IncidentCheckpoint) -> None:
-        document = checkpoint_document(checkpoint)
-        encoded = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-        if len(encoded) > _MAX_BYTES:
-            raise ValueError("incident checkpoint exceeds size limit")
+        encoded = _encode(checkpoint)
         fd, tmp_name = tempfile.mkstemp(prefix=".checkpoint-", dir=self.path.parent)
         try:
             os.fchmod(fd, 0o600)
@@ -144,3 +167,57 @@ class JsonCheckpointStore:
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
+
+
+class GoogleCloudStorageCheckpointStore:
+    """Durable single-object checkpoint store with optimistic concurrency.
+
+    The bucket and object name are deployment-owned configuration. The adapter
+    never accepts a browser-supplied object path and imports google-cloud-storage
+    lazily so local/free development stays lightweight.
+    """
+
+    def __init__(self, bucket, object_name: str = "stageguard/incident-checkpoint.json") -> None:
+        name = object_name.strip().lstrip("/")
+        if not name or ".." in name.split("/") or len(name) > 512:
+            raise ValueError("invalid checkpoint object name")
+        self._bucket = bucket
+        self._object_name = name
+
+    @classmethod
+    def from_environment(cls, *, bucket_name: str, project: str | None = None, object_name: str = "stageguard/incident-checkpoint.json"):
+        if not bucket_name.strip():
+            raise ValueError("checkpoint bucket name is required")
+        try:
+            from google.cloud import storage
+        except ImportError as exc:
+            raise RuntimeError("google-cloud-storage is required for GCS checkpoints") from exc
+        client = storage.Client(project=project)
+        return cls(client.bucket(bucket_name.strip()), object_name)
+
+    def load(self) -> IncidentCheckpoint | None:
+        blob = self._bucket.blob(self._object_name)
+        try:
+            if not blob.exists():
+                return None
+            raw = blob.download_as_bytes()
+        except Exception as exc:
+            raise RuntimeError("incident checkpoint read failed") from exc
+        return _decode(raw)
+
+    def save(self, checkpoint: IncidentCheckpoint) -> None:
+        encoded = _encode(checkpoint)
+        blob = self._bucket.blob(self._object_name)
+        try:
+            exists = blob.exists()
+            generation = None
+            if exists:
+                blob.reload()
+                generation = blob.generation
+            blob.upload_from_string(
+                encoded,
+                content_type="application/json",
+                if_generation_match=generation if exists else 0,
+            )
+        except Exception as exc:
+            raise RuntimeError("incident checkpoint write failed") from exc
