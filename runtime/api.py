@@ -11,6 +11,7 @@ import ipaddress
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from identity import AuthenticationError, IdentityProvider, LocalDevelopmentIdentityProvider, OperatorIdentity
 from incident_service import IncidentService
@@ -82,10 +83,21 @@ def _service_metrics(service: IncidentService) -> str:
     return _get_readiness_probe(service).prometheus_metrics()
 
 
+def _single_query_value(query: dict[str, list[str]], name: str, *, required: bool = False) -> str | None:
+    values = query.get(name)
+    if values is None:
+        if required:
+            raise ValueError(f"{name} is required")
+        return None
+    if len(values) != 1 or not values[0]:
+        raise ValueError(f"{name} must be supplied exactly once")
+    return values[0]
+
+
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.6"
+    server_version = "StageGuard/0.7"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -128,12 +140,13 @@ class StageGuardHandler(BaseHTTPRequestHandler):
         return self.identity_provider.authenticate(self)
 
     def _serve_operator_console(self) -> bool:
+        path = urlsplit(self.path).path
         assets = {
             "/console": (CONSOLE_HTML, "text/html; charset=utf-8"),
             "/assets/operator.css": (CONSOLE_CSS, "text/css; charset=utf-8"),
             "/assets/operator.js": (CONSOLE_JS, "text/javascript; charset=utf-8"),
         }
-        asset = assets.get(self.path)
+        asset = assets.get(path)
         if asset is None:
             return False
         try:
@@ -145,10 +158,12 @@ class StageGuardHandler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/healthz":
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path == "/healthz":
             self._send(200, {"ok": True})
             return
-        if self.path == "/readyz":
+        if path == "/readyz":
             try:
                 readiness = _service_readiness(self.service)
             except Exception:
@@ -163,7 +178,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 }
             self._send(200 if readiness["ready"] else 503, readiness)
             return
-        if self.path == "/metrics":
+        if path == "/metrics":
             try:
                 metrics = _service_metrics(self.service)
             except Exception:
@@ -172,16 +187,41 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             return
         if self._serve_operator_console():
             return
-        if self.path != "/v1/incident":
+        if path not in {"/v1/incident", "/v1/audit"}:
             self._error(404, "not_found", "unknown endpoint")
             return
         try:
             self._identity()
+            if path == "/v1/audit":
+                query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                unexpected = set(query) - {"incident_id", "after_sequence", "limit"}
+                if unexpected:
+                    raise ValueError(f"unsupported query fields: {', '.join(sorted(unexpected))}")
+                incident_id = _single_query_value(query, "incident_id", required=True)
+                after_raw = _single_query_value(query, "after_sequence")
+                limit_raw = _single_query_value(query, "limit")
+                try:
+                    after_sequence = 0 if after_raw is None else int(after_raw)
+                    limit = 50 if limit_raw is None else int(limit_raw)
+                except ValueError as exc:
+                    raise ValueError("after_sequence and limit must be integers") from exc
+                timeline = self.service.audit_timeline(
+                    incident_id=incident_id or "",
+                    after_sequence=after_sequence,
+                    limit=limit,
+                )
+                self._send(200, {"timeline": timeline})
+                return
+            snapshot = self.service.status()
+            self._send(200, {"incident": None if snapshot is None else snapshot.to_dict()})
         except AuthenticationError as exc:
             self._error(401, "unauthorized", str(exc), authenticate=True)
-            return
-        snapshot = self.service.status()
-        self._send(200, {"incident": None if snapshot is None else snapshot.to_dict()})
+        except ValueError as exc:
+            self._error(400, "invalid_request", str(exc))
+        except RuntimeError as exc:
+            self._error(409, "invalid_state", str(exc))
+        except Exception:
+            self._error(500, "internal_error", "request failed")
 
     def do_POST(self) -> None:  # noqa: N802
         try:
