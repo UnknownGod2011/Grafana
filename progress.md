@@ -2,9 +2,9 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable safety core now covers:
+StageGuard is a personal open-source incident commander for live media workflows. The executable production path now covers:
 
-`strict telemetry mapping → eight-read metric preflight → metric activation pin → one bounded Loki preflight → Loki contract/datasource activation pin → official Grafana MCP Prometheus + Loki adapters → six-read metric diagnosis → mandatory production Loki corroboration → authenticated IncidentService → optional revision-bound Gemini advisory briefing → revision-bound approval → governed allowlisted remediation → credential-isolated HTTPS transport → two-read telemetry recovery verification → bounded local or Google Cloud Logging audit`
+`strict telemetry mapping → eight-read metric preflight → metric activation pin → one bounded Loki preflight → Loki contract/datasource activation pin → official Grafana MCP Prometheus + Loki adapters → six-read metric diagnosis → mandatory production Loki corroboration → authenticated IncidentService → optional revision-bound Gemini advisory briefing → revision-bound approval → governed allowlisted remediation → credential-isolated HTTPS transport → two-read telemetry recovery verification → bounded local/Cloud Logging audit → direct-IAP Cloud Run API artifact`
 
 Core invariants:
 
@@ -16,14 +16,15 @@ Core invariants:
 - Gemini briefing requests must match the exact current incident ID and evidence revision.
 - Production Google identity is derived from a verified signed IAP JWT `sub` claim, not unsigned convenience headers or request JSON.
 - Approval is tied to the exact evidence revision, single-use, and invalidated by fresh investigation.
-- Production writes require explicit startup opt-in plus separate process-owned endpoint/credential configuration.
+- Production writes require a separate explicit process composition; the standard Cloud Run entrypoint has no remediation enable environment switch.
 - Action acceptance is never recovery; Grafana telemetry must prove consecutive healthy samples.
-- Cloud audit receives only bounded structured lifecycle metadata and rejects secret/query/raw-evidence shaped fields.
+- Cloud audit receives only bounded structured lifecycle metadata and rejects secret/query/raw-evidence-shaped fields.
+- The Cloud Run image launches the official Grafana MCP binary directly over stdio; it never relies on Docker-in-Docker or Docker Compose.
 
 ## Completed milestones
 
 - Deterministic broadcast telemetry simulator + Prometheus + provisioned Grafana local stack.
-- Opt-in pinned official `grafana/mcp-grafana:1.1.0` path with write tools disabled.
+- Official Grafana MCP path with write/proxied tools disabled and only datasource/Prometheus/Loki categories exposed.
 - Deterministic four-class incident investigation with exactly six metric reads.
 - MCP Prometheus adapter with fail-closed parsing and query provenance.
 - Approval-gated remediation with distinct write boundary and telemetry-only recovery proof.
@@ -36,123 +37,148 @@ Core invariants:
 - Revision-bound authenticated Gemini briefing endpoint with non-sensitive digest auditing.
 - Verified Google IAP identity provider using signed JWT assertions and stable subject claims.
 - Bounded Google Cloud Logging lifecycle audit sink with explicit production bootstrap selection.
-- Google Cloud deployment guide for IAP + centralized audit boundary.
+- Dedicated non-root Cloud Run API image with direct official Grafana MCP binary execution.
+- Fail-closed Cloud Run entrypoint with fixed IAP + Cloud Logging composition and remediation disabled.
+- Safe deployment helper mounting telemetry/activation/Grafana credentials from Secret Manager.
 
-## Prior handoff
-
-The previous run connected the bounded Gemini commander to the authenticated lifecycle through an exact `incident_id + revision` advisory endpoint. The highest-value remaining production boundary was operator identity and durable centralized audit.
-
-## Run log — 2026-09-07 — Google IAP identity + Cloud Logging audit
+## Run log — 2026-09-07 — production Cloud Run packaging
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Then inspected current `main`, specifically:
+Read this `progress.md` completely before selecting work. Then inspected current `main`, especially:
 
-- `runtime/api.py`
-- `runtime/identity.py`
-- `runtime/incident_service.py`
+- `runtime/Dockerfile`
 - `runtime/bootstrap.py`
-- `runtime/tests/test_identity.py`
-- `runtime/production_remediation.py`
-- root `README.md`
+- `runtime/api.py`
+- `runtime/mcp_metric_client.py`
+- `runtime/mcp_smoke.py`
+- `runtime/tests/`
+- `docker-compose.yml`
+- `GOOGLE_CLOUD_DEPLOYMENT.md`
 
-Researched current official Google documentation for IAP identity, signed-header verification, Cloud Run IAP, and Cloud Logging. The key security requirement confirmed by Google is that applications must validate `X-Goog-IAP-JWT-Assertion`; `X-Goog-Authenticated-User-Id` and `X-Goog-Authenticated-User-Email` are compatibility headers and must not be relied on as the security mechanism if IAP can be bypassed.
+A deployment blocker was found immediately: the current Grafana MCP client default ultimately shells out to `docker compose run ...`. That is appropriate for the local lab but is not a valid production Cloud Run dependency. The Cloud Run artifact therefore needed the official MCP binary inside the API container and an explicit direct-stdio command.
+
+### Current official research used
+
+Verified current official sources before packaging:
+
+- Grafana documents installing and running `mcp-grafana` directly as a binary over stdio.
+- Grafana documents `--enabled-tools`, `--disable-write`, `--disable-proxied`, and Loki result ceilings as supported hardening controls.
+- The latest official `grafana/mcp-grafana` GitHub release visible on 2026-09-07 is `v1.3.0` (published 2026-08-28).
+- Google Cloud Run requires the ingress container to bind to `0.0.0.0` on the injected `PORT`.
+- Google currently recommends direct IAP integration on Cloud Run; the CLI path is `gcloud run deploy ... --no-allow-unauthenticated --iap`, followed by `roles/run.invoker` for the IAP service agent.
+
+References:
+
+- https://grafana.com/docs/grafana/latest/developer-resources/mcp/set-up/install-the-binary/
+- https://grafana.com/docs/grafana/latest/developer-resources/mcp/configure/enable-and-disable-tools/
+- https://github.com/grafana/mcp-grafana/releases/tag/v1.3.0
+- https://cloud.google.com/run/docs/container-contract
+- https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run
 
 ### Exact changes made
 
-Updated `runtime/identity.py`:
+Added `runtime/cloudrun_entrypoint.py`:
 
-- added `GoogleIapIdentityProvider` as a production-capable identity boundary;
-- accepts only the signed `X-Goog-IAP-JWT-Assertion` header;
-- verifies the JWT through Google's documented Python `google.oauth2.id_token.verify_token` path using the IAP public-key URL and the exact configured audience;
-- independently requires issuer `https://cloud.google.com/iap`, exact audience match, and a non-empty stable `sub` claim;
-- derives StageGuard actor identity from `sub`, not email and not unsigned Google identity headers;
-- bounds assertion and subject size;
-- returns generic authentication failures instead of leaking verifier/signature details;
-- imports `google-auth` lazily so local/free operation is unaffected.
+- converts Cloud Run process configuration into a fixed StageGuard bootstrap invocation;
+- requires telemetry mapping, metric activation, Loki activation, and exact IAP audience before startup;
+- validates `PORT` is an integer in `1..65535`;
+- fixes `--identity-mode iap`, `--audit-backend cloud-logging`, and `--host 0.0.0.0`;
+- keeps Gemini optional through `STAGEGUARD_ENABLE_GEMINI`;
+- intentionally exposes no environment switch for `--enable-production-remediation`.
 
-Added `runtime/cloud_audit.py`:
+Added `runtime/requirements-cloudrun.txt`:
 
-- added `GoogleCloudLoggingAuditSink` with lazy `google-cloud-logging` import and ADC-compatible construction;
-- emits one `stageguard.audit.v1` structured entry per `AuditEvent` through `logger.log_struct`;
-- validates event envelope and total serialized size before writing;
-- rejects payload keys shaped like authorization, credentials, passwords, secrets, tokens, endpoints, prompts, PromQL, LogQL, or raw log bodies;
-- rejects binary/list/set payloads, excessive nesting, excessive field counts, and oversized strings;
-- allows exactly one bounded mapping level so existing safe `action_metadata` from production remediation continues to audit correctly;
-- does not claim Cloud Logging is immutable; stronger retention/lock remains a deployment policy.
+- isolates `google-auth`, `google-cloud-logging`, and `google-genai` production dependencies from the standard-library local core.
 
-Updated `runtime/bootstrap.py`:
+Added root `Dockerfile.api`:
 
-- added explicit identity modes: `auto`, `local`, `bearer`, `iap`;
-- added `STAGEGUARD_IAP_AUDIENCE` / `--iap-audience-env` configuration;
-- auto mode prefers IAP when an IAP audience is configured, otherwise preserves loopback-local/static-bearer behavior;
-- non-loopback local identity remains refused;
-- added audit backends `jsonl` and `cloud-logging`;
-- added Cloud Logging project-env/log-name configuration;
-- selecting IAP or Cloud Logging requires the matching optional dependency and fails rather than silently downgrading;
-- Gemini/remediation opt-ins remain independent.
+- uses a dedicated production API image rather than repurposing the simulator Dockerfile;
+- imports the official `mcp-grafana` binary from `grafana/mcp-grafana:1.3.0`;
+- runs StageGuard as non-root UID/GID `10001`;
+- installs CA certificates for outbound HTTPS and only the Google production Python dependencies;
+- sets the Cloud Run port default to `8080` while the entrypoint still honors injected `PORT`;
+- configures the embedded MCP command as direct stdio with `--disable-write`, `--disable-proxied`, `--enabled-tools datasource,prometheus,loki`, and `--max-loki-log-limit 8`;
+- therefore removes Docker/Docker Compose as a runtime requirement for production evidence reads.
 
-Updated tests:
+Added `runtime/tests/test_cloudrun_entrypoint.py`:
 
-- `runtime/tests/test_identity.py` now covers signed IAP identity, spoofed unsigned Google headers, verifier failure redaction, issuer/audience/subject drift, invalid audience configuration, and oversized assertions;
-- added `runtime/tests/test_cloud_audit.py` covering structured writes, deterministic envelope, safe remediation metadata, blocked sensitive/query keys at both supported depths, deep nesting/collection rejection, size bounds, and invalid event envelopes.
+- covers fixed IAP + Cloud Logging composition;
+- proves remediation cannot be enabled through the production entrypoint;
+- covers Gemini opt-in behavior;
+- covers missing config/IAP values failing closed;
+- covers invalid/out-of-range `PORT` rejection.
 
-Documentation:
+Added `scripts/deploy_cloud_run.sh`:
 
-- added `GOOGLE_CLOUD_DEPLOYMENT.md` with Cloud Run/IAP trust model, exact audience form, least-privilege audit guidance, failure behavior, and deployment checklist;
-- updated root `README.md` so verified IAP identity and bounded centralized Cloud Logging audit are part of the current executable architecture rather than future roadmap items.
+- requires project/service/image/runtime-service-account/IAP/Grafana/config-secret identifiers;
+- deploys with `--no-allow-unauthenticated --iap`;
+- mounts telemetry mapping, metric activation, Loki activation, and Grafana token from Secret Manager file paths;
+- grants `roles/run.invoker` to the IAP service agent;
+- does not grant operator IAP access automatically;
+- contains no remediation endpoint/token handling.
 
-### Official references used
+Updated `docker-compose.yml`:
 
-- Google IAP identity: https://cloud.google.com/iap/docs/identity-howto
-- Google IAP signed-header verification: https://cloud.google.com/iap/docs/signed-headers-howto
-- IAP for Cloud Run: https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run
-- Cloud Logging Python: https://cloud.google.com/logging/docs/write-query-log-entries-python
-- Cloud Logging Python client reference: https://cloud.google.com/python/docs/reference/logging/latest
+- advanced the official MCP pin from `1.1.0` to current `1.3.0`;
+- corrected the bounded read categories to include Loki explicitly (`datasource,prometheus,loki`);
+- added `--max-loki-log-limit 8` while retaining write/proxied-tool disablement.
+
+Updated `GOOGLE_CLOUD_DEPLOYMENT.md`:
+
+- documents the actual API image and direct-binary MCP architecture;
+- documents all required environment/file mounts and Secret Manager boundaries;
+- documents the deployment helper and current direct-IAP Cloud Run flow;
+- documents health semantics, failure behavior, and local image validation;
+- clarifies that standard Cloud Run deployment cannot enable remediation via environment configuration.
 
 ### Commits produced this run
 
-- `376bdc61` — add verified Google IAP identity provider
-- `610f22cd` — add bounded Cloud Logging audit sink
-- `954b098a` — wire IAP identity and Cloud Logging audit into bootstrap
-- `b2ef0a43` — test signed IAP identity boundary
-- `f3469b83` — test bounded Cloud Logging audit sink
-- `de66f878` — allow bounded remediation metadata in audit
-- `2f35e1bc` — cover bounded nested remediation audit metadata
-- `231b3ab5` — document IAP and Cloud Logging production boundary
-- `b43ce378` — document production IAP identity and durable audit
+- `c4ee5446` — fail-closed Cloud Run API entrypoint
+- `acd6f905` — Cloud Run Google dependencies
+- `18c8c31e` — production API image
+- `981433bf` — Cloud Run entrypoint tests
+- `e870c4ad` — pin API image to current Grafana MCP release
+- `30aead51` — update local MCP pin/read categories
+- `59069eee` — safe Cloud Run deployment helper
+- `03028348` — document deployable Cloud Run artifact
 
 ### Tests / checks / results
 
 No GitHub Actions workflow was created, triggered, or rerun.
 
-This automation environment still does not expose a runnable checkout of the repository, and prior direct `git clone` attempts fail DNS resolution for `github.com`. Therefore the repository Python suite was not executed in this run and is **not claimed as passing**.
+A direct clean checkout + targeted test run was attempted with:
 
-A local Python parser check was used for the only non-obvious syntax form introduced in the identity tests (`lambda *args, keyword_default=...`), which is valid Python syntax. The changed repository files were also re-read through the authenticated GitHub connector while reviewing integration compatibility.
+```text
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git ...
+python -m unittest tests.test_cloudrun_entrypoint -v
+```
 
-No Grafana, Loki, Gemini, IAP, Cloud Logging, operator, or remediation credentials were used.
+The environment failed before Python started because DNS resolution for `github.com` is still unavailable (`Could not resolve host: github.com`). Therefore the new test and full Python suite are **not claimed as passing** in this environment.
+
+Repository state, official release metadata, and all changed files were inspected through the authenticated GitHub connector. No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credentials were used. No production resource was deployed.
 
 ### Decisions made
 
-1. **Signed IAP JWT is the sole Google production identity evidence.** Unsigned compatibility headers are ignored for authentication.
-2. **Stable `sub` is the audit actor identifier.** Email is unnecessary PII for StageGuard's authorization/audit boundary.
-3. **IAP audience is process configuration.** It cannot be supplied by HTTP clients.
-4. **Google dependencies remain lazy.** Local/open-source operation stays credential-free until an operator explicitly selects Google production modes.
-5. **Cloud audit is bounded before provider I/O.** StageGuard does not send arbitrary messages or raw evidence to Cloud Logging.
-6. **Existing remediation metadata remains auditable.** The serializer permits one bounded scalar mapping level rather than breaking the production remediation lifecycle.
-7. **Cloud Logging is centralized/durable, not inherently immutable.** Long-retention or locked storage is documented as an external deployment control rather than overstated in code.
-8. **Static bearer remains fallback, not the preferred Google Cloud production path.** IAP is now the documented internet-facing deployment choice.
+1. **No Docker-in-Docker in Cloud Run.** The official Grafana MCP binary is embedded and launched directly over stdio.
+2. **MCP stays indispensable but tightly bounded.** Only datasource, Prometheus, and Loki categories are available; writes and proxied tools are disabled.
+3. **Pin to current official MCP release (`1.3.0`).** Version movement remains deliberate and should be acceptance-tested before future upgrades.
+4. **Production image is separate from the simulator image.** Local telemetry development stays lightweight and unchanged.
+5. **Cloud Run composition fails closed.** Missing evidence activations, telemetry mapping, IAP audience, or invalid `PORT` prevents startup.
+6. **Remediation cannot be accidentally enabled by an environment variable.** A write-enabled deployment must use an intentionally different command/composition.
+7. **Secrets/config are mounted as files.** The deployment helper does not place Grafana token contents directly on the CLI.
+8. **Direct Cloud Run IAP is now the documented default.** No load balancer is required solely to obtain IAP protection on current Cloud Run.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted in this automation environment because no runnable checkout is available here.
-- The IAP verifier has not yet been exercised against a real Cloud Run service and real signed IAP assertion.
-- The Cloud Logging sink has not yet been exercised against a real Google Cloud project/service account.
-- Full Docker → Grafana → official MCP metric/Loki acceptance remains unverified on a Docker-capable host.
-- Optional Gemini has not yet been exercised against a live Vertex AI project/ADC session.
+- The deterministic Python suite remains unexecuted in this environment because a runnable checkout cannot be obtained via DNS.
+- `Dockerfile.api` has not yet been built on a Docker-capable host, so the cross-stage `/app/mcp-grafana` copy from `grafana/mcp-grafana:1.3.0` still needs real image-build acceptance.
+- No real Cloud Run + IAP signed assertion has exercised `GoogleIapIdentityProvider` end-to-end.
+- No real Secret Manager-mounted telemetry/activation/Grafana token set has exercised the deploy helper.
+- No live Grafana Cloud/self-hosted production instance has yet proven metric + Loki reads through the embedded `mcp-grafana:1.3.0` binary.
+- Optional Gemini has not yet been exercised against live Vertex AI ADC.
 - No operator web console exists yet.
-- No checked-in deployable Cloud Run image/manifest currently packages the full incident API plus optional Google dependencies; the existing runtime Dockerfile is simulator-focused.
 
 ## Single best next step
 
-**Package the actual incident API as a production Cloud Run service without weakening the current boundaries: add a dedicated API Dockerfile/requirements or equivalent reproducible image, non-root runtime, explicit health check, environment contract, and a deployment manifest/script that selects `--identity-mode iap` + `--audit-backend cloud-logging` while keeping remediation disabled by default. Add credential-free container/config tests where possible. This turns the newly implemented identity/audit boundary into a deployable artifact rather than documentation-only composition.**
+**Add a production readiness endpoint/state that distinguishes process liveness from evidence-plane readiness, then add startup/readiness acceptance around the embedded `mcp-grafana:1.3.0` binary: verify both pinned datasource identities, activation freshness, and one bounded read-only MCP capability handshake before reporting ready. Keep `/healthz` cheap/liveness-only, add `/readyz` with no raw evidence or secret leakage, and test failure modes for missing MCP binary, Grafana auth failure, datasource drift, and expired activations. This is the highest-value next increment because the Cloud Run artifact now exists, but orchestration still needs a reliable signal that it is safe to receive incident traffic.**
