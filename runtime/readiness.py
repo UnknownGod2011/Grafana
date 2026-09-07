@@ -2,9 +2,9 @@
 """Fail-closed StageGuard evidence-plane readiness checks.
 
 Readiness is intentionally distinct from process liveness. The probe verifies
-activation freshness and pinned datasource identities, then performs only the
-read-only MCP initialize/tools-list handshakes already enforced by the official
-Grafana MCP adapters. It never executes PromQL or LogQL and never returns raw
+activation freshness and pinned datasource identities, then performs the
+read-only MCP initialize/tools-list handshake plus one bounded datasource lookup
+per evidence plane. It never executes PromQL or LogQL and never returns raw
 configuration, datasource identifiers, queries, credentials, or provider errors.
 """
 from __future__ import annotations
@@ -27,6 +27,28 @@ class ReadinessResult:
 
     def to_dict(self) -> dict[str, object]:
         return {"ready": self.ready, "checks": dict(self.checks)}
+
+
+def _verify_mcp_datasource_access(client: object, datasource_uid: str) -> None:
+    """Prove the configured UID is readable through Grafana without a data query.
+
+    ``connect()`` verifies the expected query tool exists and is read-only, but
+    tools/list alone need not contact Grafana. ``get_datasource`` is a bounded,
+    idempotent, read-only Grafana API call and therefore also proves credential,
+    organization, network, and datasource-scope access without consuming live
+    metric/log evidence.
+    """
+    connect = getattr(client, "connect")
+    connect()
+    transport = getattr(client, "_client", None)
+    if transport is None:
+        raise RuntimeError("MCP transport unavailable after connect")
+    result = transport.request(
+        "tools/call",
+        {"name": "get_datasource", "arguments": {"uid": datasource_uid}},
+    )
+    if not isinstance(result, dict) or result.get("isError"):
+        raise RuntimeError("datasource lookup failed")
 
 
 class EvidencePlaneReadinessProbe:
@@ -90,7 +112,7 @@ class EvidencePlaneReadinessProbe:
                     checks["loki_activation"] = "failed"
 
             try:
-                self._metrics.connect()
+                _verify_mcp_datasource_access(self._metrics, self._metrics.datasource_uid)
                 checks["prometheus_mcp"] = "ok"
             except Exception:
                 checks["prometheus_mcp"] = "failed"
@@ -99,7 +121,7 @@ class EvidencePlaneReadinessProbe:
                 checks["loki_mcp"] = "missing"
             else:
                 try:
-                    self._logs.connect()
+                    _verify_mcp_datasource_access(self._logs, self._logs.datasource_uid)
                     checks["loki_mcp"] = "ok"
                 except Exception:
                     checks["loki_mcp"] = "failed"
