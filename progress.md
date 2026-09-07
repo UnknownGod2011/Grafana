@@ -4,172 +4,124 @@
 
 StageGuard is a personal open-source incident commander for live media workflows. The executable production path now covers:
 
-`strict telemetry mapping → eight-read metric preflight → metric activation pin → one bounded Loki preflight → Loki contract/datasource activation pin → official Grafana MCP Prometheus + Loki adapters → six-read metric diagnosis → mandatory production Loki corroboration → authenticated IncidentService → optional revision-bound Gemini advisory briefing → revision-bound approval → governed allowlisted remediation → credential-isolated HTTPS transport → two-read telemetry recovery verification → bounded local/Cloud Logging audit → direct-IAP Cloud Run API artifact → independent /healthz liveness + fail-closed /readyz evidence readiness`
+`strict telemetry mapping → metric/Loki activation pins → official Grafana MCP evidence → deterministic diagnosis + Loki corroboration → authenticated IncidentService → optional revision-bound Gemini briefing → approval-gated remediation → telemetry recovery verification → bounded audit → Cloud Run/IAP deployment → independent liveness/readiness → bounded readiness cache/backoff + StageGuard self-observability`
 
 Core invariants:
 
 - Grafana remains the operational evidence plane; infrastructure write credentials remain separate.
 - Production Prometheus and Loki datasource identities and semantic contracts are pinned by expiring activation artifacts.
-- Production investigation uses six metric reads first and one bounded Loki corroboration query only after metrics independently diagnose.
-- Missing, truncated, or scope-inconsistent Loki evidence forces abstention.
-- Gemini is advisory only and cannot mutate diagnosis, approval, remediation, or recovery state.
-- Gemini briefing requests must match the exact current incident ID and evidence revision.
-- Production Google identity is derived from a verified signed IAP JWT `sub` claim, not unsigned convenience headers or request JSON.
-- Approval is tied to the exact evidence revision, single-use, and invalidated by fresh investigation.
-- Production writes require a separate explicit process composition; the standard Cloud Run entrypoint has no remediation enable environment switch.
-- Action acceptance is never recovery; Grafana telemetry must prove consecutive healthy samples.
-- Cloud audit receives only bounded structured lifecycle metadata and rejects secret/query/raw-evidence-shaped fields.
-- The Cloud Run image launches the official Grafana MCP binary directly over stdio; it never relies on Docker-in-Docker or Docker Compose.
-- `/healthz` proves only HTTP process liveness. `/readyz` independently re-verifies activation freshness/pins and bounded read-only Grafana MCP datasource access before incident traffic should be accepted.
+- Activation freshness and contract/datasource pins are revalidated locally on every readiness request.
+- External Grafana MCP readiness probes are bounded and cached so frequent health polling cannot stampede Grafana.
+- A previous external success may be reported as `stale` only within a short fixed grace window after a transient refresh failure; once that window expires StageGuard becomes unready.
+- A local activation failure is never masked by cached or stale external reachability.
+- Gemini remains advisory only and cannot mutate diagnosis, approval, remediation, or recovery state.
+- Production writes remain disabled in the standard Cloud Run composition.
+- `/healthz` proves process liveness only; `/readyz` proves the bounded evidence plane; `/metrics` exposes fixed, non-sensitive StageGuard readiness telemetry.
 
 ## Completed milestones
 
 - Deterministic broadcast telemetry simulator + Prometheus + provisioned Grafana local stack.
-- Official Grafana MCP path with write/proxied tools disabled and only datasource/Prometheus/Loki categories exposed.
-- Deterministic four-class incident investigation with exactly six metric reads.
-- MCP Prometheus adapter with fail-closed parsing and query provenance.
-- Approval-gated remediation with distinct write boundary and telemetry-only recovery proof.
-- Strict configurable production telemetry mapping and eight-slot readiness preflight.
-- SHA-256 pinned expiring metric activation for non-demo profiles.
-- Bounded semantic Loki corroboration using official Grafana MCP `query_loki_logs`.
-- Separate Loki activation pinning semantic log contract and actual Loki datasource identity.
-- Credential-isolated HTTPS remediation transport and loopback idempotency receiver.
-- Bounded Gemini incident-commander layer with strict structured context/output validation.
-- Revision-bound authenticated Gemini briefing endpoint with non-sensitive digest auditing.
-- Verified Google IAP identity provider using signed JWT assertions and stable subject claims.
-- Bounded Google Cloud Logging lifecycle audit sink with explicit production bootstrap selection.
-- Dedicated non-root Cloud Run API image with direct official Grafana MCP binary execution.
-- Fail-closed Cloud Run entrypoint with fixed IAP + Cloud Logging composition and remediation disabled.
-- Safe deployment helper mounting telemetry/activation/Grafana credentials from Secret Manager.
-- Production readiness probe that distinguishes liveness from evidence-plane readiness and uses official MCP read-only datasource lookup rather than live incident queries.
+- Official Grafana MCP integration with datasource/Prometheus/Loki read tools and writes/proxied tools disabled.
+- Deterministic incident investigation and bounded Loki corroboration.
+- Strict configurable telemetry mapping, metric preflight, Loki preflight, and expiring activation pins.
+- Approval-gated remediation and telemetry-only recovery proof.
+- Credential-isolated HTTPS remediation transport.
+- Bounded revision-bound Gemini incident-commander briefing layer.
+- Verified Google IAP identity provider and bounded Google Cloud Logging audit sink.
+- Dedicated non-root Cloud Run image with embedded official Grafana MCP binary and remediation disabled.
+- `/healthz` liveness + fail-closed `/readyz` using read-only MCP `get_datasource` checks.
+- Persistent readiness probe with external-probe TTL, failure backoff, bounded stale-on-transient-failure semantics, single-flight locking, and Prometheus-format self-observability.
 
-## Run log — 2026-09-07 — evidence-plane readiness boundary
+## Run log — 2026-09-07 — readiness cache/backoff and self-observability
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Then inspected current `main`, especially:
+Read `progress.md` completely before choosing work. Then inspected the current repository state, especially:
 
+- `runtime/readiness.py`
 - `runtime/api.py`
-- `runtime/bootstrap.py`
-- `runtime/activation.py`
-- `runtime/log_activation.py`
-- `runtime/mcp_metric_client.py`
-- `runtime/mcp_log_client.py`
-- `runtime/mcp_smoke.py`
-- `runtime/incident_service.py`
-- `runtime/tests/test_api.py`
+- `runtime/tests/test_readiness.py`
+- `runtime/tests/test_readiness_api.py`
+- `README.md`
 - `GOOGLE_CLOUD_DEPLOYMENT.md`
 
-The highest-value gap matched the previous handoff: `/healthz` was only process liveness, while orchestration had no way to distinguish a healthy HTTP process from an expired activation, missing embedded MCP binary, inaccessible pinned datasource, or broken Grafana credential/network path.
-
-### Current official research used
-
-Verified current Grafana MCP behavior before choosing the readiness operation:
-
-- Grafana's MCP tools reference documents `get_datasource` as a read-only datasource tool requiring `datasources:read` on the target datasource scope.
-- Current official `mcp-grafana` source implements `get_datasource` by UID and marks it read-only/idempotent/non-destructive.
-- This makes a UID-scoped `get_datasource` call a better readiness primitive than `tools/list`: it actually reaches Grafana and proves credential/network/organization/datasource access without executing PromQL or LogQL or consuming incident evidence.
-
-References:
-
-- https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
-- https://github.com/grafana/mcp-grafana/blob/main/tools/datasources.go
-- https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
+The highest-value gap matched the previous handoff: every `/readyz` request constructed a fresh probe and therefore performed two external Grafana MCP datasource lookups, so aggressive platform polling could create avoidable load and concurrent probe stampedes.
 
 ### Exact changes made
 
-Added `runtime/readiness.py`:
+Updated `runtime/readiness.py`:
 
-- introduces `EvidencePlaneReadinessProbe` and bounded `ReadinessResult`;
-- re-verifies metric activation freshness, production/profile hash, and pinned Prometheus datasource identity on every readiness check;
-- re-verifies Loki activation freshness, semantic log contract hash, and pinned Loki datasource identity on every readiness check;
-- calls each existing MCP adapter's `connect()` so initialize/tools-list still prove the required query tool is exposed with `readOnlyHint=true`;
-- then performs exactly one read-only official Grafana MCP `get_datasource` lookup for the pinned Prometheus UID and one for the pinned Loki UID;
-- does not run PromQL or LogQL and therefore does not create incident evidence or consume investigation query budget;
-- catches provider/MCP exceptions and exposes only bounded `ok`/`failed`/`missing` states, never exception strings, datasource UIDs, endpoints, credentials, queries, activation hashes, or raw evidence;
-- serializes concurrent readiness checks with a lock so one service process does not race multiple MCP readiness calls through the same clients.
+- keeps activation verification local and mandatory on every readiness request;
+- adds a 15-second external Grafana MCP success TTL by default;
+- adds a 5-second retry backoff after external probe failures;
+- adds a 30-second maximum age for stale-on-transient-failure behavior;
+- returns `stale` only when a previous successful external probe is still inside that bounded grace window;
+- makes `stale` readiness-eligible only for external MCP checks; activation checks must still be `ok`;
+- serializes readiness evaluation with one lock so concurrent pollers share a single external probe rather than stampeding Grafana;
+- classifies external failures only as `connect`, `lookup`, or `unknown`, discarding provider exception strings;
+- records only fixed non-sensitive readiness counters and last external probe latency;
+- exposes those metrics through `prometheus_metrics()` without datasource IDs, URLs, credentials, activation hashes, queries, or raw evidence;
+- validates cache policy at construction time.
 
 Updated `runtime/api.py`:
 
-- kept `GET /healthz` unchanged as cheap liveness-only `{ "ok": true }`;
-- added unauthenticated application-level `GET /readyz` for platform health machinery;
-- returns HTTP `200` only when every readiness check is `ok`, otherwise HTTP `503`;
-- returns only the four coarse checks: `metric_activation`, `loki_activation`, `prometheus_mcp`, and `loki_mcp`;
-- unexpected probe failures are fail-closed and redacted to the same bounded check schema;
-- incremented the StageGuard server version string to `0.4`.
+- creates/reuses one service-owned `EvidencePlaneReadinessProbe` instead of reconstructing the probe per request;
+- keeps `/healthz` unchanged and independent from Grafana;
+- keeps `/readyz` coarse and fail-closed while allowing bounded `stale` external state when the probe marks it safe;
+- adds `GET /metrics` with Prometheus text format for StageGuard readiness self-observability;
+- keeps `/metrics` application-unauthenticated for platform scraping and exposes only the bounded fixed metric schema;
+- redacts unexpected metrics-generation failures;
+- increments the HTTP server version to `StageGuard/0.5`.
 
-Added `runtime/tests/test_readiness.py`:
+Updated `runtime/tests/test_readiness.py`:
 
-- covers both fresh activation pins and both bounded datasource lookups;
-- proves the lookup is exactly `tools/call → get_datasource → {uid: pinned_uid}`;
-- covers expired metric activation;
-- covers Loki datasource/contract drift;
-- covers missing MCP binary during connect;
-- covers Grafana auth/network failure during real datasource lookup;
-- covers missing Loki plane;
-- asserts provider details such as tokens, private URLs, and secret paths do not appear in the public result.
+- proves repeated polling inside the TTL performs only one Prometheus and one Loki external probe;
+- proves activation verification still runs on every request despite cached external results;
+- proves a refresh failure becomes `stale` only inside the grace window and becomes `failed` after it expires;
+- proves local activation failure immediately makes readiness false even while external reachability is cached healthy;
+- proves concurrent polling single-flights the external probes;
+- covers bounded failure-class metrics and verifies provider secrets/URLs/datasource UIDs cannot appear in emitted metrics;
+- covers invalid cache-policy rejection.
 
-Added `runtime/tests/test_readiness_api.py`:
+Updated `runtime/tests/test_readiness_api.py`:
 
-- proves `/healthz` does not invoke readiness work;
-- proves `/readyz` returns `200` only for a fully ready evidence plane;
-- proves `/readyz` returns `503` without requiring API bearer/IAP identity at the application layer;
-- proves unexpected readiness exceptions are redacted and fail closed.
-
-Updated `GOOGLE_CLOUD_DEPLOYMENT.md`:
-
-- documents the liveness/readiness split;
-- documents the exact readiness response contract;
-- documents that readiness uses official MCP `get_datasource` rather than PromQL/LogQL;
-- documents expected `503` behavior for expired/drifted activation, missing MCP binary, Grafana auth/network/org failure, or inaccessible pinned datasource;
-- adds local `curl /healthz` + `curl /readyz` acceptance guidance.
+- covers HTTP `200` for bounded `stale` external readiness;
+- covers `/metrics` Prometheus text behavior without operator authentication;
+- covers metrics-error redaction.
 
 ### Commits produced this run
 
-- `9b3cf48b` — add bounded evidence-plane readiness probe
-- `cf756c3e` — expose fail-closed evidence readiness endpoint
-- `13fb3673` — test evidence-plane readiness failure modes
-- `1570c27a` — test readiness HTTP contract
-- `c0b79caa` — verify pinned datasources through Grafana MCP readiness
-- `b638e892` — cover bounded Grafana datasource readiness lookup
-- `7c209a32` — document Cloud Run evidence readiness contract
+- `8faf1153` — bounded readiness caching/backoff and self-observability core
+- `62205931` — persistent readiness probe and `/metrics` API surface
+- `5c3a92ea` — cache/stale/single-flight/self-metrics regression coverage
+- `d7582fa8` — readiness and metrics HTTP contract tests
 
 ### Tests / checks / results
 
 No GitHub Actions workflow was created, triggered, rerun, or used as a workaround.
 
-A direct clean checkout + targeted local test run was attempted with:
+The repository was inspected and modified through the authenticated GitHub connector. This execution environment still does not provide a runnable checkout through normal GitHub DNS, so the Python suite and Docker image were not executed here and are **not claimed as passing**.
 
-```text
-git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard-run6
-cd /tmp/stageguard-run6/runtime
-python -m unittest tests.test_readiness tests.test_readiness_api tests.test_api tests.test_cloudrun_entrypoint -v
-```
-
-The environment again failed before Python started because DNS resolution for `github.com` is unavailable (`Could not resolve host: github.com`). Therefore the new tests and full Python suite are **not claimed as passing** in this environment.
-
-Repository content and commit state were inspected through the authenticated GitHub connector. No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credential was used. No production Cloud Run or Grafana resource was changed.
+No Grafana, Loki, Gemini, IAP, Cloud Logging, Secret Manager, operator, or remediation credential was used. No production Cloud Run or Grafana resource was changed.
 
 ### Decisions made
 
-1. **Liveness and readiness stay separate.** `/healthz` must never become expensive or dependent on Grafana.
-2. **Readiness re-checks activation expiry continuously.** A container that was ready at startup must become unready when its activation expires.
-3. **`tools/list` alone is insufficient.** It proves MCP capability shape but may not prove real Grafana access, so readiness adds a bounded UID-scoped `get_datasource` call.
-4. **No readiness PromQL/LogQL.** Platform health checks must not distort telemetry, incident evidence, or query-accounting invariants.
-5. **Both evidence planes must be ready.** Production StageGuard is not considered ready with only Prometheus or only Loki.
-6. **Provider errors never cross `/readyz`.** Health endpoints disclose only coarse component state.
-7. **The official MCP binary remains indispensable.** Readiness itself now depends on real read-only Grafana MCP operations rather than direct Grafana HTTP shortcuts.
+1. **Cache only external reachability, never activation validity.** Expired or drifted activation must fail readiness immediately.
+2. **Bound stale readiness by age, not indefinitely.** A transient provider/network failure can reuse a recent success only up to 30 seconds from the last confirmed success.
+3. **Single-flight polling per process.** The readiness lock ensures concurrent health requests cannot multiply Grafana MCP calls.
+4. **No PromQL/LogQL in readiness.** External checks remain `get_datasource`-based and do not consume incident evidence.
+5. **Self-observability stays non-sensitive.** Metric labels are fixed to evidence-plane/failure-class enums and never contain user configuration or provider strings.
+6. **`/metrics` is observational only.** It does not run a readiness check or contact Grafana; it exposes the last in-process readiness telemetry.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted in this environment because a runnable checkout cannot be obtained via DNS.
+- The deterministic Python suite remains unexecuted in this environment because a runnable checkout cannot be obtained through normal GitHub DNS.
 - `Dockerfile.api` still needs a real Docker build acceptance on a Docker-capable host.
-- The new `get_datasource` readiness calls have not yet been exercised against a real `mcp-grafana:1.3.0` + Grafana Cloud/self-hosted instance.
+- Cache/stale behavior has not yet been exercised against a real `mcp-grafana:1.3.0` + Grafana Cloud/self-hosted instance.
 - No real Cloud Run + IAP signed assertion has exercised the production API end-to-end.
-- No real Secret Manager-mounted telemetry/activation/Grafana token set has exercised the deployment helper.
 - Optional Gemini has not yet been exercised against live Vertex AI ADC.
 - No operator web console exists yet.
 
 ## Single best next step
 
-**Add readiness result caching/backoff with a short bounded TTL and explicit stale semantics, plus runtime metrics for readiness state/latency/failure class that do not expose secrets. Cloud Run and external health systems can poll frequently; without caching, every `/readyz` currently performs two MCP datasource calls. The next increment should keep activation-expiry checks local on every request while rate-limiting external Grafana/MCP probes (for example 10–30 seconds), expose Prometheus-format self-observability for StageGuard itself, and add deterministic tests proving concurrent health polling cannot stampede Grafana or turn a transient single probe failure into unsafe readiness.**
+**Build the first production operator console as a read-mostly incident cockpit: authenticated incident status, deterministic evidence/revision display, bounded Gemini briefing, explicit approval confirmation, and recovery state, while keeping all Grafana/remediation credentials server-side. Add deterministic HTTP/API tests and a minimal static UI that can run behind the existing IAP-protected Cloud Run service without introducing a separate frontend secret boundary.**
