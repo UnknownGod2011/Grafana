@@ -160,6 +160,22 @@ class ExecutionSafetyApiTests(unittest.TestCase):
         self.assertIn("stageguard_remediation_execution_uncertain 1", metrics)
         self.assertNotIn(self.remediation.calls[0][2], metrics)
 
+    def test_incident_endpoint_exposes_only_bounded_reconciliation_phase(self):
+        status, body = self.request_json("GET", "/v1/incident", token="operator-secret")
+        self.assertEqual(200, status)
+        self.assertEqual("execution_uncertain", body["checkpoint_state"])
+        self.assertEqual("reload_required", body["execution_reconciliation_state"])
+        serialized = json.dumps(body)
+        self.assertNotIn(self.remediation.calls[0][2], serialized)
+        self.assertNotIn("accepted", serialized)
+        self.assertNotIn("not_found", serialized)
+
+    def test_incident_lifecycle_state_requires_authentication(self):
+        status, body = self.request_json("GET", "/v1/incident")
+        self.assertEqual(401, status)
+        self.assertEqual("unauthorized", body["error"])
+        self.assertNotIn("execution_reconciliation_state", body)
+
     def test_authenticated_reconciliation_requires_reload_and_never_replays_action(self):
         status, body = self.request_json(
             "POST", "/v1/execution/reconcile", {}, "operator-secret"
@@ -175,14 +191,22 @@ class ExecutionSafetyApiTests(unittest.TestCase):
         )
         self.assertEqual(200, status)
         self.assertEqual("execution_uncertain", body["checkpoint_state"])
+        self.assertEqual("reloaded", body["execution_reconciliation_state"])
         self.assertIsNotNone(body["incident"]["approval"])
         self.assertEqual(1, len(self.remediation.calls))
+
+        # A fresh GET after browser/process UI refresh must preserve the safe
+        # recovery phase instead of forcing operators to infer it from errors.
+        status, refreshed = self.request_json("GET", "/v1/incident", token="operator-secret")
+        self.assertEqual(200, status)
+        self.assertEqual("reloaded", refreshed["execution_reconciliation_state"])
 
         status, body = self.request_json(
             "POST", "/v1/execution/reconcile", {}, "operator-secret"
         )
         self.assertEqual(200, status)
         self.assertEqual("synchronized", body["checkpoint_state"])
+        self.assertEqual("clear", body["execution_reconciliation_state"])
         self.assertIsNone(body["incident"]["approval"])
         self.assertIsNone(body["incident"]["outcome"])
         self.assertEqual(1, len(self.remediation.calls), "reconciliation must never replay remediation")
