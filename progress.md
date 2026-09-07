@@ -2,136 +2,142 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable path covers strict telemetry mapping, metric/Loki activation pins, official Grafana MCP evidence, deterministic diagnosis with Loki corroboration, authenticated incident lifecycle orchestration, optional revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, bounded durable audit reconstruction, signed GCS incident checkpoints with strict generation CAS, checkpoint observability, fail-closed conflict recovery, remediation execution-uncertainty recovery, Cloud Run/IAP deployment, operator liveness/readiness/self-observability, and a same-origin operator cockpit with restart-safe lifecycle recovery guidance.
+StageGuard is a personal open-source incident commander for live media workflows. The executable path now includes strict telemetry mapping, metric/Loki activation pins, official Grafana MCP evidence, deterministic diagnosis with Loki corroboration, authenticated lifecycle orchestration, optional revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, bounded durable audit reconstruction, signed GCS checkpoints with strict generation CAS, fail-closed conflict recovery, remediation execution reconciliation, Cloud Run/IAP deployment, operator health/readiness/self-observability, a same-origin recovery cockpit, and checkpoint schema v2 with a durable pre-side-effect execution phase.
 
 Core invariants:
 
 - Grafana remains the operational evidence plane; infrastructure write credentials remain separate.
 - Gemini is advisory only and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Human approval is single-use and bound to the exact deterministic evidence revision.
-- Fresh investigation clears prior approval/outcome before persisting the new revision.
-- Restored checkpoints must match configured telemetry scope and recompute to the persisted evidence revision.
-- Production GCS checkpoints require HMAC-SHA-256 authenticity plus strict pinned-generation compare-and-swap.
-- Generation conflicts fail closed; losing state is never merged or retried automatically.
-- A CAS conflict after remediation contact is execution ambiguity and remains unready until durable-winner reload, provider reconciliation where required, and fresh Grafana evidence.
-- A restored production checkpoint with approval but no outcome is also treated as execution-ambiguous; restart can never make that approval executable without provider reconciliation and fresh evidence.
-- Reconciliation never replays remediation; the deterministic operation id remains server-owned and is never accepted from the browser/API caller.
-- Provider metadata, credentials, Gemini output, Grafana secrets, checkpoint signing material, and provider reconciliation detail are not exposed to the browser.
-- `/healthz` proves process liveness only; `/readyz` proves bounded evidence-plane and lifecycle consistency.
+- Production remediation uses a deterministic idempotency identity and never automatically replays an ambiguous side effect.
+- Checkpoint schema v2 persists only a bounded execution phase (`none`, `approved`, `dispatching`, `resolved`); provider detail and operation ids remain outside durable checkpoint state.
+- A production provider is never contacted until `dispatching` has been durably persisted.
+- A v2 `approved` checkpoint proves dispatch has not started and can safely survive restart.
+- A restored `dispatching` checkpoint or legacy-v1 pending approval is execution-ambiguous and requires reconciliation plus fresh Grafana evidence.
+- Production GCS checkpoints require HMAC-SHA-256 authenticity plus strict generation compare-and-swap.
+- `/healthz` proves process liveness only; `/readyz` also requires evidence-plane and lifecycle consistency.
 
 ## Completed milestones
 
 - Deterministic broadcast telemetry simulator + Prometheus + provisioned Grafana local stack.
-- Official Grafana MCP integration with datasource/Prometheus/Loki read tools and write/proxy tools disabled.
-- Deterministic incident investigation and bounded Loki corroboration.
-- Strict configurable telemetry mapping, metric/Loki preflight, and expiring activation pins.
+- Official Grafana MCP integration with read-only datasource/Prometheus/Loki evidence tools.
+- Deterministic incident investigation with bounded Loki corroboration.
+- Strict configurable telemetry mapping, activation preflight, and expiring activation pins.
 - Approval-gated remediation and Grafana telemetry-only recovery proof.
-- Credential-isolated HTTPS production remediation transport with deterministic idempotency identity.
-- Bounded revision-bound Gemini incident-commander briefing layer.
-- Verified Google IAP identity provider and bounded Cloud Logging audit sink/reader.
-- Dedicated non-root Cloud Run image with embedded official Grafana MCP binary and remediation disabled by default.
-- `/healthz`, fail-closed `/readyz`, readiness caching/backoff, and Prometheus-format self-observability.
-- Authenticated same-origin operator cockpit and bounded audit timeline.
-- Signed GCS lifecycle checkpoints with strict generation CAS, conflict metrics, explicit winner reload, and fail-closed remediation execution uncertainty.
-- Restart-safe operator recovery UX exposing only `clear`, `reload_required`, or `reloaded`.
-- Provider-neutral, read-only HTTP idempotency reconciliation transport contract with bounded result states.
-- Explicit production remediation now requires and wires a dedicated read-only reconciliation endpoint.
-- Concrete HTTP transport lifecycle coverage for accepted/not-found/timeout/malformed/repeated reconciliation without remediation replay.
-- Restart-safe production approval recovery: restored approval-without-outcome checkpoints fail closed before any external action can be replayed.
+- Credential-isolated HTTPS remediation transport with deterministic idempotency identity.
+- Revision-bound Gemini incident-commander briefing layer.
+- Verified Google IAP identity and bounded Cloud Logging audit integration.
+- Non-root Cloud Run image with embedded official Grafana MCP binary.
+- `/healthz`, fail-closed `/readyz`, readiness caching/backoff, and Prometheus self-observability.
+- Authenticated operator cockpit, bounded audit timeline, conflict reload, and execution reconciliation UX.
+- Signed GCS lifecycle checkpoints with strict generation CAS and fixed-label observability.
+- Provider-neutral GET-only reconciliation transport with bounded `accepted` / `not_found` / `unknown` states.
+- Explicit production reconciliation endpoint wiring and concrete no-replay lifecycle coverage.
+- Checkpoint schema v2 durable remediation execution phase with backward-compatible v1 restore.
 
-## Run log — 2026-09-08 — concrete reconciliation lifecycle + restart-safe approval boundary
+## Run log — 2026-09-08 — checkpoint schema v2 durable dispatch barrier
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/execution_safety.py`;
-- `runtime/production_remediation.py`;
-- `runtime/http_remediation_transport.py`;
-- `runtime/tests/test_execution_safety.py`;
-- `runtime/incident_service.py`;
-- `runtime/telemetry.py`;
 - `runtime/incident_checkpoint.py`;
+- `runtime/incident_service.py` around checkpoint save/restore and `execute_approved()`;
+- `runtime/execution_safety.py`;
+- `runtime/remediation.py` approval and deterministic operation-id semantics;
+- `runtime/tests/test_incident_checkpoint.py`;
+- `runtime/tests/test_execution_safety.py`;
+- `runtime/tests/test_gcs_checkpoint.py`;
 - `EXECUTION_UNCERTAINTY.md`.
 
-The prior handoff requested full execution-uncertainty tests through the concrete HTTPS transport. While tracing that path, a higher-severity restart gap was found: execution uncertainty existed only in process memory. A process restart with a persisted production approval and no outcome could not prove whether the previous process had already contacted the remediation provider, so restoring that approval as executable risked replaying an external action.
+The prior handoff requested a durable authenticated remediation execution-phase marker. The important design constraint was to make the marker useful at the exact side-effect boundary rather than merely adding schema metadata.
 
 ### Exact changes made
 
-Added `runtime/tests/test_execution_safety_http_transport.py`:
+Updated `runtime/incident_checkpoint.py`:
 
-- exercises `ExecutionSafeIncidentService` through `AllowlistedProductionRemediationClient` and concrete `HttpRemediationTransport`;
-- verifies execution uses exactly one POST before a forced post-provider checkpoint conflict;
-- verifies accepted reconciliation uses a bodyless GET, collects fresh evidence, clears stale approval/outcome, and never replays execution;
-- verifies reconciliation HTTP 404 maps to bounded `not_found` and never replays execution;
-- verifies timeout keeps `execution_uncertain` fail-closed;
-- verifies malformed provider documents keep uncertainty blocked and provider detail does not escape the coarse error;
-- verifies repeated reconciliation after success performs no provider network request and no remediation replay.
-
-Corrected the concrete lifecycle fixture to the real default telemetry allowlist (`broadcast-alpha` / `uplink-b`) so the production adapter reaches its transport rather than rejecting the target early.
+- introduced `stageguard.incident-checkpoint.v2` as the write schema while retaining v1 reads;
+- added bounded execution phases `none`, `approved`, `dispatching`, and `resolved`;
+- added strict lifecycle/phase consistency validation;
+- ordinary checkpoint serialization derives `none`, `approved`, or `resolved` from approval/outcome state;
+- v1 pending approvals restore internally as `legacy_unknown` because old checkpoints cannot prove whether dispatch occurred;
+- execution phase is inside the canonical SHA-256/HMAC-authenticated state;
+- `JsonCheckpointStore`, `GoogleCloudStorageCheckpointStore`, and `ObservableCheckpointStore` advertise execution-phase support.
 
 Updated `runtime/execution_safety.py`:
 
-- after base checkpoint restoration/validation, production-style adapters declaring `requires_operation_reconciliation = True` now inspect restored state;
-- if the durable checkpoint contains an approval with no outcome, StageGuard derives the deterministic operation id from the restored report + approval and immediately enters `execution_uncertain`;
-- the reconciliation phase is `reloaded` because construction already loaded and validated the durable winner;
-- `execute_approved()` is therefore blocked after restart before the remediation provider can be contacted;
-- reconciliation still requires provider `accepted` or `not_found` plus a fresh Grafana investigation, which clears the stale approval and requires a new human approval for any future execution;
-- local/simulator adapters that do not require reconciliation keep their existing restart semantics.
+- production adapters requiring operation reconciliation now persist an explicit `dispatching` checkpoint before any provider call;
+- if that pre-dispatch CAS write fails, provider execution is never attempted and the failure remains an ordinary checkpoint conflict;
+- after `dispatching` becomes durable, provider/verification failures become execution uncertainty and never trigger replay;
+- a post-provider checkpoint conflict still enters `execution_uncertain` and requires durable-winner reload;
+- v2 `approved` checkpoints are now safe to resume after restart because the durable dispatch barrier proves provider contact has not begun;
+- restored `dispatching`, legacy-v1 `legacy_unknown`, and phase-unaware custom-store pending approvals remain fail-closed;
+- restored ambiguous production state derives the same deterministic operation id server-side and still requires provider reconciliation plus fresh Grafana evidence.
 
-Expanded `runtime/tests/test_execution_safety.py`:
+Updated `runtime/tests/test_incident_checkpoint.py`:
 
-- verifies a restored pending production approval enters `execution_uncertain` without any remediation execution call;
-- verifies provider reconciliation + fresh evidence clears that restored approval while execution call count remains zero;
-- verifies local adapter restart behavior is unchanged.
+- changed version assertion to v2;
+- verifies derived `none`, `approved`, and `resolved` phases;
+- verifies v1 pending approval migration to `legacy_unknown`;
+- verifies execution-phase tampering fails HMAC authenticity even if the attacker recomputes the public SHA-256 digest;
+- keeps provider metadata redaction and general tamper coverage.
+
+Added `runtime/tests/test_execution_phase_v2.py`:
+
+- proves `dispatching` is durable before the production remediation fake can be contacted;
+- proves v2 `approved` restart remains synchronized and can execute without reconciliation;
+- proves restored `dispatching` state enters `execution_uncertain`, blocks execution, reconciles without replay, and requires fresh evidence;
+- proves legacy-v1 pending approvals remain fail-closed.
 
 Updated `EXECUTION_UNCERTAINTY.md`:
 
-- documents the crash/restart ambiguity boundary;
-- documents why a restored approval-without-outcome cannot safely prove that the provider was never contacted;
-- documents the conservative production restart policy and its deliberate tradeoff: a genuinely unused approval may be invalidated after restart rather than risking duplicate external side effects;
-- documents the new concrete HTTPS lifecycle regression coverage.
+- documents the v2 state machine and exact pre-side-effect dispatch barrier;
+- documents backward-compatible v1 semantics;
+- documents why `approved` can now safely survive restart while `dispatching` cannot;
+- documents integrity/authenticity and provider-detail exclusion.
 
 ### Commits produced this run
 
-- `48b1f66b` — add concrete remediation transport uncertainty lifecycle tests
-- `c4c1c34a` — fix concrete remediation test telemetry allowlist
-- `903cc62a` — fail closed on restored production approvals after restart
-- `0848340d` — test restart-safe production approval recovery
-- `a9db7219` — document restart-safe execution uncertainty
+- `03b03405` — add checkpoint v2 execution phase
+- `06f92dfd` — persist remediation dispatch phase before side effects
+- `2544393e` — test checkpoint v2 execution phase
+- `fe13bc17` — add durable remediation dispatch-barrier tests
+- `59bdfd8b` — fix legacy checkpoint approval fixture
+- `441bab9b` — document checkpoint v2 dispatch barrier
 
 ### Tests / checks / results
 
 Attempted credential-free local validation with:
 
 ```text
-python -m unittest tests.test_execution_safety_http_transport tests.test_execution_safety tests.test_http_remediation_transport tests.test_production_remediation
+python -m unittest tests.test_incident_checkpoint tests.test_execution_phase_v2 tests.test_execution_safety
 ```
 
-The checkout failed before Python started because the execution container still could not resolve `github.com` (`Could not resolve host: github.com`). Therefore the Python suite is **not claimed as executed successfully** in this run.
+The fresh checkout failed before Python started because the execution container could not resolve `github.com` (`Could not resolve host: github.com`). Therefore the Python suite is **not claimed as executed successfully**.
 
-Static review caught and fixed one concrete fixture error before handoff: the production client originally used a non-default target and would have rejected execution before transport invocation.
+A static compatibility pass caught and fixed an invalid legacy-test approval fixture (`Approval` contains `production_id`, not `reason`). Existing custom conflict-test stores intentionally do not advertise phase support, so their previous post-provider conflict semantics remain intact while real Json/GCS stores use the new barrier.
 
 No GitHub Actions workflow was intentionally triggered, rerun, or modified. No Grafana, Loki, Gemini, IAP, Cloud Logging, GCS, Secret Manager, operator, or remediation credential/resource was used.
 
 ### Decisions made
 
-1. **Restart ambiguity is equivalent to execution ambiguity for production adapters.** If durable state cannot prove that a pending approved action was never sent, StageGuard must not make it executable after process restart.
-2. **Safety beats approval preservation.** A genuinely unused production approval may be discarded after restart through reconciliation + fresh evidence; silently replaying a potentially completed external action is unacceptable.
-3. **The durable checkpoint remains provider-detail-free.** Restart safety derives the deterministic operation id from already-authenticated report + approval state rather than persisting provider responses or credentials.
-4. **Local development remains ergonomic.** Simulator/local adapters are not forced through provider reconciliation on ordinary restart.
-5. **Concrete reconciliation is read-only and replay-proof.** Accepted, not-found, timeout, malformed, and repeated reconciliation paths are tested around the transport boundary without constructing a second remediation command.
+1. **Persist before side effect, not after it.** `dispatching` must be durable before provider contact or the marker does not close the restart ambiguity window.
+2. **Pre-dispatch CAS conflict is not execution uncertainty.** If the barrier cannot be persisted, StageGuard does not contact the provider.
+3. **`approved` is now meaningful durable proof.** With v2, a production restart may preserve a genuinely unused approval without weakening replay safety.
+4. **Legacy v1 remains conservative.** Pending v1 approvals restore as `legacy_unknown` and still require reconciliation/fresh evidence.
+5. **Provider detail stays out of checkpoints.** Only the bounded lifecycle phase is authenticated; provider responses, credentials, endpoint detail, and deterministic operation ids remain server/runtime concerns.
+6. **Custom stores remain backward compatible.** Stores that do not opt into phase support retain the previous conservative execution-safety behavior.
 
 ### Current blockers / unknowns
 
 - The deterministic Python suite remains unexecuted in this environment because the container cannot resolve GitHub for checkout.
 - Real-GCS two-instance acceptance, Cloud Run/IAP browser acceptance, real provider idempotency lookup, and real Grafana MCP metric+Loki acceptance still require external credentials/resources.
-- The restart-safe rule is intentionally conservative because checkpoint schema v1 does not persist a durable pre-execution/side-effect phase marker. A future schema evolution could preserve unused approvals more precisely while retaining replay safety.
+- A crash after `dispatching` but before provider contact intentionally still requires reconciliation; the state machine favors false-positive reconciliation over any possibility of replay.
 
 ## Single best next step
 
-**Introduce a durable, authenticated remediation execution-phase marker in checkpoint schema v2 (for example `approved`, `dispatching`, `resolved`) with backward-compatible v1 restore semantics, so StageGuard can distinguish a genuinely unused restored approval from a possibly dispatched operation without weakening the current fail-closed restart guarantee. Add migration/round-trip/tamper tests and keep provider response detail out of the checkpoint.**
+**Make the `dispatching` barrier observable without exposing incident/provider identity: add fixed-label checkpoint execution-phase gauges/counters and readiness diagnostics, then add a crash-injection test matrix around every boundary (`approved` save → `dispatching` save → provider call → recovery verification → `resolved` save) to prove which restart states are executable, reconcilable, or conflict-blocked.**
 
-## Previous run — 2026-09-08 — production reconciliation bootstrap wiring
+## Previous run — 2026-09-08 — concrete reconciliation lifecycle + restart-safe approval boundary
 
-Production bootstrap was updated so explicit remediation requires and wires `STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT`, with separate execution/reconciliation endpoints and fail-closed HTTPS validation. Targeted local validation could not run because the container could not resolve GitHub. The next handoff from that run requested concrete transport lifecycle coverage, completed above.
+Added concrete HTTP reconciliation lifecycle coverage and a conservative restart rule for production pending approvals. Checkpoint v2 above now refines that rule: genuinely unused v2 `approved` state can survive restart safely, while `dispatching` and legacy-v1 pending approvals remain execution-ambiguous.
