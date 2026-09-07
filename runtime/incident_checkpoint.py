@@ -7,9 +7,11 @@ import hmac
 import json
 import os
 import tempfile
+import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from investigator import Evidence, IncidentReport
 from log_evidence import LogCorroboration
@@ -17,6 +19,10 @@ from remediation import ActionResult, Approval, RecoverySample, RemediationOutco
 
 SCHEMA = "stageguard.incident-checkpoint.v1"
 _MAX_BYTES = 256 * 1024
+
+
+class CheckpointConflictError(RuntimeError):
+    """A bounded optimistic-concurrency failure; provider details are intentionally hidden."""
 
 
 class CheckpointStore(Protocol):
@@ -149,6 +155,15 @@ def _decode(raw: bytes, *, signing_key: bytes | None = None, require_signature: 
     return parse_checkpoint_document(document, signing_key=signing_key, require_signature=require_signature)
 
 
+def _http_status(exc: BaseException) -> int | None:
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    return status_code if isinstance(status_code, int) else None
+
+
 class JsonCheckpointStore:
     """Credential-free atomic local checkpoint store with owner-only permissions."""
 
@@ -238,4 +253,89 @@ class GoogleCloudStorageCheckpointStore:
                 if_generation_match=generation if exists else 0,
             )
         except Exception as exc:
+            if _http_status(exc) == 412:
+                raise CheckpointConflictError("incident checkpoint concurrent update conflict") from exc
             raise RuntimeError("incident checkpoint write failed") from exc
+
+
+class ObservableCheckpointStore:
+    """Checkpoint decorator exposing only fixed-label, non-sensitive Prometheus telemetry."""
+
+    def __init__(self, inner: CheckpointStore, *, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self._inner = inner
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._loads = {"ok": 0, "empty": 0, "failed": 0}
+        self._saves = {"ok": 0, "conflict": 0, "failed": 0}
+        self._last_latency = {"load": 0.0, "save": 0.0}
+        self._last_operation_ok = 1
+
+    def load(self) -> IncidentCheckpoint | None:
+        started = self._monotonic()
+        try:
+            checkpoint = self._inner.load()
+        except Exception:
+            with self._lock:
+                self._loads["failed"] += 1
+                self._last_operation_ok = 0
+            raise
+        else:
+            with self._lock:
+                self._loads["empty" if checkpoint is None else "ok"] += 1
+                self._last_operation_ok = 1
+            return checkpoint
+        finally:
+            elapsed = max(0.0, self._monotonic() - started)
+            with self._lock:
+                self._last_latency["load"] = elapsed
+
+    def save(self, checkpoint: IncidentCheckpoint) -> None:
+        started = self._monotonic()
+        try:
+            self._inner.save(checkpoint)
+        except CheckpointConflictError:
+            with self._lock:
+                self._saves["conflict"] += 1
+                self._last_operation_ok = 0
+            raise
+        except Exception:
+            with self._lock:
+                self._saves["failed"] += 1
+                self._last_operation_ok = 0
+            raise
+        else:
+            with self._lock:
+                self._saves["ok"] += 1
+                self._last_operation_ok = 1
+        finally:
+            elapsed = max(0.0, self._monotonic() - started)
+            with self._lock:
+                self._last_latency["save"] = elapsed
+
+    def prometheus_metrics(self) -> str:
+        with self._lock:
+            lines = [
+                "# HELP stageguard_checkpoint_last_operation_ok Whether the latest checkpoint operation succeeded.",
+                "# TYPE stageguard_checkpoint_last_operation_ok gauge",
+                f"stageguard_checkpoint_last_operation_ok {self._last_operation_ok}",
+                "# HELP stageguard_checkpoint_loads_total Checkpoint loads by bounded result.",
+                "# TYPE stageguard_checkpoint_loads_total counter",
+            ]
+            for result in ("ok", "empty", "failed"):
+                lines.append(f'stageguard_checkpoint_loads_total{{result="{result}"}} {self._loads[result]}')
+            lines.extend([
+                "# HELP stageguard_checkpoint_saves_total Checkpoint saves by bounded result.",
+                "# TYPE stageguard_checkpoint_saves_total counter",
+            ])
+            for result in ("ok", "conflict", "failed"):
+                lines.append(f'stageguard_checkpoint_saves_total{{result="{result}"}} {self._saves[result]}')
+            lines.extend([
+                "# HELP stageguard_checkpoint_last_operation_latency_seconds Last checkpoint operation latency by operation.",
+                "# TYPE stageguard_checkpoint_last_operation_latency_seconds gauge",
+            ])
+            for operation in ("load", "save"):
+                lines.append(
+                    f'stageguard_checkpoint_last_operation_latency_seconds{{operation="{operation}"}} '
+                    f'{self._last_latency[operation]:.6f}'
+                )
+            return "\n".join(lines) + "\n"
