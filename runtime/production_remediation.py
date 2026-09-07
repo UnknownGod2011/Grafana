@@ -38,7 +38,15 @@ class AllowlistedProductionRemediationClient:
     No URL, action, or target can be supplied by an incident/API caller. The
     deployment injects a transport already bound to its credential and endpoint.
     Retries are bounded and always reuse the same operation identity.
+
+    Production execution uncertainty is fail-closed: this adapter declares that
+    provider-side operation reconciliation is required. A custom transport may
+    expose ``reconcile(operation_id, timeout_seconds=...)`` returning one of
+    ``accepted``, ``not_found`` or ``unknown``. Without that capability the state
+    remains ``unknown`` and StageGuard will not clear an uncertain execution.
     """
+
+    requires_operation_reconciliation = True
 
     def __init__(
         self,
@@ -91,6 +99,19 @@ class AllowlistedProductionRemediationClient:
             self._sleep(self._retry_delay_seconds)
 
         return self._result(False, operation_id, self._max_attempts, last_status, "production remediation failed")
+
+    def reconcile_operation(self, operation_id: str) -> str:
+        """Return bounded provider idempotency state without exposing provider detail."""
+        if not operation_id.startswith("sg-") or len(operation_id) != 43:
+            return "unknown"
+        reconcile = getattr(self._transport, "reconcile", None)
+        if not callable(reconcile):
+            return "unknown"
+        try:
+            state = reconcile(operation_id, timeout_seconds=self._timeout_seconds)
+        except Exception:
+            return "unknown"
+        return state if state in {"accepted", "not_found"} else "unknown"
 
     @staticmethod
     def _result(accepted: bool, operation_id: str, attempts: int, status: int | None, detail: str) -> ActionResult:
