@@ -14,6 +14,7 @@ from typing import Callable, Protocol
 
 from activation import ActivationRecord, verify_activation_record
 from gemini_commander import GeminiCommander, IncidentBriefing
+from incident_checkpoint import CheckpointStore, IncidentCheckpoint
 from investigator import IncidentReport, MetricQueryClient, investigate, investigate_with_log_corroboration
 from log_activation import LogActivationRecord
 from log_evidence import LogQueryClient
@@ -95,7 +96,6 @@ _MAX_TIMELINE_EVENTS = 512
 
 
 def _actor_fingerprint(actor: str) -> str:
-    """Return a stable pseudonymous actor reference suitable for operator UI."""
     return hashlib.sha256(actor.encode("utf-8")).hexdigest()[:12]
 
 
@@ -122,14 +122,7 @@ def _briefing_digest(briefing: IncidentBriefing) -> str:
 
 
 class IncidentService:
-    """Single-profile incident lifecycle with fail-closed approval semantics.
-
-    The built-in deterministic demo profile may run without activation artifacts.
-    Every non-default production mapping must present a matching metric activation
-    record. Canonical production bootstrap also injects a verified Loki client and
-    log activation, making correlated investigation mandatory there. Gemini, when
-    configured, is advisory only and can brief only the exact current revision.
-    """
+    """Single-profile incident lifecycle with fail-closed approval semantics."""
 
     def __init__(
         self,
@@ -138,6 +131,7 @@ class IncidentService:
         audit: AuditSink,
         *,
         audit_reader: AuditReader | None = None,
+        checkpoint_store: CheckpointStore | None = None,
         telemetry_profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
         activation_record: ActivationRecord | None = None,
         datasource_identity: str | None = None,
@@ -152,25 +146,12 @@ class IncidentService:
         is_demo_profile = telemetry_profile == DEFAULT_TELEMETRY_PROFILE
         if not is_demo_profile:
             if activation_record is None or datasource_identity is None:
-                raise ValueError(
-                    "non-default telemetry profiles require a successful activation preflight record"
-                )
-            verify_activation_record(
-                activation_record,
-                telemetry_profile,
-                datasource_identity,
-                now_unix=activation_now_unix,
-            )
+                raise ValueError("non-default telemetry profiles require a successful activation preflight record")
+            verify_activation_record(activation_record, telemetry_profile, datasource_identity, now_unix=activation_now_unix)
         elif activation_record is not None:
             if datasource_identity is None:
                 raise ValueError("datasource_identity is required when activation_record is supplied")
-            verify_activation_record(
-                activation_record,
-                telemetry_profile,
-                datasource_identity,
-                now_unix=activation_now_unix,
-            )
-
+            verify_activation_record(activation_record, telemetry_profile, datasource_identity, now_unix=activation_now_unix)
         if (logs is None) != (log_activation_record is None):
             raise ValueError("logs and log_activation_record must be configured together")
 
@@ -179,6 +160,7 @@ class IncidentService:
         self._remediation = remediation
         self._audit = audit
         self._audit_reader = audit_reader
+        self._checkpoint_store = checkpoint_store
         self._profile = telemetry_profile
         self._activation = activation_record
         self._log_activation = log_activation_record
@@ -190,6 +172,41 @@ class IncidentService:
         self._sequence = 0
         self._timeline: list[AuditEvent] = []
         self._lock = threading.RLock()
+        self._restore_checkpoint()
+
+    def _restore_checkpoint(self) -> None:
+        if self._checkpoint_store is None:
+            return
+        checkpoint = self._checkpoint_store.load()
+        if checkpoint is None:
+            return
+        if checkpoint.revision != _revision(checkpoint.report):
+            raise ValueError("incident checkpoint revision does not match restored evidence")
+        if checkpoint.report.production_id != self._profile.production_id or checkpoint.report.affected_feed != self._profile.affected_feed:
+            raise ValueError("incident checkpoint does not match configured telemetry scope")
+        approval = checkpoint.approval
+        if approval is not None:
+            expected = required_approval(checkpoint.report, approval.approved_by, True, self._profile)
+            if approval != expected:
+                raise ValueError("incident checkpoint approval does not match restored evidence revision")
+        if checkpoint.outcome is not None and approval is None:
+            raise ValueError("incident checkpoint outcome cannot exist without approval")
+        self._snapshot = IncidentSnapshot(
+            checkpoint.incident_id, checkpoint.revision, checkpoint.report, checkpoint.approval, checkpoint.outcome
+        )
+        self._sequence = checkpoint.sequence
+        if self._audit_reader is not None:
+            durable = self._audit_reader.read(incident_id=checkpoint.incident_id, after_sequence=0, limit=101)
+            if durable:
+                self._sequence = max(self._sequence, max(event.sequence for event in durable))
+
+    def _save_checkpoint(self) -> None:
+        if self._checkpoint_store is None or self._snapshot is None:
+            return
+        snapshot = self._snapshot
+        self._checkpoint_store.save(IncidentCheckpoint(
+            snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, snapshot.outcome, self._sequence
+        ))
 
     def _record(self, incident_id: str, event_type: str, actor: str, payload: dict) -> None:
         self._sequence += 1
@@ -198,19 +215,13 @@ class IncidentService:
         self._timeline.append(event)
         if len(self._timeline) > _MAX_TIMELINE_EVENTS:
             del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
+        self._save_checkpoint()
 
     def status(self) -> IncidentSnapshot | None:
         with self._lock:
             return self._snapshot
 
     def audit_timeline(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> dict[str, object]:
-        """Return a bounded redacted lifecycle timeline for the current incident.
-
-        When a durable reader is configured, Cloud Logging is queried only for the
-        exact current incident and a bounded page, then merged with the process-local
-        projection. The same event-specific allow-list is applied after merging.
-        Provider details never become part of the returned operator contract.
-        """
         if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
             raise ValueError("after_sequence must be a non-negative integer")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
@@ -221,21 +232,12 @@ class IncidentService:
                 raise RuntimeError("no incident has been investigated")
             if incident_id != snapshot.incident_id:
                 raise ValueError("timeline request does not match the current incident")
-
             candidates: list[AuditEvent] = []
             if self._audit_reader is not None:
-                candidates.extend(
-                    self._audit_reader.read(
-                        incident_id=incident_id,
-                        after_sequence=after_sequence,
-                        limit=min(limit + 1, 101),
-                    )
-                )
-            candidates.extend(
-                event for event in self._timeline
-                if event.incident_id == incident_id and event.sequence > after_sequence
-            )
-
+                candidates.extend(self._audit_reader.read(
+                    incident_id=incident_id, after_sequence=after_sequence, limit=min(limit + 1, 101)
+                ))
+            candidates.extend(event for event in self._timeline if event.incident_id == incident_id and event.sequence > after_sequence)
             by_sequence: dict[int, AuditEvent] = {}
             for event in candidates:
                 existing = by_sequence.get(event.sequence)
@@ -244,30 +246,21 @@ class IncidentService:
                 by_sequence[event.sequence] = event
             ordered = [by_sequence[sequence] for sequence in sorted(by_sequence)]
             selected = ordered[:limit]
-            has_more = len(ordered) > len(selected)
-            next_after = selected[-1].sequence if selected else after_sequence
             return {
                 "incident_id": incident_id,
                 "events": [_timeline_event(event) for event in selected],
-                "next_after_sequence": next_after,
-                "has_more": has_more,
+                "next_after_sequence": selected[-1].sequence if selected else after_sequence,
+                "has_more": len(ordered) > len(selected),
             }
 
     def investigate(self, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
-            if self._logs is None:
-                report = investigate(self._metrics, self._profile)
-            else:
-                report = investigate_with_log_corroboration(self._metrics, self._logs, self._profile)
+            report = investigate(self._metrics, self._profile) if self._logs is None else investigate_with_log_corroboration(self._metrics, self._logs, self._profile)
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
             self._snapshot = snapshot
-            payload = {
-                "revision": snapshot.revision,
-                "status": report.status,
-                "confidence": report.confidence,
-                "evidence_mode": "metric+loki" if self._logs is not None else "metric-only",
-            }
+            payload = {"revision": snapshot.revision, "status": report.status, "confidence": report.confidence,
+                       "evidence_mode": "metric+loki" if self._logs is not None else "metric-only"}
             if self._activation is not None:
                 payload["activation_profile_sha256"] = self._activation.profile_sha256
                 payload["activation_datasource_sha256"] = self._activation.datasource_sha256
@@ -275,27 +268,10 @@ class IncidentService:
                 payload["log_activation_contract_sha256"] = self._log_activation.contract_sha256
                 payload["log_activation_datasource_sha256"] = self._log_activation.datasource_sha256
                 payload["log_activation_preflight_sha256"] = self._log_activation.preflight_sha256
-            self._record(
-                incident_id,
-                "investigation_completed",
-                actor.strip() or "stageguard",
-                payload,
-            )
+            self._record(incident_id, "investigation_completed", actor.strip() or "stageguard", payload)
             return snapshot
 
-    def briefing(
-        self,
-        *,
-        incident_id: str,
-        revision: str,
-        actor: str = "stageguard",
-    ) -> IncidentBriefing:
-        """Generate an advisory briefing for exactly the current evidence revision.
-
-        The model call executes while holding the lifecycle lock. A concurrent
-        investigation therefore cannot advance the revision between validation and
-        generation. No incident, approval, remediation, or recovery state is changed.
-        """
+    def briefing(self, *, incident_id: str, revision: str, actor: str = "stageguard") -> IncidentBriefing:
         with self._lock:
             snapshot = self._snapshot
             if snapshot is None:
@@ -304,32 +280,15 @@ class IncidentService:
                 raise ValueError("briefing request does not match the current incident evidence revision")
             if self._commander is None:
                 raise RuntimeError("Gemini briefing is not configured")
-
             normalized_actor = actor.strip() or "stageguard"
             try:
                 briefing = self._commander.brief(snapshot.report)
             except Exception as exc:
-                self._record(
-                    snapshot.incident_id,
-                    "briefing_failed",
-                    normalized_actor,
-                    {
-                        "revision": snapshot.revision,
-                        "error_type": type(exc).__name__,
-                    },
-                )
+                self._record(snapshot.incident_id, "briefing_failed", normalized_actor,
+                             {"revision": snapshot.revision, "error_type": type(exc).__name__})
                 raise RuntimeError("Gemini briefing generation failed") from exc
-
-            self._record(
-                snapshot.incident_id,
-                "briefing_generated",
-                normalized_actor,
-                {
-                    "revision": snapshot.revision,
-                    "briefing_sha256": _briefing_digest(briefing),
-                    "next_step": briefing.next_step,
-                },
-            )
+            self._record(snapshot.incident_id, "briefing_generated", normalized_actor,
+                         {"revision": snapshot.revision, "briefing_sha256": _briefing_digest(briefing), "next_step": briefing.next_step})
             return briefing
 
     def approve(self, *, incident_id: str, revision: str, approved_by: str) -> IncidentSnapshot:
@@ -346,12 +305,8 @@ class IncidentService:
                 raise ValueError("only a diagnosed incident can be approved for remediation")
             approval = required_approval(snapshot.report, actor, True, self._profile)
             self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, approval, None)
-            self._record(
-                snapshot.incident_id,
-                "remediation_approved",
-                actor,
-                {"revision": snapshot.revision, "action": approval.action, "target": approval.target},
-            )
+            self._record(snapshot.incident_id, "remediation_approved", actor,
+                         {"revision": snapshot.revision, "action": approval.action, "target": approval.target})
             return self._snapshot
 
     def execute_approved(self, *, actor: str = "stageguard") -> IncidentSnapshot:
@@ -361,33 +316,12 @@ class IncidentService:
                 raise RuntimeError("matching explicit approval is required before remediation")
             if snapshot.outcome is not None:
                 raise RuntimeError("this approval has already been consumed")
-            outcome = remediate_and_verify(
-                snapshot.report,
-                snapshot.approval,
-                self._remediation,
-                self._metrics,
-                profile=self._profile,
-                sleep=self._recovery_sleep,
-            )
-            self._snapshot = IncidentSnapshot(
-                snapshot.incident_id,
-                snapshot.revision,
-                snapshot.report,
-                snapshot.approval,
-                outcome,
-            )
-            payload = {
-                "revision": snapshot.revision,
-                "status": outcome.status,
-                "sample_count": len(outcome.samples),
-                "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
-            }
+            outcome = remediate_and_verify(snapshot.report, snapshot.approval, self._remediation, self._metrics,
+                                           profile=self._profile, sleep=self._recovery_sleep)
+            self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, outcome)
+            payload = {"revision": snapshot.revision, "status": outcome.status, "sample_count": len(outcome.samples),
+                       "action_accepted": bool(outcome.action_result and outcome.action_result.accepted)}
             if outcome.action_result is not None and outcome.action_result.metadata:
                 payload["action_metadata"] = dict(outcome.action_result.metadata)
-            self._record(
-                snapshot.incident_id,
-                "remediation_completed",
-                actor.strip() or "stageguard",
-                payload,
-            )
+            self._record(snapshot.incident_id, "remediation_completed", actor.strip() or "stageguard", payload)
             return self._snapshot
