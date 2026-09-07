@@ -34,77 +34,78 @@ Core invariants:
 - Signed GCS lifecycle checkpoints with strict generation CAS, conflict metrics, explicit winner reload, and fail-closed remediation execution uncertainty.
 - Restart-safe operator recovery UX exposing only `clear`, `reload_required`, or `reloaded`.
 - Provider-neutral, read-only HTTP idempotency reconciliation transport contract with bounded result states.
+- Explicit production remediation now requires and wires a dedicated read-only reconciliation endpoint.
 
-## Run log — 2026-09-08 — read-only remediation reconciliation transport
+## Run log — 2026-09-08 — production reconciliation bootstrap wiring
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- repository metadata/default branch and current head (`f92bab4044af69595e7f3b6e56ef84ef9d44c255` at run start);
-- `runtime/execution_safety.py`;
-- `runtime/production_remediation.py`;
+- repository metadata/default branch;
+- `runtime/bootstrap.py`;
+- `runtime/tests/test_bootstrap.py`;
 - `runtime/http_remediation_transport.py`;
-- `runtime/tests/test_http_remediation_transport.py`;
-- `runtime/tests/test_production_remediation.py`;
-- `runtime/bootstrap.py` and `runtime/tests/test_bootstrap.py`.
+- `runtime/production_remediation.py`;
+- `REMEDIATION_RECONCILIATION.md`.
 
-The highest-value gap matched the prior handoff: `AllowlistedProductionRemediationClient` correctly required provider reconciliation after ambiguous execution, but the default HTTPS transport offered no read-only idempotency lookup, leaving real production recovery permanently fail-closed after that race.
+The highest-value gap matched the prior handoff: the concrete HTTPS transport already supported read-only provider idempotency lookup, but the production bootstrap did not pass a reconciliation endpoint into it. A real deployment could therefore execute remediation but remain permanently fail-closed after an ambiguous post-provider checkpoint CAS race.
 
 ### Exact changes made
 
-Updated `runtime/http_remediation_transport.py`:
+Updated `runtime/bootstrap.py`:
 
-- added optional deployment-owned `reconciliation_endpoint` configuration;
-- validates both execution and reconciliation endpoints as absolute credential-free HTTPS URLs with no query/fragment components;
-- added `reconcile(operation_id, timeout_seconds=...)` as a GET-only lookup;
-- request URL contains only the URL-encoded deterministic StageGuard operation id;
-- reconciliation sends no body, action, production id, target, incident evidence, approval, or replayable command payload;
-- requires an exact bounded JSON response containing only `operation_id` and `state`;
-- accepts only `accepted` and `not_found` states;
-- maps 404 to `not_found`;
-- maps timeout, network errors, non-404 HTTP errors, oversized responses, malformed JSON, extra fields, unknown states, and wrong operation-id echoes to `unknown`;
-- missing reconciliation configuration remains intentionally fail-closed as `unknown`;
-- execution semantics and existing bounded retry behavior were not changed.
+- added `remediation_reconciliation_endpoint_env`, defaulting to `STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT`;
+- explicit production remediation now requires that environment variable in addition to the execution endpoint and bearer credential;
+- passes the dedicated endpoint to `HttpRemediationTransport(reconciliation_endpoint=...)`;
+- added CLI option `--remediation-reconciliation-endpoint-env` so deployments can rename the environment variable without putting an endpoint value directly on the command line;
+- retained the existing prohibition on explicit production remediation for the demo telemetry profile;
+- retained separation between custom `remediation_factory` and explicit production remediation.
 
-Updated `runtime/tests/test_http_remediation_transport.py`:
+Added `runtime/tests/test_production_reconciliation_bootstrap.py`:
 
-- validates reconciliation endpoint HTTPS requirements;
-- proves reconciliation uses GET with no request body;
-- proves only the server-owned operation id appears in the lookup request and action/production/target do not;
-- covers `accepted` and 404→`not_found` behavior;
-- covers timeout/network failures, malformed documents, wrong operation-id echo, extra fields, unknown provider states, and oversized response fail-closed behavior;
-- proves missing reconciliation configuration and malformed operation ids perform no network call.
+- verifies explicit production remediation fails closed when the reconciliation endpoint is absent;
+- verifies the execution and reconciliation endpoints are wired separately into the concrete HTTP transport;
+- verifies an insecure HTTP reconciliation endpoint is rejected before any network call.
 
-Added `REMEDIATION_RECONCILIATION.md` documenting the provider-neutral contract, redaction/safety properties, and remaining bootstrap wiring gap.
+Updated `REMEDIATION_RECONCILIATION.md`:
+
+- documents the now-required production environment variable;
+- documents separate writer/read endpoint examples;
+- documents CLI environment-variable indirection;
+- removes the stale statement that production bootstrap wiring remained incomplete.
 
 ### Commits produced this run
 
-- `cfd2b7d0` — add read-only remediation reconciliation transport
+- `bc69f7ac` — wire production remediation reconciliation endpoint
+- `1fedeba7` — test production reconciliation bootstrap wiring
+- `12c4b5ae` — document production reconciliation bootstrap wiring
 
 ### Tests / checks / results
 
-No GitHub Actions workflow was intentionally triggered, rerun, or modified.
+Attempted a credential-free local validation with:
 
-The repository was changed through the authenticated GitHub connector. This environment still does not provide a reliable direct checkout/executable path for the repository, so the Python suite is **not claimed as executed successfully** in this run.
+```text
+python -m unittest tests.test_production_reconciliation_bootstrap tests.test_http_remediation_transport tests.test_production_remediation
+```
 
-No Grafana, Loki, Gemini, IAP, Cloud Logging, GCS, Secret Manager, operator, or remediation credential/resource was used.
+The checkout failed before Python started because the execution container could not resolve `github.com` (`Could not resolve host: github.com`). Therefore the Python suite is **not claimed as executed successfully** in this run.
+
+No GitHub Actions workflow was intentionally triggered, rerun, or modified. No Grafana, Loki, Gemini, IAP, Cloud Logging, GCS, Secret Manager, operator, or remediation credential/resource was used.
 
 ### Decisions made
 
-1. **Reconciliation is a lookup, never a command.** The reference transport uses GET and has no body, eliminating any accidental command replay semantics.
-2. **Execution and reconciliation endpoints remain separate.** Deployments can independently authorize command execution and idempotency lookup.
-3. **Provider detail is aggressively collapsed.** Only `accepted`, `not_found`, or `unknown` enter the service boundary; all ambiguous cases remain `unknown`.
-4. **404 is the only transport-level negative proof.** Other non-success statuses do not imply absence and therefore remain `unknown`.
-5. **Missing reconciliation configuration stays fail-closed.** Existing deployments do not become less safe merely by upgrading.
+1. **Production remediation must be recoverable before it can be enabled.** Missing reconciliation configuration is now a startup error rather than a latent permanent-block condition.
+2. **Execution and reconciliation endpoints remain distinct deployment authorities.** The writer command URL and read-only idempotency lookup URL are separately configured even if a deployment chooses to serve both from the same provider.
+3. **Endpoint values stay out of incident/browser input.** Only environment-variable names are configurable through the CLI.
+4. **Existing reconciliation semantics remain unchanged.** Lookup is GET-only, bodyless, bounded to `accepted` / `not_found` / `unknown`, and never replays remediation.
 
 ### Current blockers / unknowns
 
-- The deterministic Python suite remains unexecuted in this environment.
-- Production bootstrap does not yet pass a reconciliation endpoint into `HttpRemediationTransport`; explicit production remediation therefore remains deliberately blocked after ambiguous execution until that wiring is added.
-- End-to-end `ExecutionSafeIncidentService` coverage with the concrete HTTP reconciliation transport should be added after bootstrap wiring.
-- Real-GCS two-instance acceptance, Cloud Run/IAP browser acceptance, and real Grafana MCP metric+Loki acceptance still require external credentials/resources.
+- The deterministic Python suite remains unexecuted in this environment because the container cannot resolve GitHub for checkout.
+- End-to-end `ExecutionSafeIncidentService` coverage with the concrete HTTP reconciliation transport should still prove accepted/not-found/timeout/malformed/repeated reconciliation across an actual uncertainty lifecycle.
+- Real-GCS two-instance acceptance, Cloud Run/IAP browser acceptance, real provider idempotency lookup, and real Grafana MCP metric+Loki acceptance still require external credentials/resources.
 
 ## Single best next step
 
-**Wire a dedicated `STAGEGUARD_REMEDIATION_RECONCILIATION_ENDPOINT` into production bootstrap, require/validate it whenever explicit production remediation is enabled, and add bootstrap plus execution-safety tests proving `accepted`, `not_found`, timeout/error, malformed-response, and repeated reconciliation never replay remediation.**
+**Add end-to-end execution-uncertainty tests using the concrete `HttpRemediationTransport` through `AllowlistedProductionRemediationClient`, proving `accepted`, `not_found`, timeout/error, malformed provider responses, and repeated reconciliation never invoke the remediation execution endpoint a second time and always require fresh Grafana evidence before lifecycle recovery.**
