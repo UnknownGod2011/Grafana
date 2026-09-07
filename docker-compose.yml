@@ -39,10 +39,10 @@ services:
       - prometheus
 
   # Explicitly opt-in so a normal `docker compose up` never starts an AI/MCP
-  # process. Run after `python runtime/bootstrap_grafana.py` with:
-  #   python runtime/mcp_smoke.py
+  # process. StageGuard itself permits only the datasource/Prometheus/Loki read
+  # categories and disables write/proxied tools.
   mcp:
-    image: grafana/mcp-grafana:1.1.0
+    image: grafana/mcp-grafana:1.3.0
     profiles: ["mcp"]
     environment:
       GRAFANA_URL: http://grafana:3000
@@ -54,7 +54,9 @@ services:
       - stdio
       - --disable-write
       - --enabled-tools
-      - datasource,prometheus
+      - datasource,prometheus,loki
       - --disable-proxied
+      - --max-loki-log-limit
+      - "8"
     depends_on:
       - grafana
