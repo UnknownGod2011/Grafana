@@ -53,8 +53,9 @@ def build_bootstrap_argv(environ: Mapping[str, str] | None = None) -> list[str]:
 
     checkpoint_bucket = env.get("STAGEGUARD_CHECKPOINT_BUCKET", "").strip()
     if checkpoint_bucket:
-        # The bucket name itself remains deployment-owned environment config; the
-        # browser cannot choose a bucket/object. ADC is used by the server only.
+        # Bucket contents can authorize resumption of an approval, so storage write
+        # permission alone must never be sufficient to forge checkpoint state.
+        _required(env, "STAGEGUARD_CHECKPOINT_HMAC_KEY")
         argv.extend(["--checkpoint-backend", "gcs"])
         checkpoint_object = env.get("STAGEGUARD_CHECKPOINT_OBJECT", "").strip()
         if checkpoint_object:
