@@ -1,0 +1,32 @@
+ARG MCP_GRAFANA_IMAGE=grafana/mcp-grafana:1.1.0
+FROM ${MCP_GRAFANA_IMAGE} AS grafana_mcp
+
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 stageguard \
+    && useradd --system --uid 10001 --gid 10001 --create-home stageguard
+
+WORKDIR /app
+
+COPY runtime/requirements-cloudrun.txt /tmp/requirements-cloudrun.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements-cloudrun.txt \
+    && rm /tmp/requirements-cloudrun.txt
+
+COPY runtime /app/runtime
+COPY --from=grafana_mcp /app/mcp-grafana /usr/local/bin/mcp-grafana
+
+RUN chmod 0555 /usr/local/bin/mcp-grafana \
+    && chown -R 10001:10001 /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8080 \
+    STAGEGUARD_MCP_COMMAND="/usr/local/bin/mcp-grafana -t stdio --disable-write --enabled-tools datasource,prometheus,loki --disable-proxied --max-loki-log-limit 8"
+
+USER 10001:10001
+EXPOSE 8080
+
+CMD ["python", "/app/runtime/cloudrun_entrypoint.py"]
