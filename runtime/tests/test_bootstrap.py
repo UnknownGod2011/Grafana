@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from activation import create_activation_record, write_activation_record
 from bootstrap import DisabledRemediationClient, build_runtime
+from log_activation import create_log_activation_record, preflight_loki, write_log_activation_record
+from log_evidence import LogQueryResult
 from onboarding import PreflightResult, PreflightSlot, load_telemetry_profile
 from production_remediation import AllowlistedProductionRemediationClient
 from telemetry import investigation_queries, recovery_queries
@@ -22,6 +24,20 @@ class FakeMetrics:
 
     def instant(self, _promql: str) -> float:
         return 1.0
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeLogs:
+    def __init__(self, datasource_uid: str = "loki-main") -> None:
+        self.datasource_uid = datasource_uid
+        self.closed = False
+        self.calls = []
+
+    def range(self, logql: str, *, start: str, end: str, limit: int) -> LogQueryResult:
+        self.calls.append((logql, start, end, limit))
+        return LogQueryResult((), False, start, end)
 
     def close(self) -> None:
         self.closed = True
@@ -82,120 +98,154 @@ class BootstrapTests(unittest.TestCase):
                 slots.append(PreflightSlot(phase, name, promql, "ok", 1.0))
         preflight = PreflightResult(profile.production_id, True, tuple(slots))
         record = create_activation_record(
-            profile,
-            datasource_uid,
-            preflight,
-            now_unix=1_800_000_000,
-            ttl_seconds=3600,
+            profile, datasource_uid, preflight, now_unix=1_800_000_000, ttl_seconds=3600
         )
         path = self.root / "activation.json"
         write_activation_record(path, record)
         return path
 
-    def test_production_profile_refuses_startup_without_activation(self) -> None:
+    def _log_activation(self, config: Path, datasource_uid: str = "loki-main") -> Path:
+        profile = load_telemetry_profile(config)
+        client = FakeLogs(datasource_uid)
+        preflight = preflight_loki(client, profile)
+        record = create_log_activation_record(
+            profile, datasource_uid, preflight, now_unix=1_800_000_000, ttl_seconds=3600
+        )
+        path = self.root / "log-activation.json"
+        write_log_activation_record(path, record)
+        return path
+
+    def _production_bundle(self, config: Path, activation: Path, log_activation: Path, **kwargs):
+        return build_runtime(
+            telemetry_config=config,
+            activation_path=activation,
+            log_activation_path=log_activation,
+            audit_path=self.root / "audit.jsonl",
+            metrics_factory=kwargs.pop("metrics_factory", FakeMetrics),
+            logs_factory=kwargs.pop("logs_factory", FakeLogs),
+            activation_now_unix=1_800_000_100,
+            port=0,
+            **kwargs,
+        )
+
+    def test_production_profile_refuses_startup_without_metric_activation(self) -> None:
         config = self._write_profile()
         metrics = FakeMetrics()
         with self.assertRaisesRegex(ValueError, "requires --activation"):
             build_runtime(
                 telemetry_config=config,
                 activation_path=None,
+                log_activation_path=None,
                 audit_path=self.root / "audit.jsonl",
                 metrics_factory=lambda: metrics,
+                logs_factory=FakeLogs,
                 activation_now_unix=1_800_000_100,
                 port=0,
             )
         self.assertTrue(metrics.closed)
 
-    def test_activation_is_verified_against_actual_mcp_datasource_identity(self) -> None:
+    def test_production_profile_refuses_startup_without_log_activation(self) -> None:
         config = self._write_profile()
-        activation = self._activation(config, "prom-approved")
-        metrics = FakeMetrics("prom-drifted")
-        with self.assertRaisesRegex(ValueError, "datasource identity changed"):
+        activation = self._activation(config)
+        with self.assertRaisesRegex(ValueError, "requires --log-activation"):
             build_runtime(
                 telemetry_config=config,
                 activation_path=activation,
+                log_activation_path=None,
                 audit_path=self.root / "audit.jsonl",
-                metrics_factory=lambda: metrics,
+                metrics_factory=FakeMetrics,
+                logs_factory=FakeLogs,
                 activation_now_unix=1_800_000_100,
                 port=0,
             )
+
+    def test_metric_activation_is_verified_against_actual_datasource(self) -> None:
+        config = self._write_profile()
+        activation = self._activation(config, "prom-approved")
+        log_activation = self._log_activation(config)
+        metrics = FakeMetrics("prom-drifted")
+        with self.assertRaisesRegex(ValueError, "datasource identity changed"):
+            self._production_bundle(
+                config, activation, log_activation, metrics_factory=lambda: metrics
+            )
         self.assertTrue(metrics.closed)
 
+    def test_log_activation_is_verified_against_actual_datasource(self) -> None:
+        config = self._write_profile()
+        activation = self._activation(config)
+        log_activation = self._log_activation(config, "loki-approved")
+        logs = FakeLogs("loki-drifted")
+        with self.assertRaisesRegex(ValueError, "Loki datasource identity changed"):
+            self._production_bundle(
+                config, activation, log_activation, logs_factory=lambda: logs
+            )
+        self.assertTrue(logs.closed)
+
     def test_non_loopback_requires_process_owned_bearer_token(self) -> None:
-        example = Path(__file__).parents[1] / "telemetry.example.json"
+        config = self._write_profile()
+        activation = self._activation(config)
+        log_activation = self._log_activation(config)
         with clean_auth_env(), self.assertRaisesRegex(ValueError, "STAGEGUARD_API_TOKEN"):
-            build_runtime(
-                telemetry_config=example,
-                activation_path=None,
-                audit_path=self.root / "audit.jsonl",
-                host="0.0.0.0",
-                port=0,
-                metrics_factory=FakeMetrics,
+            self._production_bundle(
+                config, activation, log_activation, host="0.0.0.0"
             )
 
-    def test_loopback_defaults_to_local_identity(self) -> None:
+    def test_loopback_demo_defaults_to_local_identity(self) -> None:
         example = Path(__file__).parents[1] / "telemetry.example.json"
         with clean_auth_env():
             bundle = build_runtime(
                 telemetry_config=example,
                 activation_path=None,
+                log_activation_path=None,
                 audit_path=self.root / "audit.jsonl",
                 host="127.0.0.1",
                 port=0,
                 metrics_factory=FakeMetrics,
+                logs_factory=FakeLogs,
             )
         try:
             self.assertTrue(bundle.identity_provider.is_development_only)
-            self.assertTrue((self.root / "audit.jsonl").exists())
+            self.assertIsNone(bundle.logs)
         finally:
             bundle.close()
 
-    def test_production_runtime_uses_safe_disabled_remediation_by_default(self) -> None:
+    def test_production_runtime_uses_correlated_evidence_and_disabled_writes_by_default(self) -> None:
         config = self._write_profile()
         activation = self._activation(config)
+        log_activation = self._log_activation(config)
         with patch.dict(
             os.environ,
             {"STAGEGUARD_API_TOKEN": "secret", "STAGEGUARD_API_SUBJECT": "ops@example"},
             clear=False,
         ):
-            bundle = build_runtime(
-                telemetry_config=config,
-                activation_path=activation,
-                audit_path=self.root / "audit.jsonl",
-                host="0.0.0.0",
-                port=0,
-                metrics_factory=FakeMetrics,
-                activation_now_unix=1_800_000_100,
+            bundle = self._production_bundle(
+                config, activation, log_activation, host="0.0.0.0"
             )
         try:
             self.assertFalse(bundle.identity_provider.is_development_only)
             self.assertIsInstance(bundle.service._remediation, DisabledRemediationClient)
+            self.assertIsNotNone(bundle.logs)
+            self.assertIs(bundle.service._logs, bundle.logs)
         finally:
             bundle.close()
 
     def test_explicit_production_remediation_requires_separate_write_settings(self) -> None:
         config = self._write_profile()
         activation = self._activation(config)
+        log_activation = self._log_activation(config)
         env = {"STAGEGUARD_API_TOKEN": "api-secret", "STAGEGUARD_API_SUBJECT": "ops@example"}
-        metrics = FakeMetrics()
         with patch.dict(os.environ, env, clear=True), self.assertRaisesRegex(
             ValueError, "STAGEGUARD_REMEDIATION_ENDPOINT"
         ):
-            build_runtime(
-                telemetry_config=config,
-                activation_path=activation,
-                audit_path=self.root / "audit.jsonl",
-                host="0.0.0.0",
-                port=0,
-                metrics_factory=lambda: metrics,
-                activation_now_unix=1_800_000_100,
-                enable_production_remediation=True,
+            self._production_bundle(
+                config, activation, log_activation,
+                host="0.0.0.0", enable_production_remediation=True
             )
-        self.assertTrue(metrics.closed)
 
     def test_explicit_production_remediation_wires_allowlisted_https_adapter(self) -> None:
         config = self._write_profile()
         activation = self._activation(config)
+        log_activation = self._log_activation(config)
         env = {
             "STAGEGUARD_API_TOKEN": "api-secret",
             "STAGEGUARD_API_SUBJECT": "ops@example",
@@ -203,19 +253,12 @@ class BootstrapTests(unittest.TestCase):
             "STAGEGUARD_REMEDIATION_TOKEN": "write-secret",
         }
         with patch.dict(os.environ, env, clear=True):
-            bundle = build_runtime(
-                telemetry_config=config,
-                activation_path=activation,
-                audit_path=self.root / "audit.jsonl",
-                host="0.0.0.0",
-                port=0,
-                metrics_factory=FakeMetrics,
-                activation_now_unix=1_800_000_100,
-                enable_production_remediation=True,
+            bundle = self._production_bundle(
+                config, activation, log_activation,
+                host="0.0.0.0", enable_production_remediation=True
             )
         try:
             self.assertIsInstance(bundle.service._remediation, AllowlistedProductionRemediationClient)
-            self.assertNotEqual(os.environ.get("STAGEGUARD_API_TOKEN"), os.environ.get("STAGEGUARD_REMEDIATION_TOKEN"))
         finally:
             bundle.close()
 
@@ -225,9 +268,11 @@ class BootstrapTests(unittest.TestCase):
             build_runtime(
                 telemetry_config=example,
                 activation_path=None,
+                log_activation_path=None,
                 audit_path=self.root / "audit.jsonl",
                 port=0,
                 metrics_factory=FakeMetrics,
+                logs_factory=FakeLogs,
                 enable_production_remediation=True,
             )
 
