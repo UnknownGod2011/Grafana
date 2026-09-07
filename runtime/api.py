@@ -57,28 +57,34 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def _service_readiness(service: IncidentService) -> dict[str, object]:
-    """Build a bounded readiness view from the service-owned evidence plane.
+def _get_readiness_probe(service: IncidentService) -> EvidencePlaneReadinessProbe:
+    """Return one service-owned probe so external Grafana checks can be cached."""
+    probe = getattr(service, "_readiness_probe", None)
+    if probe is None:
+        probe = EvidencePlaneReadinessProbe(
+            service._profile,
+            service._activation,
+            service._log_activation,
+            service._metrics,
+            service._logs,
+        )
+        setattr(service, "_readiness_probe", probe)
+    return probe
 
-    The API intentionally exposes only coarse check states. Private service
-    members are read here solely to avoid duplicating production ownership of
-    the metric/log clients; no raw profile, query, datasource, or error value is
-    serialized into the response.
-    """
-    probe = EvidencePlaneReadinessProbe(
-        service._profile,
-        service._activation,
-        service._log_activation,
-        service._metrics,
-        service._logs,
-    )
-    return probe.check().to_dict()
+
+def _service_readiness(service: IncidentService) -> dict[str, object]:
+    """Build a bounded readiness view from the service-owned evidence plane."""
+    return _get_readiness_probe(service).check().to_dict()
+
+
+def _service_metrics(service: IncidentService) -> str:
+    return _get_readiness_probe(service).prometheus_metrics()
 
 
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.4"
+    server_version = "StageGuard/0.5"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -92,6 +98,16 @@ class StageGuardHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         if authenticate:
             self.send_header("WWW-Authenticate", 'Bearer realm="stageguard"')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_text(self, status: int, body_text: str, content_type: str) -> None:
+        body = body_text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -119,6 +135,13 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                     },
                 }
             self._send(200 if readiness["ready"] else 503, readiness)
+            return
+        if self.path == "/metrics":
+            try:
+                metrics = _service_metrics(self.service)
+            except Exception:
+                metrics = "# StageGuard readiness metrics unavailable\n"
+            self._send_text(200, metrics, "text/plain; version=0.0.4; charset=utf-8")
             return
         if self.path != "/v1/incident":
             self._error(404, "not_found", "unknown endpoint")
@@ -195,6 +218,7 @@ def make_server(
     provider = identity_provider or LocalDevelopmentIdentityProvider()
     if not _is_loopback(host) and provider.is_development_only:
         raise ValueError("non-loopback bind requires an explicit production-capable identity provider")
+    _get_readiness_probe(service)
     handler = type(
         "ConfiguredStageGuardHandler",
         (StageGuardHandler,),
