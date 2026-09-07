@@ -71,8 +71,8 @@ class ConcreteHttpExecutionSafetyTests(unittest.TestCase):
         )
         remediation = AllowlistedProductionRemediationClient(
             transport,
-            allowed_production_id="broadcast-demo",
-            allowed_uplink="primary",
+            allowed_production_id="broadcast-alpha",
+            allowed_uplink="uplink-b",
             max_attempts=1,
             retry_delay_seconds=0,
         )
