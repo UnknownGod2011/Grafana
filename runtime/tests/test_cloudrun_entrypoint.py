@@ -17,13 +17,21 @@ class CloudRunEntrypointTests(unittest.TestCase):
 
     def test_builds_fixed_safe_production_composition(self) -> None:
         argv = build_bootstrap_argv(self._env())
-        self.assertIn("--identity-mode", argv)
         self.assertEqual(argv[argv.index("--identity-mode") + 1], "iap")
-        self.assertIn("--audit-backend", argv)
         self.assertEqual(argv[argv.index("--audit-backend") + 1], "cloud-logging")
         self.assertEqual(argv[argv.index("--host") + 1], "0.0.0.0")
         self.assertEqual(argv[argv.index("--port") + 1], "8080")
+        self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "none")
         self.assertNotIn("--enable-production-remediation", argv)
+
+    def test_checkpoint_bucket_enables_durable_gcs_store(self) -> None:
+        env = self._env()
+        env["STAGEGUARD_CHECKPOINT_BUCKET"] = "stageguard-state-prod"
+        env["STAGEGUARD_CHECKPOINT_OBJECT"] = "prod/current.json"
+        argv = build_bootstrap_argv(env)
+        self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "gcs")
+        self.assertEqual(argv[argv.index("--checkpoint-object") + 1], "prod/current.json")
+        self.assertNotIn("stageguard-state-prod", argv)  # bucket stays environment-owned
 
     def test_gemini_is_opt_in(self) -> None:
         env = self._env()
