@@ -158,6 +158,38 @@ class ExecutionSafetyTests(unittest.TestCase):
         self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual(1, len(remediation.calls))
 
+    def test_restored_pending_production_approval_is_fail_closed_without_execution(self):
+        store = ConflictStore()
+        original_remediation = ReconcilingRemediation()
+        self._approved(original_remediation, store, diagnosed())
+        self.assertIsNotNone(store.current.approval)
+        self.assertIsNone(store.current.outcome)
+
+        restarted_remediation = ReconcilingRemediation("not_found")
+        restarted = self.service(restarted_remediation, store, diagnosed())
+
+        self.assertEqual("execution_uncertain", restarted.checkpoint_state())
+        self.assertEqual("reloaded", restarted.execution_reconciliation_state())
+        with self.assertRaisesRegex(RuntimeError, "uncertain"):
+            restarted.execute_approved()
+        self.assertEqual([], restarted_remediation.calls)
+
+        refreshed = restarted.reconcile_execution_uncertainty(actor="operator@example.com")
+        self.assertEqual(1, len(restarted_remediation.reconcile_calls))
+        self.assertEqual([], restarted_remediation.calls)
+        self.assertIsNone(refreshed.approval)
+        self.assertIsNone(refreshed.outcome)
+        self.assertEqual("clear", restarted.execution_reconciliation_state())
+
+    def test_restored_local_pending_approval_keeps_existing_local_semantics(self):
+        store = ConflictStore()
+        original = LocalRemediation()
+        self._approved(original, store, diagnosed())
+
+        restarted = self.service(LocalRemediation(), store, recovery())
+        self.assertEqual("synchronized", restarted.checkpoint_state())
+        self.assertEqual("clear", restarted.execution_reconciliation_state())
+
     def test_local_adapter_can_resolve_via_fresh_grafana_evidence_without_provider_lookup(self):
         store = ConflictStore()
         remediation = LocalRemediation()
