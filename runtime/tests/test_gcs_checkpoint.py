@@ -1,9 +1,13 @@
 import unittest
 
-from incident_checkpoint import GoogleCloudStorageCheckpointStore, IncidentCheckpoint
+from incident_checkpoint import CheckpointConflictError, GoogleCloudStorageCheckpointStore, IncidentCheckpoint
 from investigator import Evidence, IncidentReport
 
 KEY = b"k" * 32
+
+
+class PreconditionFailed(Exception):
+    code = 412
 
 
 class FakeBlob:
@@ -11,6 +15,7 @@ class FakeBlob:
         self.data = None
         self.generation = None
         self.uploads = []
+        self.force_conflict = False
 
     def exists(self):
         return self.data is not None
@@ -25,9 +30,11 @@ class FakeBlob:
         return self.data
 
     def upload_from_string(self, data, *, content_type, if_generation_match):
+        if self.force_conflict:
+            raise PreconditionFailed("provider object path must remain private")
         expected = 0 if self.data is None else self.generation
         if if_generation_match != expected:
-            raise RuntimeError("generation mismatch")
+            raise PreconditionFailed("generation mismatch")
         self.data = bytes(data)
         self.generation = 1 if self.generation is None else self.generation + 1
         self.uploads.append((content_type, if_generation_match))
@@ -69,6 +76,15 @@ class GcsCheckpointTests(unittest.TestCase):
         blob = bucket.blob("stageguard/incident-checkpoint.json")
         self.assertEqual(("application/json", 1), blob.uploads[1])
         self.assertEqual(2, store.load().sequence)
+
+    def test_generation_precondition_failure_has_bounded_conflict_type(self):
+        bucket = FakeBucket()
+        store = GoogleCloudStorageCheckpointStore(bucket, KEY)
+        store.save(checkpoint(1))
+        bucket.blob("stageguard/incident-checkpoint.json").force_conflict = True
+        with self.assertRaisesRegex(CheckpointConflictError, "concurrent update conflict") as caught:
+            store.save(checkpoint(2))
+        self.assertNotIn("provider object path", str(caught.exception))
 
     def test_wrong_signing_key_fails_closed(self):
         bucket = FakeBucket()
