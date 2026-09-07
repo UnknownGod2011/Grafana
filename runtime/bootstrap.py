@@ -27,6 +27,7 @@ from identity import (
     LocalDevelopmentIdentityProvider,
     StaticBearerIdentityProvider,
 )
+from incident_checkpoint import CheckpointStore, GoogleCloudStorageCheckpointStore, JsonCheckpointStore
 from incident_service import AuditReader, AuditSink, IncidentService, JsonlAuditLog
 from log_activation import LogActivationRecord, load_log_activation_record, verify_log_activation_record
 from mcp_log_client import McpLokiLogClient
@@ -77,40 +78,28 @@ def _identity_provider(
     normalized_mode = mode.strip().lower()
     if normalized_mode not in {"auto", "local", "bearer", "iap"}:
         raise ValueError("identity mode must be one of auto, local, bearer, iap")
-
     iap_audience = os.getenv(iap_audience_env, "").strip()
     token = os.getenv(token_env, "")
-
     if normalized_mode == "iap" or (normalized_mode == "auto" and iap_audience):
         if not iap_audience:
             raise ValueError(f"required environment variable {iap_audience_env} is not set")
         return GoogleIapIdentityProvider(iap_audience)
-
     if normalized_mode == "local":
         if not _is_loopback(host):
             raise ValueError("local identity is permitted only on loopback")
         return LocalDevelopmentIdentityProvider()
-
     if normalized_mode == "auto" and _is_loopback(host) and not token:
         return LocalDevelopmentIdentityProvider()
-
     if normalized_mode in {"auto", "bearer"}:
         token = token or _read_required_secret(token_env)
         subject = os.getenv(subject_env, "stageguard-operator").strip()
         if not subject:
             raise ValueError(f"{subject_env} must not be blank")
         return StaticBearerIdentityProvider({token: subject})
-
     raise ValueError("unable to configure identity provider")
 
 
-def _audit_sink(
-    *,
-    backend: str,
-    audit_path: str | Path,
-    cloud_project_env: str,
-    cloud_log_name: str,
-) -> AuditSink:
+def _audit_sink(*, backend: str, audit_path: str | Path, cloud_project_env: str, cloud_log_name: str) -> AuditSink:
     normalized = backend.strip().lower()
     if normalized == "jsonl":
         return JsonlAuditLog(audit_path)
@@ -120,12 +109,7 @@ def _audit_sink(
     raise ValueError("audit backend must be jsonl or cloud-logging")
 
 
-def _audit_reader(
-    *,
-    backend: str,
-    cloud_project_env: str,
-    cloud_log_name: str,
-) -> AuditReader | None:
+def _audit_reader(*, backend: str, cloud_project_env: str, cloud_log_name: str) -> AuditReader | None:
     normalized = backend.strip().lower()
     if normalized == "jsonl":
         return None
@@ -135,15 +119,32 @@ def _audit_reader(
     raise ValueError("audit backend must be jsonl or cloud-logging")
 
 
-def _production_remediation_from_env(
-    profile: TelemetryProfile,
+def _checkpoint_store(
     *,
-    endpoint_env: str,
-    token_env: str,
-) -> AllowlistedProductionRemediationClient:
-    endpoint = _read_required_secret(endpoint_env)
-    token = _read_required_secret(token_env)
-    transport = HttpRemediationTransport(endpoint, token)
+    backend: str,
+    checkpoint_path: str | Path,
+    checkpoint_bucket_env: str,
+    checkpoint_object: str,
+    cloud_project_env: str,
+) -> CheckpointStore | None:
+    normalized = backend.strip().lower()
+    if normalized == "none":
+        return None
+    if normalized == "json":
+        return JsonCheckpointStore(checkpoint_path)
+    if normalized == "gcs":
+        bucket = _read_required_secret(checkpoint_bucket_env)
+        project = os.getenv(cloud_project_env, "").strip() or None
+        return GoogleCloudStorageCheckpointStore.from_environment(
+            bucket_name=bucket,
+            project=project,
+            object_name=checkpoint_object,
+        )
+    raise ValueError("checkpoint backend must be none, json, or gcs")
+
+
+def _production_remediation_from_env(profile: TelemetryProfile, *, endpoint_env: str, token_env: str) -> AllowlistedProductionRemediationClient:
+    transport = HttpRemediationTransport(_read_required_secret(endpoint_env), _read_required_secret(token_env))
     return AllowlistedProductionRemediationClient(
         transport,
         allowed_production_id=profile.production_id,
@@ -170,6 +171,10 @@ def build_runtime(
     audit_backend: str = "jsonl",
     cloud_project_env: str = "GOOGLE_CLOUD_PROJECT",
     cloud_log_name: str = "stageguard-audit",
+    checkpoint_backend: str = "none",
+    checkpoint_path: str | Path = ".stageguard/incident-checkpoint.json",
+    checkpoint_bucket_env: str = "STAGEGUARD_CHECKPOINT_BUCKET",
+    checkpoint_object: str = "stageguard/incident-checkpoint.json",
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
     logs_factory: Callable[[], McpLokiLogClient] = McpLokiLogClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
@@ -180,11 +185,7 @@ def build_runtime(
     commander_factory: Callable[[], GeminiCommander] = _gemini_commander_from_environment,
     activation_now_unix: int | None = None,
 ) -> RuntimeBundle:
-    """Construct runtime with pinned evidence, trusted identity, and bounded audit.
-
-    Gemini remains disabled by default. Google IAP and Cloud Logging dependencies
-    are also lazy and only required when their explicit production modes are used.
-    """
+    """Construct runtime with pinned evidence, trusted identity, bounded audit and optional restart state."""
     profile = load_telemetry_profile(telemetry_config)
     metrics = metrics_factory()
     logs: McpLokiLogClient | None = None
@@ -202,54 +203,32 @@ def build_runtime(
                 raise ValueError("non-default production telemetry requires --log-activation")
             log_activation = load_log_activation_record(log_activation_path)
             logs = logs_factory()
-            verify_log_activation_record(
-                log_activation,
-                profile,
-                logs.datasource_uid,
-                now_unix=activation_now_unix,
-            )
+            verify_log_activation_record(log_activation, profile, logs.datasource_uid, now_unix=activation_now_unix)
         elif log_activation_path is not None:
             log_activation = load_log_activation_record(log_activation_path)
             logs = logs_factory()
-            verify_log_activation_record(
-                log_activation,
-                profile,
-                logs.datasource_uid,
-                now_unix=activation_now_unix,
-            )
+            verify_log_activation_record(log_activation, profile, logs.datasource_uid, now_unix=activation_now_unix)
 
         if remediation_factory is not None and enable_production_remediation:
             raise ValueError("choose either remediation_factory or explicit production remediation, not both")
         if enable_production_remediation and profile == DEFAULT_TELEMETRY_PROFILE:
             raise ValueError("explicit production remediation is not permitted for the demo telemetry profile")
 
-        identity = _identity_provider(
-            host,
-            mode=identity_mode,
-            token_env=token_env,
-            subject_env=subject_env,
-            iap_audience_env=iap_audience_env,
-        )
-        audit = _audit_sink(
-            backend=audit_backend,
-            audit_path=audit_path,
+        identity = _identity_provider(host, mode=identity_mode, token_env=token_env, subject_env=subject_env, iap_audience_env=iap_audience_env)
+        audit = _audit_sink(backend=audit_backend, audit_path=audit_path, cloud_project_env=cloud_project_env, cloud_log_name=cloud_log_name)
+        audit_reader = _audit_reader(backend=audit_backend, cloud_project_env=cloud_project_env, cloud_log_name=cloud_log_name)
+        checkpoint_store = _checkpoint_store(
+            backend=checkpoint_backend,
+            checkpoint_path=checkpoint_path,
+            checkpoint_bucket_env=checkpoint_bucket_env,
+            checkpoint_object=checkpoint_object,
             cloud_project_env=cloud_project_env,
-            cloud_log_name=cloud_log_name,
-        )
-        audit_reader = _audit_reader(
-            backend=audit_backend,
-            cloud_project_env=cloud_project_env,
-            cloud_log_name=cloud_log_name,
         )
 
         if remediation_factory is not None:
             remediation = remediation_factory(profile)
         elif enable_production_remediation:
-            remediation = _production_remediation_from_env(
-                profile,
-                endpoint_env=remediation_endpoint_env,
-                token_env=remediation_token_env,
-            )
+            remediation = _production_remediation_from_env(profile, endpoint_env=remediation_endpoint_env, token_env=remediation_token_env)
         elif profile == DEFAULT_TELEMETRY_PROFILE:
             remediation = SimulatorRemediationClient()
         else:
@@ -261,6 +240,7 @@ def build_runtime(
             remediation,
             audit,
             audit_reader=audit_reader,
+            checkpoint_store=checkpoint_store,
             telemetry_profile=profile,
             activation_record=activation,
             datasource_identity=metrics.datasource_uid if activation is not None else None,
@@ -289,36 +269,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-backend", choices=("jsonl", "cloud-logging"), default="jsonl")
     parser.add_argument("--cloud-project-env", default="GOOGLE_CLOUD_PROJECT")
     parser.add_argument("--cloud-log-name", default="stageguard-audit")
+    parser.add_argument("--checkpoint-backend", choices=("none", "json", "gcs"), default="json")
+    parser.add_argument("--checkpoint-path", default=".stageguard/incident-checkpoint.json")
+    parser.add_argument("--checkpoint-bucket-env", default="STAGEGUARD_CHECKPOINT_BUCKET")
+    parser.add_argument("--checkpoint-object", default="stageguard/incident-checkpoint.json")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9110)
     parser.add_argument("--identity-mode", choices=("auto", "local", "bearer", "iap"), default="auto")
     parser.add_argument("--token-env", default="STAGEGUARD_API_TOKEN", help="name of env var containing bearer token")
     parser.add_argument("--subject-env", default="STAGEGUARD_API_SUBJECT", help="name of env var containing operator subject")
-    parser.add_argument(
-        "--iap-audience-env",
-        default="STAGEGUARD_IAP_AUDIENCE",
-        help="name of env var containing the exact IAP Signed Header JWT audience",
-    )
-    parser.add_argument(
-        "--enable-gemini",
-        action="store_true",
-        help="enable revision-bound advisory Gemini briefings using Vertex AI environment/ADC",
-    )
-    parser.add_argument(
-        "--enable-production-remediation",
-        action="store_true",
-        help="explicitly enable the allowlisted HTTPS production write adapter",
-    )
-    parser.add_argument(
-        "--remediation-endpoint-env",
-        default="STAGEGUARD_REMEDIATION_ENDPOINT",
-        help="name of env var containing the fixed HTTPS remediation endpoint",
-    )
-    parser.add_argument(
-        "--remediation-token-env",
-        default="STAGEGUARD_REMEDIATION_TOKEN",
-        help="name of env var containing the separate remediation bearer credential",
-    )
+    parser.add_argument("--iap-audience-env", default="STAGEGUARD_IAP_AUDIENCE", help="name of env var containing the exact IAP Signed Header JWT audience")
+    parser.add_argument("--enable-gemini", action="store_true", help="enable revision-bound advisory Gemini briefings using Vertex AI environment/ADC")
+    parser.add_argument("--enable-production-remediation", action="store_true", help="explicitly enable the allowlisted HTTPS production write adapter")
+    parser.add_argument("--remediation-endpoint-env", default="STAGEGUARD_REMEDIATION_ENDPOINT", help="name of env var containing the fixed HTTPS remediation endpoint")
+    parser.add_argument("--remediation-token-env", default="STAGEGUARD_REMEDIATION_TOKEN", help="name of env var containing the separate remediation bearer credential")
     return parser
 
 
@@ -333,6 +297,10 @@ def main(argv: list[str] | None = None) -> int:
             audit_backend=args.audit_backend,
             cloud_project_env=args.cloud_project_env,
             cloud_log_name=args.cloud_log_name,
+            checkpoint_backend=args.checkpoint_backend,
+            checkpoint_path=args.checkpoint_path,
+            checkpoint_bucket_env=args.checkpoint_bucket_env,
+            checkpoint_object=args.checkpoint_object,
             host=args.host,
             port=args.port,
             identity_mode=args.identity_mode,
