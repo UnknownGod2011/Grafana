@@ -80,6 +80,33 @@ class IncidentSnapshot:
         }
 
 
+_TIMELINE_PAYLOAD_FIELDS = {
+    "investigation_completed": ("revision", "status", "confidence", "evidence_mode"),
+    "briefing_generated": ("revision", "briefing_sha256", "next_step"),
+    "briefing_failed": ("revision", "error_type"),
+    "remediation_approved": ("revision", "action"),
+    "remediation_completed": ("revision", "status", "sample_count", "action_accepted"),
+}
+_MAX_TIMELINE_EVENTS = 512
+
+
+def _actor_fingerprint(actor: str) -> str:
+    """Return a stable pseudonymous actor reference suitable for operator UI."""
+    return hashlib.sha256(actor.encode("utf-8")).hexdigest()[:12]
+
+
+def _timeline_event(event: AuditEvent) -> dict[str, object]:
+    allowed = _TIMELINE_PAYLOAD_FIELDS.get(event.event_type, ())
+    payload = {key: event.payload[key] for key in allowed if key in event.payload}
+    return {
+        "sequence": event.sequence,
+        "timestamp_unix_ms": event.timestamp_unix_ms,
+        "event_type": event.event_type,
+        "actor_ref": _actor_fingerprint(event.actor),
+        "payload": payload,
+    }
+
+
 def _revision(report: IncidentReport) -> str:
     canonical = json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
@@ -155,15 +182,52 @@ class IncidentService:
         self._recovery_sleep = recovery_sleep
         self._snapshot: IncidentSnapshot | None = None
         self._sequence = 0
+        self._timeline: list[AuditEvent] = []
         self._lock = threading.RLock()
 
     def _record(self, incident_id: str, event_type: str, actor: str, payload: dict) -> None:
         self._sequence += 1
-        self._audit.append(AuditEvent(self._sequence, self._clock_ms(), incident_id, event_type, actor, payload))
+        event = AuditEvent(self._sequence, self._clock_ms(), incident_id, event_type, actor, payload)
+        self._audit.append(event)
+        self._timeline.append(event)
+        if len(self._timeline) > _MAX_TIMELINE_EVENTS:
+            del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
 
     def status(self) -> IncidentSnapshot | None:
         with self._lock:
             return self._snapshot
+
+    def audit_timeline(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> dict[str, object]:
+        """Return a bounded redacted lifecycle timeline for the current incident.
+
+        Durable audit storage remains write-only to this service surface. This read
+        model is derived from lifecycle events already emitted by this process and
+        deliberately excludes provider strings, raw evidence, queries, targets,
+        endpoints, activation identifiers, and actor identities.
+        """
+        if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
+            raise ValueError("after_sequence must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self._lock:
+            snapshot = self._snapshot
+            if snapshot is None:
+                raise RuntimeError("no incident has been investigated")
+            if incident_id != snapshot.incident_id:
+                raise ValueError("timeline request does not match the current incident")
+            matching = [
+                event for event in self._timeline
+                if event.incident_id == incident_id and event.sequence > after_sequence
+            ]
+            selected = matching[:limit]
+            has_more = len(matching) > len(selected)
+            next_after = selected[-1].sequence if selected else after_sequence
+            return {
+                "incident_id": incident_id,
+                "events": [_timeline_event(event) for event in selected],
+                "next_after_sequence": next_after,
+                "has_more": has_more,
+            }
 
     def investigate(self, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
