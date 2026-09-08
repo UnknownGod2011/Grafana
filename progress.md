@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 execution phases, bounded reconciliation reasons, bounded append-only reconciliation audit events, a deterministic tamper-evident audit hash chain, and backward-compatible checkpoint schema v3 audit-chain binding now wired into ordinary lifecycle, pre-dispatch, and reconciliation checkpoint writes when a durable audit reader is available.
+StageGuard is a personal open-source incident commander for live media workflows. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 execution phases, bounded reconciliation reasons, bounded append-only reconciliation audit events, a deterministic tamper-evident audit hash chain, and backward-compatible checkpoint schema v3 audit-chain binding wired into ordinary lifecycle, pre-dispatch, and reconciliation checkpoint writes when a durable audit reader is available.
 
 Core safety invariants:
 
@@ -19,6 +19,7 @@ Core safety invariants:
 - Audit-chain state uses domain-separated SHA-256, strict contiguous sequence numbers, and never advances its trusted head when the underlying audit append fails.
 - Schema v3 is emitted only when a real durable-audit chain head is available; non-durable/in-memory callers remain on v2 rather than receiving a fake integrity proof.
 - In the execution-safe runtime, an audit-integrity failure maps to fail-closed checkpoint readiness and lifecycle mutation is blocked before dispatch/reconciliation work.
+- The authenticated checkpoint audit sequence is authoritative on restore. Durable audit events beyond that head are treated as uncommitted/orphan lineage and must never be adopted into runtime sequence or approval state.
 
 ## Completed milestones
 
@@ -43,75 +44,62 @@ Core safety invariants:
 - Backward-compatible checkpoint schema v3 representation for authenticated audit-chain sequence/head binding.
 - Runtime lifecycle checkpoint binding for durable JSONL/explicit audit readers, including execution-safe `dispatching` and reconciliation checkpoints.
 - Credential-free runtime regression coverage for v3 restart verification, durable audit mutation fail-closed behavior, and dispatch-barrier chain-head preservation.
+- Restore-time orphan-tail rejection so append-before-CAS losers cannot be silently adopted after restart.
 
-## Run log — 2026-09-08 — runtime audit-chain binding
+## Run log — 2026-09-08 — restore-time orphan audit rejection
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Then inspected `runtime/audit_integrity.py`, `runtime/incident_service.py`, `runtime/execution_safety.py`, `runtime/incident_checkpoint.py`, `runtime/api.py`, `runtime/bootstrap.py`, `runtime/tests/test_audit_integrity.py`, and the existing checkpoint tests. Confirmed schema v3 existed but ordinary service writers and execution-safety checkpoints still emitted unbound v2 state.
+Read `progress.md` completely before choosing work. Then inspected `runtime/incident_service.py`, `runtime/api.py`, `runtime/tests/test_runtime_audit_checkpoint_binding.py`, the latest source commits, and current commit-status state. Confirmed the previous runtime binding verified the authenticated audit prefix but `_apply_checkpoint()` still raised the in-memory sequence to the maximum durable audit sequence. That meant a crashed or CAS-losing writer could leave an append-only tail that was not authenticated by the winning checkpoint yet was silently adopted into process sequence state.
 
 ### Exact changes made
 
-1. Wired integrity-capable audit state into `IncidentService`.
-   - Added fixed internal states: `disabled`, `unbound_legacy`, `verified`, `failed`.
-   - Added durable audit-prefix replay and verification against authenticated v3 `audit_chain_sequence` / `audit_chain_head_sha256`.
-   - Added deterministic reconstruction for readable legacy checkpoints without falsely calling the old history authenticated.
-   - Added `_checkpoint_for_snapshot()` so ordinary checkpoint writes can bind the current chain head without duplicating serialization logic.
-   - Audit events advance the local trusted chain only after the underlying audit append succeeds.
-   - Lifecycle mutation fails closed once audit verification/advancement enters `failed`.
+1. Closed restore-time orphan adoption in `runtime/incident_service.py`.
+   - Added `_assert_no_audit_tail(incident_id, authenticated_sequence)`.
+   - After verifying either a v3 authenticated chain head or a reconstructed readable legacy prefix, the runtime now performs a bounded durable read strictly after the authenticated/checkpoint sequence.
+   - Any event beyond that head marks audit integrity `failed`; it is never treated as continuation of the winning lineage.
+   - Removed the previous `_apply_checkpoint()` logic that used the maximum durable audit sequence.
+   - Restored runtime `_sequence` now remains exactly the checkpoint sequence, preserving the authenticated winner as the source of truth.
 
-2. Made local JSONL a real restart-verifiable development path.
-   - `JsonlAuditLog` now implements bounded incident/sequence reads over its append-only file.
-   - `IncidentService` automatically uses the same JSONL object for readback, so JSON checkpoint + JSONL audit development runs can emit and verify schema v3 without extra wiring.
-   - `MemoryAuditLog` remains non-durable by default; merely having an in-memory `read()` method does not cause checkpoints to claim durable audit integrity. Existing in-memory callers therefore remain schema v2/unbound unless an audit reader is explicitly supplied.
+2. Preserved conservative behavior for legacy readable checkpoints.
+   - A complete legacy prefix can still be reconstructed when a durable reader exists.
+   - A durable tail beyond the legacy checkpoint sequence now fails integrity instead of being silently absorbed.
+   - Non-durable/in-memory deployments remain unchanged and do not claim schema-v3 integrity.
 
-3. Preserved audit binding through the remediation safety state machine.
-   - `ExecutionSafeIncidentService._persist_dispatching_barrier()` now uses the base checkpoint builder, so the pre-provider `dispatching` barrier carries the same authenticated audit-chain head.
-   - Reconciliation-attempt events advance the chain after audit append and persist `dispatching` plus the new chain head atomically through the checkpoint store.
-   - Successful bound writes promote reconstructed legacy state to `verified` only after checkpoint save succeeds.
-   - Added a pre-dispatch consistency check so an audit-integrity failure cannot write a new dispatch barrier or reach provider execution.
-   - Added the same consistency gate before provider reconciliation.
-
-4. Closed the immediate readiness safety gap.
-   - The execution-safe runtime maps `audit_integrity == failed` to the existing fail-closed `conflicted` checkpoint state.
-   - This makes the current `/readyz` path return not-ready immediately on verified audit tamper, even before dedicated audit-integrity telemetry is added.
-
-5. Added `runtime/tests/test_runtime_audit_checkpoint_binding.py`.
-   - Requires JSONL-backed runtime checkpoints to emit schema v3 with a real 64-character chain head.
-   - Requires restart to verify that head and remain synchronized.
-   - Mutates a durable audit event without changing the checkpoint and requires restart state `failed`, fail-closed checkpoint state, and blocked investigation.
-   - Requires the pre-provider `dispatching` barrier to preserve the already-authenticated chain sequence/head exactly rather than downgrading to v2.
+3. Extended `runtime/tests/test_runtime_audit_checkpoint_binding.py`.
+   - Added a concrete orphan-tail case: create a valid v3 checkpoint at sequence 1, append an uncommitted sequence-2 `remediation_approved` event without updating the checkpoint, restart, and require `audit_integrity == failed`, fail-closed checkpoint state, checkpoint sequence preservation, no restored approval, and blocked investigation.
+   - Added a conflicting duplicate case at the authenticated sequence with a different actor and requires fail-closed restore.
+   - Existing v3 restart verification, mutation detection, and `dispatching` head-preservation tests remain intact.
 
 ### Tests / checks / results
 
 - GitHub repository reads and source writes succeeded.
-- Attempted a credential-free local checkout and targeted test run with `python -m unittest tests.test_runtime_audit_checkpoint_binding tests.test_audit_integrity tests.test_incident_checkpoint`.
-- The checkout failed before Python started because the execution container still cannot resolve `github.com` (`Could not resolve host: github.com`). The new/affected tests are therefore **not claimed green locally**.
-- GitHub reports no commit status contexts for the latest source-test commit; no Actions workflow was manually triggered or rerun.
+- Reviewed the resulting source diff after write; it contains only the intended orphan-tail guard, restore sequence change, and tests.
+- Attempted the targeted credential-free local suite with `python -m unittest tests.test_runtime_audit_checkpoint_binding tests.test_audit_integrity tests.test_incident_checkpoint` after a fresh clone.
+- The clone again failed before Python started because the execution container cannot resolve `github.com` (`Could not resolve host: github.com`). The updated tests are therefore **not claimed green locally**.
+- GitHub reports no commit status contexts for the latest test commit; no Actions workflow was manually triggered or rerun.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **Never auto-bind an in-memory audit sink.** A process-local reader is not durable restart evidence and must not cause schema v3 emission.
-2. **Use the same JSONL file for local sink + reader.** This keeps the free/local path genuinely restart-verifiable without additional services.
-3. **Keep append-before-checkpoint ordering for now.** The chain head advances only after the durable audit append succeeds, preserving the previous sink-failure invariant. CAS-loser orphan events are treated conservatively rather than silently selected away.
-4. **Carry the current head through `dispatching` without adding an event.** The dispatch barrier is a lifecycle safety transition, not an audit event, so sequence/head remain unchanged while the authenticated checkpoint phase advances.
-5. **Fail closed before provider contact when integrity is failed.** Audit tamper cannot be allowed to coexist with remediation execution merely because provider idempotency exists.
-6. **Use existing checkpoint readiness as the immediate safety gate.** Dedicated `audit_integrity` readiness/metrics remain desirable, but false-ready behavior was removed first.
+1. **Authenticated checkpoint state wins over append-only tail state.** A durable append is not committed StageGuard lineage until the matching checkpoint CAS succeeds.
+2. **Fail closed rather than auto-truncate.** StageGuard does not mutate or delete suspicious durable audit events during restore; operators retain forensic evidence.
+3. **Never infer approval from orphan audit events.** Lifecycle truth remains checkpoint-backed, so an uncommitted `remediation_approved` audit line cannot manufacture executable state.
+4. **Keep restore reads bounded.** Detecting existence of a tail requires only one event beyond the authenticated head; there is no need to ingest arbitrary untrusted history.
+5. **Do not weaken append-before-checkpoint ordering yet.** The existing ordering protects against persisting a chain head for an audit event that never became durable; lineage/commit markers remain the longer-term availability improvement.
 
 ### Current blockers / unknowns
 
-- Dedicated `/readyz`, `/v1/incident`, and Prometheus `audit_integrity` fields/metrics are not yet exposed; failed integrity currently surfaces through the existing `conflicted` checkpoint gate.
-- A v3 restore currently verifies the authenticated prefix but the service still needs an explicit check for unauthenticated durable tail events left by a crashed/CAS-losing writer. Such a tail will cause the next chain append to fail, but it should be detected at restore time so readiness is immediately and specifically failed.
-- Multi-instance append-before-CAS can leave orphan/duplicate audit events in Cloud Logging. The current strict verifier is safe but may sacrifice availability; a production-grade lineage/commit marker strategy is still needed so the authenticated winner can be distinguished without accepting mutation/reordering.
+- Dedicated `/readyz`, `/v1/incident`, and Prometheus `audit_integrity` fields/metrics are still not exposed; failed integrity currently surfaces through the existing fail-closed checkpoint gate.
+- Multi-instance append-before-CAS can still leave orphan/duplicate events in Cloud Logging. Restore now detects them safely, but a production-grade lineage/commit-marker strategy is still needed to distinguish the authenticated winner without sacrificing availability.
 - The updated runtime tests still need execution in a complete local/CI checkout before a green result can be claimed.
 - Real GCS generation behavior still needs live/emulated provider-backed acceptance beyond the credential-free generation-aware fake.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real remediation provider remain external-resource validation tasks.
 
 ## Single best next step
 
-**Make audit integrity an explicit operator contract and close restore-time orphan detection: reject any durable sequence beyond the authenticated v3 chain head (including duplicate/conflicting sequence entries) before reporting readiness, expose fixed-cardinality `audit_integrity={disabled,unbound_legacy,verified,failed}` through `/v1/incident`, `/readyz`, and one-hot Prometheus metrics, and add a multi-instance CAS-loser acceptance test proving an orphan audit append cannot be mistaken for the authenticated checkpoint winner or permit remediation replay.**
+**Expose `audit_integrity={disabled,unbound_legacy,verified,failed}` as an explicit fixed-cardinality operator contract through `/v1/incident`, `/readyz`, and one-hot Prometheus metrics, with `failed` forcing readiness false independently of checkpoint-state aliasing; then add API/metrics regression coverage proving unknown/internal values collapse to `failed` and no incident/provider identifiers appear in labels.**
 
 ## Previous run summary
 
-The previous run introduced checkpoint schema v3 fields for an authenticated audit-chain sequence/head while deliberately leaving ordinary runtime writers on v2 until a real integrity proof existed.
+The previous run wired real durable audit-chain state into runtime lifecycle, dispatching, and reconciliation checkpoints and made mutation of the authenticated audit prefix fail closed on restart.
