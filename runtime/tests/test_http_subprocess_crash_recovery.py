@@ -256,10 +256,13 @@ class HttpSubprocessCrashRecoveryTests(unittest.TestCase):
             diagnosed(),
         )
         self.assertEqual("execution_uncertain", restarted.checkpoint_state())
+        self.assertEqual("dispatching", restarted.execution_checkpoint_phase())
+        self.assertEqual("durable_dispatching", restarted.execution_reconciliation_reason())
         refreshed = restarted.reconcile_execution_uncertainty(actor="operator@example.com")
         self.assertIsNone(refreshed.approval)
         self.assertEqual("synchronized", restarted.checkpoint_state())
         self.assertEqual("none", restarted.execution_checkpoint_phase())
+        self.assertEqual("clear", restarted.execution_reconciliation_reason())
 
         # Reconciliation is read-only and recovery must not replay the POST.
         posts_after = [event for event in self.server.events if event[0] == "POST"]
@@ -277,6 +280,7 @@ class HttpSubprocessCrashRecoveryTests(unittest.TestCase):
             [],
         )
         self.assertEqual("synchronized", final_restart.checkpoint_state())
+        self.assertEqual("clear", final_restart.execution_reconciliation_reason())
         self.assertIsNone(final_restart.status().approval)
         self.assertEqual(expected_posts, len([event for event in self.server.events if event[0] == "POST"]))
 
