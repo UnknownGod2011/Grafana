@@ -16,6 +16,7 @@ Core safety invariants:
 - `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution-phase and reconciliation-reason telemetry are fixed-cardinality and provider-detail-free.
 - Concrete remediation reconciliation is GET-only and cannot carry a remediation body.
 - After CAS contention, process-local execution uncertainty is rebased from the authenticated durable winner, but direct knowledge that this process may already have crossed the dispatch barrier is never erased merely because a conflicting durable winner reports `approved`.
+- The operator cockpit treats reconciliation reason as bounded safety guidance only; it never renders provider state, operation identity, endpoints, generations, credentials, or exception detail.
 
 ## Completed milestones
 
@@ -37,72 +38,74 @@ Core safety invariants:
 - Credential-free spawned-process GCS generation-CAS acceptance with a process-safe fake object backend.
 - End-to-end spawned-process `ExecutionSafeIncidentService` dispatch and reconciliation races over generation-aware GCS semantics.
 - Service-level conflict-reload phase matrix for `none`, `approved`, `dispatching`, `resolved`, and `legacy_unknown`, including fail-closed contradictory `approved` handling.
-- Fixed-cardinality reconciliation-reason model for operator state, readiness, and Prometheus telemetry.
+- Fixed-cardinality reconciliation-reason model for operator state, readiness, Prometheus telemetry, and same-origin recovery guidance.
 
-## Run log — 2026-09-08 — bounded reconciliation-reason observability
+## Run log — 2026-09-08 — operator reconciliation guidance and transition contract
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/execution_safety.py` for restored ambiguity, post-dispatch exceptions, conflict reload, and reconciliation state;
-- `runtime/api.py` for `/v1/incident`, `/readyz`, `/metrics`, bounded execution-phase handling, and fallback behavior;
-- `runtime/operator_console.py` for the existing same-origin fail-closed recovery surface;
-- `runtime/tests/test_checkpoint_observability.py` and `runtime/tests/test_api.py` for current low-cardinality and HTTP contracts;
-- the repository root/runtime trees to confirm the change belongs in the existing safety/observability layer rather than a new subsystem.
+- `runtime/operator_console.py` for the same-origin lifecycle recovery UI, action gating, CSP-safe DOM rendering, and reconciliation workflow;
+- `runtime/tests/test_operator_console.py` for current browser-asset and credential-leakage guarantees;
+- `runtime/tests/test_execution_conflict_reload_phases.py` for real execution-state transitions across durable `none`, `approved`, `dispatching`, `resolved`, and legacy winners;
+- current repository/runtime/test trees and the latest commit sequence before writing.
 
 ### Exact changes made
 
-1. Hardened `runtime/execution_safety.py` with an explicit bounded reconciliation reason.
-   - Added only five values: `clear`, `durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, and `phase_unavailable`.
-   - Restored schema-v2 `dispatching` maps to `durable_dispatching`.
-   - Legacy-v1 ambiguous approval maps to `legacy_unknown`.
-   - Stores that cannot prove an execution phase, plus post-provider failures without a durable phase barrier, map to `phase_unavailable`.
-   - A contradictory conflict reload where this process may have dispatched but the durable winner reports `approved` maps to `post_dispatch_checkpoint_regression`.
-   - Clearing execution uncertainty also clears the reason back to `clear`.
-   - The public getter validates the enum and fails closed to `phase_unavailable`; it never returns incident IDs, operation IDs, endpoints, targets, actors, generations, provider states, or exception text.
+1. Wired `execution_reconciliation_reason` into the same-origin operator cockpit.
+   - Added a dedicated lifecycle recovery reason panel rendered only while execution is uncertain.
+   - The client accepts exactly the fixed reason set: `clear`, `durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, `phase_unavailable`.
+   - Any unexpected value fails closed to `phase_unavailable`.
+   - `/v1/incident`, checkpoint reload, and execution reconciliation responses now feed the bounded reason into the UI.
+   - Guidance is distinct by failure mode and explicitly tells the operator when to reload durable state, reconcile through the idempotency status path, and require fresh Grafana evidence.
+   - `durable_dispatching` guidance explicitly forbids a second remediation execution.
+   - No operation ID, provider endpoint/state, checkpoint generation, credential, actor identity, or exception text is rendered or accepted.
 
-2. Extended `runtime/api.py` operator/readiness observability.
-   - `/v1/incident` and conflict/reconciliation lifecycle responses now include `execution_reconciliation_reason`.
-   - `/readyz` includes `checks.remediation_reconciliation_reason` and remains non-ready for every `execution_uncertain` state.
-   - `/metrics` exports one-hot `stageguard_remediation_reconciliation_reason{reason="..."}` across the fixed five-value enum.
-   - Unexpected/throwing service values collapse to `phase_unavailable` rather than becoming a new label.
-   - The fail-closed `/readyz` exception response also reports only `phase_unavailable`.
-   - Bumped the HTTP server identifier from StageGuard/0.11 to StageGuard/0.12 for the operator-contract change.
+2. Extended `runtime/tests/test_operator_console.py`.
+   - Proves the new recovery-reason panel exists.
+   - Proves all four uncertain reason values are embedded as a fixed allowlist.
+   - Proves server `execution_reconciliation_reason` drives the client.
+   - Proves guidance includes fresh Grafana evidence and explicit no-replay wording.
+   - Retains assertions that `operation_id`, provider URLs, browser persistence, external URLs, and embedded credentials are absent.
 
-3. Added `runtime/tests/test_execution_reconciliation_observability.py`.
-   - Proves every non-clear bounded reason blocks readiness when execution is uncertain.
-   - Proves the reconciliation-reason metric has exactly the fixed label set and exactly one active sample.
-   - Proves incident IDs, operation-like IDs, provider URLs, and production IDs do not appear in the metric surface.
-   - Proves arbitrary or exception-producing reason values collapse to `phase_unavailable`.
-   - Proves lifecycle/operator state includes the bounded reason.
-   - Proves the `ExecutionSafeIncidentService` getter itself refuses an unexpected internal reason.
+3. Strengthened `runtime/tests/test_execution_conflict_reload_phases.py` so reason telemetry is tied to real service transitions.
+   - A post-provider resolved-save conflict backed by durable `dispatching` must report `durable_dispatching`.
+   - Durable `none` and `resolved` winners must clear the reason to `clear`.
+   - Durable `dispatching` must remain `durable_dispatching`.
+   - Legacy ambiguity must report `legacy_unknown`.
+   - A contradictory durable `approved` winner after this process may have dispatched must report `post_dispatch_checkpoint_regression`.
+   - Existing no-replay/provider-call-count assertions remain intact.
 
 ### Tests / checks / results
 
-- GitHub repository inspection and blob writes succeeded.
-- Attempted a credential-free local checkout to run the targeted tests, but `git clone` failed before Python started with `Could not resolve host: github.com`.
-- Therefore `python -m unittest tests.test_execution_reconciliation_observability tests.test_execution_conflict_reload_phases tests.test_execution_safety` is **not claimed as executed successfully in this environment**.
-- No GitHub Actions workflow was intentionally triggered or rerun; the changes are grouped into one Git commit/ref update to minimize CI noise.
+- GitHub repository reads and writes succeeded.
+- Latest source commit before this progress update: `ed8db574d8c083ff8cf941fa97e8d43686f511eb`.
+- GitHub combined commit status currently reports no status checks for that commit; no GitHub Actions workflow was intentionally triggered or rerun.
+- Attempted a credential-free local checkout for direct Python execution, but the container still fails before Python starts with `Could not resolve host: github.com`.
+- Therefore the targeted suite is **not claimed as executed successfully in this environment**.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **Reason is operational classification, not provider state.** Provider reconciliation still has only `accepted` / `not_found` / `unknown`; the new reason explains why StageGuard entered its fail-closed gate.
-2. **No dynamic fallback labels.** Unknown values always become `phase_unavailable`.
-3. **Contradictory multi-instance handoff is explicit.** `post_dispatch_checkpoint_regression` distinguishes a safety-significant regression from ordinary durable `dispatching` without exposing the operation identity.
-4. **Readiness remains tied to the safety state, not the reason string.** Every execution-uncertain reason blocks readiness, so adding diagnosis cannot weaken the gate.
-5. **Operator lifecycle JSON is the authoritative UI contract.** The same-origin cockpit can render reason-specific guidance without needing any sensitive provider details.
+1. **The browser consumes the bounded reason, never provider detail.** Recovery guidance is derived entirely from the five-value server contract.
+2. **Unknown client values fail closed.** A future or malformed reason becomes `phase_unavailable`; it cannot create a permissive UI branch.
+3. **Reason guidance cannot enable remediation.** Existing lifecycle blocking still controls investigation, briefing, approval, and execution; reason text is explanatory only.
+4. **Real transition tests are authoritative.** The conflict-reload matrix now verifies the reason associated with actual `ExecutionSafeIncidentService` state rather than relying only on an observability stub.
 
 ### Current blockers / unknowns
 
-- The new observability tests have not executed in a full local checkout because this environment still cannot resolve `github.com` from the container runtime.
+- The updated operator and conflict-transition tests have not executed in a full local checkout because this environment still cannot resolve `github.com` from the container runtime.
 - Real GCS generation behavior is covered by the credential-free multiprocess fake but still needs a live/emulated acceptance environment before provider-backed production validation can be claimed.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real provider idempotency endpoint still require external credentials/resources.
 
 ## Single best next step
 
-**Wire `execution_reconciliation_reason` into the same-origin operator cockpit with reason-specific, non-sensitive recovery guidance and add browser-asset tests for all four uncertain reasons. Then add reason-transition assertions to the existing conflict-reload/crash matrices so the UI/telemetry contract is proven against real `ExecutionSafeIncidentService` transitions rather than only an observability stub.**
+**Add reconciliation-reason assertions to the concrete process-death / HTTPS ambiguity suites, especially malformed JSON, wrong-operation echo, unknown provider state, timeout, and later authoritative recovery. Prove those paths remain `durable_dispatching` while uncertainty persists, transition to `clear` only after authoritative reconciliation plus fresh Grafana evidence, and never issue a second remediation POST.**
+
+## Previous run — 2026-09-08 — bounded reconciliation-reason observability
+
+Added the five-value provider-detail-free reconciliation reason to execution safety, `/v1/incident`, `/readyz`, and one-hot Prometheus metrics, with fail-closed fallback to `phase_unavailable`.
 
 ## Previous run — 2026-09-08 — conflict reload execution-phase matrix
 
