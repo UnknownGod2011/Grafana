@@ -92,6 +92,7 @@ class ConflictReloadPhaseMatrixTests(unittest.TestCase):
         self.assertEqual(1, len(remediation.calls))
         self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual("dispatching", service.execution_checkpoint_phase())
+        self.assertEqual("durable_dispatching", service.execution_reconciliation_reason())
         self.assertIsNotNone(service.status().outcome)
         return service, remediation, store, approved, service.status().outcome
 
@@ -119,6 +120,7 @@ class ConflictReloadPhaseMatrixTests(unittest.TestCase):
         self.assertIsNone(reloaded.outcome)
         self.assertEqual("synchronized", service.checkpoint_state())
         self.assertEqual("clear", service.execution_reconciliation_state())
+        self.assertEqual("clear", service.execution_reconciliation_reason())
         self.assertEqual("none", service.execution_checkpoint_phase())
         with self.assertRaisesRegex(RuntimeError, "approval"):
             service.execute_approved()
@@ -133,6 +135,7 @@ class ConflictReloadPhaseMatrixTests(unittest.TestCase):
         self.assertIsNotNone(reloaded.outcome)
         self.assertEqual("synchronized", service.checkpoint_state())
         self.assertEqual("clear", service.execution_reconciliation_state())
+        self.assertEqual("clear", service.execution_reconciliation_reason())
         self.assertEqual("resolved", service.execution_checkpoint_phase())
         with self.assertRaisesRegex(RuntimeError, "already been consumed"):
             service.execute_approved()
@@ -148,6 +151,7 @@ class ConflictReloadPhaseMatrixTests(unittest.TestCase):
         self.assertEqual(approved.approval, reloaded.approval)
         self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual("reloaded", service.execution_reconciliation_state())
+        self.assertEqual("durable_dispatching", service.execution_reconciliation_reason())
         self.assertEqual("dispatching", service.execution_checkpoint_phase())
         with self.assertRaisesRegex(RuntimeError, "uncertain"):
             service.execute_approved()
@@ -164,6 +168,7 @@ class ConflictReloadPhaseMatrixTests(unittest.TestCase):
 
         self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual("reloaded", service.execution_reconciliation_state())
+        self.assertEqual("legacy_unknown", service.execution_reconciliation_reason())
         self.assertEqual("legacy_unknown", service.execution_checkpoint_phase())
         with self.assertRaisesRegex(RuntimeError, "uncertain"):
             service.execute_approved()
@@ -180,6 +185,7 @@ class ConflictReloadPhaseMatrixTests(unittest.TestCase):
         self.assertEqual(approved.approval, reloaded.approval)
         self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual("reloaded", service.execution_reconciliation_state())
+        self.assertEqual("post_dispatch_checkpoint_regression", service.execution_reconciliation_reason())
         self.assertEqual("unknown", service.execution_checkpoint_phase())
         with self.assertRaisesRegex(RuntimeError, "uncertain"):
             service.execute_approved()
