@@ -23,6 +23,8 @@ from incident_service import IncidentService, IncidentSnapshot
 from remediation import remediation_operation_id
 
 ReconciliationState = Literal["accepted", "not_found", "unknown"]
+ExecutionPhase = Literal["none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown"]
+_EXECUTION_PHASES = {"none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown"}
 
 
 class ExecutionSafeIncidentService(IncidentService):
@@ -33,8 +35,33 @@ class ExecutionSafeIncidentService(IncidentService):
         self._execution_uncertain_operation_id: str | None = None
         self._execution_reloaded = False
         self._allow_uncertainty_investigation = False
+        self._uncertain_execution_phase: ExecutionPhase = "unknown"
         super().__init__(*args, **kwargs)
         self._guard_restored_production_approval()
+
+    @staticmethod
+    def _snapshot_execution_phase(snapshot: IncidentSnapshot | None) -> ExecutionPhase:
+        """Derive the bounded phase for ordinary synchronized lifecycle state."""
+        if snapshot is None:
+            return "none"
+        if snapshot.outcome is not None:
+            return "resolved"
+        if snapshot.approval is not None:
+            return "approved"
+        return "none"
+
+    def execution_checkpoint_phase(self) -> ExecutionPhase:
+        """Return provider-detail-free execution phase for metrics/readiness.
+
+        The method intentionally exposes only a fixed enum. During execution
+        uncertainty it reports the authenticated/restored barrier phase rather
+        than deriving ``approved`` from the still-pending lifecycle snapshot.
+        """
+        with self._lock:
+            if not self._execution_uncertain:
+                return self._snapshot_execution_phase(self._snapshot)
+            phase = self._uncertain_execution_phase
+            return phase if phase in _EXECUTION_PHASES else "unknown"
 
     def _phase_capable_store(self):
         store = self._checkpoint_store
@@ -80,6 +107,7 @@ class ExecutionSafeIncidentService(IncidentService):
             raise RuntimeError("invalid pending remediation execution phase")
         self._execution_uncertain = True
         self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
+        self._uncertain_execution_phase = "unknown" if phase is None else phase
         # Construction has already adopted and validated this durable state.
         self._execution_reloaded = True
 
@@ -140,6 +168,7 @@ class ExecutionSafeIncidentService(IncidentService):
                 if dispatch_barrier:
                     self._execution_uncertain = True
                     self._execution_uncertain_operation_id = operation_id
+                    self._uncertain_execution_phase = "dispatching"
                     self._execution_reloaded = False
                 raise
             except Exception:
@@ -148,6 +177,7 @@ class ExecutionSafeIncidentService(IncidentService):
                     # exception is ambiguous. Never retry the action in-process.
                     self._execution_uncertain = True
                     self._execution_uncertain_operation_id = operation_id
+                    self._uncertain_execution_phase = "dispatching"
                     self._execution_reloaded = True
                 raise
 
@@ -209,6 +239,7 @@ class ExecutionSafeIncidentService(IncidentService):
                 self._execution_uncertain = False
                 self._execution_uncertain_operation_id = None
                 self._execution_reloaded = False
+                self._uncertain_execution_phase = "unknown"
                 return snapshot
             finally:
                 self._allow_uncertainty_investigation = False
