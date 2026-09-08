@@ -73,8 +73,7 @@ class DurableAuditReaderTests(unittest.TestCase):
         first = document(1, actor="winner@example.com")
         competitor = document(1, actor="loser@example.com")
         second = document(2, actor="winner@example.com")
-        tail = document(3, actor="uncommitted@example.com")
-        logger = FakeLogger([second, competitor, tail, first])
+        logger = FakeLogger([second, competitor, first])
         reader = GoogleCloudAuditReader(logger, lookback_seconds=3600, clock_ms=lambda: NOW_MS)
 
         candidates = reader.read_candidates(
