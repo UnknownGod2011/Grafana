@@ -192,20 +192,52 @@ class ExecutionSafeIncidentService(IncidentService):
     def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
         """Adopt the durable winner and recompute ambiguity from that winner.
 
-        A conflict can be caused by another instance completing reconciliation
-        first. In that case the durable winner has already cleared the stale
-        approval, so retaining this process's old ``execution_uncertain`` flag
-        would force a redundant provider reconciliation and another evidence
-        write. Rebase the process-local safety state from the authenticated
-        checkpoint instead: safe ``none``/``resolved``/``approved`` winners clear
-        stale ambiguity, while ``dispatching`` or legacy-unknown winners remain
-        fail-closed through the normal restore guard.
+        Durable ``none``/``resolved`` winners prove that another instance has
+        already cleared or consumed the stale approval, so obsolete process-local
+        ambiguity can be discarded. ``dispatching`` and legacy-unknown winners
+        remain reconciliation-gated.
+
+        A durable ``approved`` checkpoint is safe on a *clean process restart*,
+        but it is not sufficient to erase this process's direct knowledge that it
+        may already have crossed the provider-dispatch barrier before losing CAS.
+        In that conflict-reload case StageGuard deliberately keeps execution
+        uncertainty and requires reconciliation, preventing a stale approval from
+        becoming executable again because of a regressed or non-monotonic store
+        view.
         """
         with self._lock:
+            was_uncertain = self._execution_uncertain
+            prior_phase = self._uncertain_execution_phase
             snapshot = super().reload_checkpoint_after_conflict()
-            if self._execution_uncertain:
-                self._clear_execution_uncertainty()
-                self._guard_restored_production_approval()
+            if not was_uncertain:
+                return snapshot
+
+            self._clear_execution_uncertainty()
+            phase = self._restored_execution_phase()
+            if snapshot.outcome is not None or snapshot.approval is None:
+                return snapshot
+
+            requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
+            if not requires:
+                return snapshot
+
+            if phase == "approved":
+                self._execution_uncertain = True
+                self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
+                # The durable winner says approved while this process says the
+                # dispatch boundary may have been crossed. Report only bounded
+                # unknown rather than falsely advertising either state as truth.
+                self._uncertain_execution_phase = "unknown"
+                self._execution_reloaded = True
+                return snapshot
+
+            # Normal fail-closed restore handling for dispatching, legacy-v1, or
+            # phase-unaware durable winners. ``prior_phase`` is intentionally not
+            # restored: the authenticated winner defines the exposed phase unless
+            # it contradicts direct process knowledge as in the approved case.
+            self._guard_restored_production_approval()
+            if self._execution_uncertain and phase is None and prior_phase == "dispatching":
+                self._uncertain_execution_phase = "unknown"
             return snapshot
 
     def execution_reconciliation_state(self) -> str:
