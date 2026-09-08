@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 with a durable pre-side-effect remediation phase, bounded reconciliation reasons, bounded append-only reconciliation audit events, and a credential-free deterministic audit hash-chain primitive ready for checkpoint integration.
+StageGuard is a personal open-source incident commander for live media workflows. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 execution phases, bounded reconciliation reasons, bounded append-only reconciliation audit events, a deterministic tamper-evident audit hash chain, and a backward-compatible checkpoint schema v3 capable of authenticating the audit-chain sequence/head alongside lifecycle state.
 
 Core safety invariants:
 
@@ -17,6 +17,7 @@ Core safety invariants:
 - Reconciliation audit entries contain only bounded result/reason dimensions; provider payloads, operation IDs, endpoints, credentials, generations, and raw exceptions are excluded.
 - Reconciliation audit persistence must never regress the durable `dispatching` barrier back to `approved`.
 - Audit-chain state uses domain-separated SHA-256, strict contiguous sequence numbers, and never advances its trusted head when the underlying audit sink fails.
+- Checkpoint schema v3 is emitted only when both audit-chain sequence and head exist; ordinary callers remain on v2 until they provide a real integrity proof.
 
 ## Completed milestones
 
@@ -38,62 +39,66 @@ Core safety invariants:
 - Append-only bounded reconciliation-attempt and recovery audit events integrated into the governed audit stream.
 - Real TLS/SIGKILL acceptance checks reconciliation audit ordering and checkpoint sequence monotonicity across ambiguous reads, authoritative recovery, and restart.
 - Credential-free tamper-evident audit-chain primitive with restart continuation and mutation/deletion/reordering detection tests.
+- Backward-compatible checkpoint schema v3 representation for authenticated audit-chain sequence/head binding.
 
-## Run log — 2026-09-08 — tamper-evident audit-chain foundation
+## Run log — 2026-09-08 — checkpoint schema v3 audit binding
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Then inspected `runtime/incident_checkpoint.py`, `runtime/incident_service.py`, `runtime/execution_safety.py`, `runtime/cloud_audit.py`, `runtime/durable_audit_reader.py`, the current HTTPS/SIGKILL reconciliation audit acceptance coverage, and the current `main` head.
+Read `progress.md` completely before choosing work. Then inspected `runtime/incident_checkpoint.py`, `runtime/audit_integrity.py`, `runtime/incident_service.py`, `runtime/execution_safety.py`, and `runtime/tests/test_incident_checkpoint.py`. Confirmed the prior run had a cryptographic audit-chain primitive but no durable checkpoint field capable of authenticating its trusted head.
 
 ### Exact changes made
 
-1. Added `runtime/audit_integrity.py`.
-   - Introduces a domain-separated SHA-256 chain over canonical `AuditEvent` documents.
-   - Uses a fixed genesis digest and strict contiguous sequence enforcement.
-   - Adds `AuditChainCheckpoint(sequence, head_sha256)` as the minimal bounded restart state intended for authenticated checkpoint persistence.
-   - Supports bounded restart verification from an already trusted chain checkpoint, avoiding an architectural requirement to replay unbounded historical audit data.
-   - Adds `ChainedAuditSink`, which advances chain state only after the wrapped audit sink successfully appends the event. A failed Cloud Logging/local sink write therefore cannot falsely publish an integrity head for an event that was never durably accepted.
-   - The chain contains only hashes; it adds no provider operation IDs, endpoints, credentials, response bodies, Grafana query bodies, or raw exception text.
+1. Extended `runtime/incident_checkpoint.py` with checkpoint schema v3.
+   - Added `stageguard.incident-checkpoint.v3`.
+   - Added optional `audit_chain_sequence` and `audit_chain_head_sha256` fields to `IncidentCheckpoint`.
+   - Added strict bounded validation: sequence/head must appear together, sequence must be a non-negative integer, the head must be lowercase 64-character SHA-256 hex, and sequence zero must use the fixed all-zero genesis digest.
+   - Added a cross-field invariant that a restored v3 audit-chain sequence cannot exceed the lifecycle audit sequence stored in the same authenticated checkpoint.
+   - The v3 values are inside the existing checkpoint canonical document and therefore protected by the same SHA-256 integrity digest and, for GCS production checkpoints, the existing HMAC authenticity check.
 
-2. Added `runtime/tests/test_audit_integrity.py`.
-   - Verifies deterministic chain heads across restart continuation.
-   - Verifies deletion and reordering fail through strict sequence continuity.
-   - Verifies same-sequence payload mutation fails against the expected authenticated head.
-   - Verifies bounded continuation from a trusted intermediate chain checkpoint.
-   - Verifies a wrapped sink failure leaves the trusted head at the prior value and permits a later clean retry without sequence corruption.
-   - Verifies malformed digests and non-contiguous appends fail closed.
+2. Preserved backward compatibility instead of forcing fake integrity state.
+   - Existing lifecycle callers currently do not supply an audit-chain checkpoint.
+   - `checkpoint_document()` therefore continues writing schema v2 when both audit-chain fields are absent.
+   - Schema v3 is emitted only when a complete real binding is supplied.
+   - v1 and v2 readers remain supported and restore the new fields as `None`.
+   - This avoids falsely advertising tamper-evident audit continuity before `IncidentService` is wired to `ChainedAuditSink`.
 
-3. Kept GitHub/CI churn low.
-   - The implementation, tests, and this handoff are being landed through one Git tree/commit update.
-   - No workflow rerun or manual GitHub Actions invocation was requested.
+3. Strengthened `runtime/tests/test_incident_checkpoint.py`.
+   - Existing ordinary lifecycle serialization is explicitly required to remain v2 until a real binding exists.
+   - Added v3 signed round-trip coverage for chain sequence/head.
+   - Added rejection coverage for partial bindings, invalid non-genesis empty-chain heads, and audit-chain sequence values ahead of the lifecycle sequence.
+   - Added HMAC authenticity coverage proving a chain-head mutation cannot be accepted by merely recomputing the public SHA-256 document digest.
+   - Extended legacy-v1 coverage to require absent audit-chain state after restore.
 
 ### Tests / checks / results
 
-- Repository reads and Git object writes through the GitHub connector succeeded.
-- The new code is intentionally dependency-free beyond the existing StageGuard runtime modules.
-- A complete local checkout/runtime is still unavailable in this execution environment, so the new test module is **not claimed green locally**.
+- GitHub repository reads and source writes succeeded.
+- The repository could not be cloned into the local execution container because DNS resolution for `github.com` still fails, so Python/unit-test execution could not start in this environment.
+- The changed code was manually checked against the existing positional `IncidentCheckpoint` construction pattern; new fields were appended with defaults so existing call sites remain source-compatible.
 - No GitHub Actions workflow was manually triggered or rerun.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production-remediation credentials/resources were used.
+- The new tests are **not claimed green locally** until they run in a complete checkout.
 
 ### Decisions made
 
-1. **Separate cryptographic chain mechanics from storage policy.** The primitive is small, deterministic, and testable before checkpoint schema changes are made.
-2. **Do not advance integrity state before durable append succeeds.** Otherwise a sink outage could make checkpoint integrity state refer to an event that does not exist in the durable audit stream.
-3. **Support bounded continuation.** Production verification should be able to start from an authenticated prior chain checkpoint instead of depending on Cloud Logging retaining/replaying the entire lifetime of an incident.
-4. **Sequence continuity is part of integrity.** Missing or reordered entries fail before digest comparison, while content mutation fails at the expected-head comparison.
-5. **No sensitive audit material is added.** Only SHA-256 chain heads and sequence numbers need to cross the checkpoint boundary.
+1. **Do not globally switch existing writers to v3 yet.** A v3 document without a real chain head would create misleading security semantics.
+2. **Authenticate the chain binding inside the existing checkpoint envelope.** This lets the current GCS HMAC + generation-CAS mechanism protect lifecycle state and audit continuity atomically once the service supplies the head.
+3. **Keep cryptographic implementation ownership in `audit_integrity.py`.** `incident_checkpoint.py` validates only the bounded serialized representation, avoiding a circular import through `incident_service.AuditEvent`.
+4. **Reject impossible sequence relationships.** The audit chain cannot claim to contain an event beyond the lifecycle checkpoint sequence it is authenticating.
+5. **Leave v1/v2 readable.** Existing deployments can upgrade without destructive checkpoint migration.
 
 ### Current blockers / unknowns
 
-- The new audit-chain test file still needs execution in a complete local/CI checkout before a green result can be claimed.
-- The chain primitive is not yet persisted inside `IncidentCheckpoint`; readiness therefore does not yet fail on durable audit-chain mismatch.
+- `IncidentService` and `ExecutionSafeIncidentService` do not yet persist `ChainedAuditSink.checkpoint()` into the new v3 fields, so normal runtime checkpoints intentionally remain v2.
+- Restore/reload does not yet verify durable audit events against the authenticated v3 head, and `/readyz` does not yet expose an `audit_integrity` state.
+- The updated checkpoint tests still need execution in a complete local/CI checkout before a green result can be claimed.
 - Real GCS generation behavior still needs live/emulated provider-backed acceptance beyond the credential-free generation-aware fake.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real remediation provider remain external-resource validation tasks.
 
 ## Single best next step
 
-**Integrate `AuditChainCheckpoint` into a backward-compatible checkpoint schema v3 and `IncidentService`: persist the trusted chain head with every lifecycle/reconciliation checkpoint, verify durable audit continuation on restore/reload, expose a fixed-cardinality `audit_integrity` readiness state, and add restart tests proving deletion/reordering/mutation fail readiness closed while normal SIGKILL reconciliation recovery remains green.**
+**Wire `IncidentService` to an integrity-capable audit sink/reader: persist the current `AuditChainCheckpoint` in every ordinary, dispatching, and reconciliation checkpoint; on v3 restore/reload verify the bounded durable audit suffix against the authenticated head; expose fixed-cardinality `audit_integrity` states such as `disabled`, `unbound_legacy`, `verified`, and `failed`; and make readiness fail closed on `failed` without changing the exactly-once remediation/reconciliation invariants.**
 
 ## Previous run summary
 
-The previous run bound reconciliation audit ordering and checkpoint sequence monotonicity to the real TLS/SIGKILL ambiguity path while preserving exactly one remediation POST and GET-only reconciliation.
+The previous run added the provider-neutral tamper-evident SHA-256 audit-chain primitive with deterministic restart continuation and deletion/reordering/mutation detection.
