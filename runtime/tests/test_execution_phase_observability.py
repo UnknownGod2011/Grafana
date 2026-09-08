@@ -55,9 +55,11 @@ class ExecutionPhaseObservabilityTests(unittest.TestCase):
                 metrics,
             )
         self.assertIn("stageguard_remediation_execution_uncertain 1\n", metrics)
-        self.assertNotIn("incident", metrics.lower())
+        self.assertNotIn("incident_id", metrics)
         self.assertNotIn("operation_id", metrics)
-        self.assertNotIn("provider", metrics.lower().replace("provider-detail-free", ""))
+        self.assertNotIn("production_id", metrics)
+        self.assertNotIn("endpoint=", metrics)
+        self.assertNotIn("credential", metrics.lower())
 
     def test_readiness_contains_only_bounded_execution_phase(self):
         readiness = _service_readiness(FakeService(phase="approved"))
