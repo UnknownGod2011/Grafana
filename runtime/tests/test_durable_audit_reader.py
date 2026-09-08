@@ -18,7 +18,9 @@ class FakeLogger:
 
     def list_entries(self, **kwargs):
         self.calls.append(kwargs)
-        return [SimpleNamespace(payload=payload) for payload in self.payloads]
+        max_results = kwargs.get("max_results")
+        payloads = self.payloads if max_results is None else self.payloads[:max_results]
+        return [SimpleNamespace(payload=payload) for payload in payloads]
 
 
 class Metrics:
@@ -67,6 +69,33 @@ class DurableAuditReaderTests(unittest.TestCase):
         self.assertEqual(3, call["max_results"])
         self.assertEqual(3, call["page_size"])
 
+    def test_candidate_reader_preserves_competing_sequences_for_authenticated_lineage_selection(self):
+        first = document(1, actor="winner@example.com")
+        competitor = document(1, actor="loser@example.com")
+        second = document(2, actor="winner@example.com")
+        tail = document(3, actor="uncommitted@example.com")
+        logger = FakeLogger([second, competitor, tail, first])
+        reader = GoogleCloudAuditReader(logger, lookback_seconds=3600, clock_ms=lambda: NOW_MS)
+
+        candidates = reader.read_candidates(
+            incident_id="incident-1", through_sequence=2, limit=10
+        )
+
+        self.assertEqual([1, 1, 2], [event.sequence for event in candidates])
+        self.assertEqual({"winner@example.com", "loser@example.com"}, {event.actor for event in candidates if event.sequence == 1})
+        call = logger.calls[0]
+        self.assertIn("jsonPayload.sequence>0", call["filter_"])
+        self.assertIn("jsonPayload.sequence<=2", call["filter_"])
+        self.assertEqual("ASCENDING", call["order_by"])
+        self.assertEqual(11, call["max_results"])
+        self.assertEqual(100, call["page_size"])
+
+    def test_candidate_reader_fails_closed_instead_of_silently_truncating(self):
+        logger = FakeLogger([document(1), document(1, actor="two@example.com"), document(1, actor="three@example.com")])
+        reader = GoogleCloudAuditReader(logger, clock_ms=lambda: NOW_MS)
+        with self.assertRaisesRegex(ValueError, "safe result bound"):
+            reader.read_candidates(incident_id="incident-1", through_sequence=1, limit=2)
+
     def test_reader_rejects_wrong_incident_unknown_shape_and_unsafe_bounds(self):
         wrong = document(1, incident_id="other")
         reader = GoogleCloudAuditReader(FakeLogger([wrong]), clock_ms=lambda: NOW_MS)
@@ -86,6 +115,10 @@ class DurableAuditReaderTests(unittest.TestCase):
                     empty.read(incident_id="incident-1", limit=limit)
         with self.assertRaises(ValueError):
             empty.read(incident_id="incident-1", after_sequence=-1)
+        with self.assertRaises(ValueError):
+            empty.read_candidates(incident_id="incident-1", through_sequence=-1)
+        with self.assertRaises(ValueError):
+            empty.read_candidates(incident_id="incident-1", through_sequence=1, limit=4097)
 
     def test_reader_rejects_old_future_and_conflicting_duplicate_entries(self):
         old = document(1)
