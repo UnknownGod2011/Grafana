@@ -39,69 +39,65 @@ Core safety invariants:
 - End-to-end spawned-process `ExecutionSafeIncidentService` dispatch and reconciliation races over generation-aware GCS semantics.
 - Service-level conflict-reload phase matrix for `none`, `approved`, `dispatching`, `resolved`, and `legacy_unknown`, including fail-closed contradictory `approved` handling.
 - Fixed-cardinality reconciliation-reason model for operator state, readiness, Prometheus telemetry, and same-origin recovery guidance.
+- Concrete SIGKILL/HTTPS crash and ambiguity suites now assert the reconciliation-reason contract across restart, unresolved provider responses, authoritative recovery, and final clean restart.
 
-## Run log — 2026-09-08 — operator reconciliation guidance and transition contract
+## Run log — 2026-09-08 — concrete HTTPS reconciliation-reason acceptance
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/operator_console.py` for the same-origin lifecycle recovery UI, action gating, CSP-safe DOM rendering, and reconciliation workflow;
-- `runtime/tests/test_operator_console.py` for current browser-asset and credential-leakage guarantees;
-- `runtime/tests/test_execution_conflict_reload_phases.py` for real execution-state transitions across durable `none`, `approved`, `dispatching`, `resolved`, and legacy winners;
-- current repository/runtime/test trees and the latest commit sequence before writing.
+- `runtime/tests/test_http_subprocess_reconciliation_ambiguity.py` for malformed JSON, wrong operation echo, unknown provider state, timeout, later authoritative recovery, provider POST/GET accounting, and readiness behavior;
+- `runtime/tests/test_http_subprocess_crash_recovery.py` for the two real SIGKILL boundaries around durable `dispatching` and provider acceptance;
+- `runtime/execution_safety.py` for the fixed-cardinality `execution_reconciliation_reason()` contract and restored `dispatching` semantics;
+- the current `runtime/tests` tree and latest commit status before writing.
 
 ### Exact changes made
 
-1. Wired `execution_reconciliation_reason` into the same-origin operator cockpit.
-   - Added a dedicated lifecycle recovery reason panel rendered only while execution is uncertain.
-   - The client accepts exactly the fixed reason set: `clear`, `durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, `phase_unavailable`.
-   - Any unexpected value fails closed to `phase_unavailable`.
-   - `/v1/incident`, checkpoint reload, and execution reconciliation responses now feed the bounded reason into the UI.
-   - Guidance is distinct by failure mode and explicitly tells the operator when to reload durable state, reconcile through the idempotency status path, and require fresh Grafana evidence.
-   - `durable_dispatching` guidance explicitly forbids a second remediation execution.
-   - No operation ID, provider endpoint/state, checkpoint generation, credential, actor identity, or exception text is rendered or accepted.
+1. Strengthened `runtime/tests/test_http_subprocess_reconciliation_ambiguity.py`.
+   - A restart from the durable `dispatching` checkpoint must report `durable_dispatching` before reconciliation.
+   - Malformed reconciliation JSON, a wrong operation-ID echo, an unknown provider state, and a bounded timeout must all leave the reason at `durable_dispatching` while execution remains uncertain.
+   - `/readyz` composition is now required to expose `remediation_reconciliation_reason=durable_dispatching` while remaining not ready.
+   - A later authoritative provider read may clear the reason only after the existing reconciliation path gathers fresh Grafana evidence and discards the stale approval.
+   - After safe recovery, the live service and a fresh final restart must both report `clear`.
+   - Existing invariants remain: exactly one original remediation POST, GET-only reconciliation, and no second POST during ambiguity or recovery.
 
-2. Extended `runtime/tests/test_operator_console.py`.
-   - Proves the new recovery-reason panel exists.
-   - Proves all four uncertain reason values are embedded as a fixed allowlist.
-   - Proves server `execution_reconciliation_reason` drives the client.
-   - Proves guidance includes fresh Grafana evidence and explicit no-replay wording.
-   - Retains assertions that `operation_id`, provider URLs, browser persistence, external URLs, and embedded credentials are absent.
-
-3. Strengthened `runtime/tests/test_execution_conflict_reload_phases.py` so reason telemetry is tied to real service transitions.
-   - A post-provider resolved-save conflict backed by durable `dispatching` must report `durable_dispatching`.
-   - Durable `none` and `resolved` winners must clear the reason to `clear`.
-   - Durable `dispatching` must remain `durable_dispatching`.
-   - Legacy ambiguity must report `legacy_unknown`.
-   - A contradictory durable `approved` winner after this process may have dispatched must report `post_dispatch_checkpoint_regression`.
-   - Existing no-replay/provider-call-count assertions remain intact.
+2. Strengthened `runtime/tests/test_http_subprocess_crash_recovery.py`.
+   - Both real process-death boundaries now assert that restart from durable `dispatching` yields `execution_uncertain`, phase `dispatching`, and reason `durable_dispatching`.
+   - Successful reconciliation plus fresh evidence must transition the reason to `clear`.
+   - A second restart must remain synchronized with `clear` and no executable stale approval.
+   - Provider-call accounting remains unchanged: zero POSTs if killed before provider contact, exactly one POST if killed after provider acceptance, and one bodyless reconciliation GET in either case.
 
 ### Tests / checks / results
 
 - GitHub repository reads and writes succeeded.
-- Latest source commit before this progress update: `ed8db574d8c083ff8cf941fa97e8d43686f511eb`.
-- GitHub combined commit status currently reports no status checks for that commit; no GitHub Actions workflow was intentionally triggered or rerun.
-- Attempted a credential-free local checkout for direct Python execution, but the container still fails before Python starts with `Could not resolve host: github.com`.
-- Therefore the targeted suite is **not claimed as executed successfully in this environment**.
+- Source commits created in this run:
+  - `862a350abd660062a83b555b39c771e974fa303c` — HTTPS ambiguity reason assertions.
+  - `1b50681f939bd9071e0eece2f9214f5620f6e8a8` — SIGKILL crash-recovery reason assertions.
+- GitHub combined status for `1b50681f939bd9071e0eece2f9214f5620f6e8a8` reports zero status contexts; no GitHub Actions workflow was intentionally triggered or rerun.
+- The updated tests are **not claimed as executed successfully in a full local checkout in this environment**.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **The browser consumes the bounded reason, never provider detail.** Recovery guidance is derived entirely from the five-value server contract.
-2. **Unknown client values fail closed.** A future or malformed reason becomes `phase_unavailable`; it cannot create a permissive UI branch.
-3. **Reason guidance cannot enable remediation.** Existing lifecycle blocking still controls investigation, briefing, approval, and execution; reason text is explanatory only.
-4. **Real transition tests are authoritative.** The conflict-reload matrix now verifies the reason associated with actual `ExecutionSafeIncidentService` state rather than relying only on an observability stub.
+1. **`durable_dispatching` survives provider ambiguity.** Malformed/timeout/unknown reconciliation results cannot downgrade or erase the bounded reason because the durable barrier still proves the provider may already have been contacted.
+2. **`clear` is a post-recovery state, not merely a successful GET state.** The tests require the service to complete the existing fresh-evidence recovery path before the reason clears.
+3. **Reason observability is now bound to real failure boundaries.** The contract is exercised through spawned processes, SIGKILL, the concrete HTTPS transport, durable JSON checkpoints, and readiness composition rather than only stubs.
+4. **No-replay remains authoritative.** Adding observability assertions does not add retries or alternate remediation paths; provider POST counts remain the primary safety invariant.
 
 ### Current blockers / unknowns
 
-- The updated operator and conflict-transition tests have not executed in a full local checkout because this environment still cannot resolve `github.com` from the container runtime.
+- These updated acceptance tests still need execution in a complete local/CI environment with POSIX `SIGKILL` and `openssl` before a green result can be claimed.
 - Real GCS generation behavior is covered by the credential-free multiprocess fake but still needs a live/emulated acceptance environment before provider-backed production validation can be claimed.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real provider idempotency endpoint still require external credentials/resources.
 
 ## Single best next step
 
-**Add reconciliation-reason assertions to the concrete process-death / HTTPS ambiguity suites, especially malformed JSON, wrong-operation echo, unknown provider state, timeout, and later authoritative recovery. Prove those paths remain `durable_dispatching` while uncertainty persists, transition to `clear` only after authoritative reconciliation plus fresh Grafana evidence, and never issue a second remediation POST.**
+**Add an operator-visible, append-only reconciliation audit event with a bounded result/reason schema for each reconciliation attempt (`accepted`, `not_found`, `unknown`) and recovery completion, while explicitly excluding provider payloads, operation IDs, endpoints, credentials, and raw exceptions. Then test that crash/ambiguity paths produce an auditable sequence without increasing metric cardinality or enabling remediation replay.**
+
+## Previous run — 2026-09-08 — operator reconciliation guidance and transition contract
+
+Wired the five-value bounded reconciliation reason into the same-origin cockpit and bound reason assertions to real conflict-reload transitions across durable `none`, `approved`, `dispatching`, `resolved`, and legacy winners.
 
 ## Previous run — 2026-09-08 — bounded reconciliation-reason observability
 
