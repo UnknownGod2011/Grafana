@@ -14,6 +14,7 @@ Core safety invariants:
 - Restored `dispatching` and legacy-v1 pending approvals fail closed and require provider reconciliation plus fresh Grafana evidence.
 - GCS checkpoints are HMAC-authenticated and use strict generation compare-and-swap.
 - `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution-phase telemetry is fixed-cardinality and provider-detail-free.
+- Concrete remediation reconciliation is GET-only and cannot carry a remediation body.
 
 ## Completed milestones
 
@@ -30,77 +31,91 @@ Core safety invariants:
 - Fixed-cardinality execution-phase readiness/Prometheus observability.
 - Crash-boundary fault-injection regression matrix for approval persistence, dispatch barrier persistence, provider execution, Grafana recovery verification, and resolved checkpoint persistence.
 - Real spawned-process SIGKILL acceptance coverage using `JsonCheckpointStore` across the two most dangerous remediation boundaries.
+- Real loopback TLS coverage for `HttpRemediationTransport` execution and GET-only reconciliation.
+- Spawned-process SIGKILL acceptance routed through the concrete HTTPS remediation transport and a local idempotent provider server.
 
-## Run log — 2026-09-08 — real process-death replay-safety acceptance
+## Run log — 2026-09-08 — concrete HTTPS process-death replay safety
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/execution_safety.py` for durable `dispatching`, restore, and reconciliation semantics;
-- `runtime/incident_checkpoint.py` for `JsonCheckpointStore` durability and execution-phase restoration;
-- `runtime/tests/test_execution_crash_matrix.py` for the existing in-process fault matrix;
-- `runtime/remediation.py` for deterministic operation identity and post-action Grafana verification;
-- `runtime/http_remediation_transport.py` to confirm that production reconciliation remains GET-only and execution remains separated from lookup.
+- `runtime/http_remediation_transport.py` for HTTPS validation, POST execution, GET-only reconciliation, bounded responses, and error handling;
+- `runtime/tests/test_http_remediation_transport.py` for existing mocked transport coverage;
+- `runtime/tests/test_subprocess_crash_recovery.py` for the existing spawned-process SIGKILL acceptance model;
+- `runtime/production_remediation.py` for allowlisting, deterministic operation identity, retry bounds, and provider reconciliation;
+- `runtime/execution_safety.py` for the durable `dispatching` barrier and restart semantics;
+- `runtime/incident_service.py` and `runtime/telemetry.py` to verify the default production/uplink scope used by the lifecycle.
 
 ### Exact changes made
 
-Added `runtime/tests/test_subprocess_crash_recovery.py`.
+1. Updated `runtime/http_remediation_transport.py` with an optional injectable `urlopen` callable.
+   - Production behavior is unchanged when it is omitted: `urllib.request.urlopen` is still resolved at call time.
+   - Endpoint validation still requires absolute credential-free HTTPS URLs.
+   - No insecure-TLS production switch was added.
+   - The field is excluded from dataclass repr/equality and validated as callable when supplied.
+   - Existing monkey-patched tests remain compatible because the standard opener is resolved per call when no override is present.
 
-The new acceptance harness uses `multiprocessing` with the `spawn` start method so recovery is exercised in a fresh Python interpreter rather than by reusing process memory. It uses the real atomic `JsonCheckpointStore` on disk and validates two hard-crash boundaries with POSIX `SIGKILL`:
+2. Added `runtime/tests/test_http_remediation_tls_integration.py`.
+   - Generates an ephemeral one-day self-signed certificate at test time with local `openssl`.
+   - Starts a real loopback `ThreadingHTTPServer` wrapped in TLS.
+   - Exercises the concrete `HttpRemediationTransport` over an actual HTTPS socket.
+   - Proves execution performs one POST with a non-empty body and reconciliation performs one bodyless GET.
+   - Proves a previously unseen operation reconciles as `not_found` without any POST.
+   - Uses a test-only SSL context through the injected opener; production TLS policy is not weakened.
 
-1. **After durable `dispatching`, before modeled provider acceptance**
-   - the child verifies the on-disk checkpoint is already `dispatching`;
-   - it is then SIGKILLed before recording a provider acceptance;
-   - durable provider-call count remains 0;
-   - restart restores `execution_uncertain` / `dispatching`;
-   - provider reconciliation returns `not_found`;
-   - StageGuard gathers fresh Grafana evidence, clears the stale approval, and performs no remediation execution.
+3. Added `runtime/tests/test_http_subprocess_crash_recovery.py`.
+   - Uses the real `JsonCheckpointStore`, `ExecutionSafeIncidentService`, `AllowlistedProductionRemediationClient`, `HttpRemediationTransport`, a local TLS provider, `multiprocessing` with `spawn`, and POSIX `SIGKILL`.
+   - Case A kills the child after durable `dispatching` but before the HTTP POST; restart reconciles with GET/404 -> `not_found`, gathers fresh Grafana evidence, clears the stale approval, and records zero POSTs.
+   - Case B lets the real HTTPS provider accept the POST and then SIGKILLs the child before StageGuard can finish execution; restart reconciles the exact deterministic operation ID with GET -> `accepted`, gathers fresh Grafana evidence, clears the stale approval, and proves the POST count remains exactly one.
+   - The provider records and compares the `Idempotency-Key` to the operation ID so operation-identity continuity is explicit.
+   - A second restart is asserted synchronized with no approval and therefore no executable stale action.
+   - The test is skipped when POSIX `SIGKILL` or `openssl` is unavailable.
 
-2. **Immediately after modeled provider acceptance**
-   - the child verifies durable `dispatching` first;
-   - it durably records the deterministic operation id in a provider-call log, fsyncs that record, and is SIGKILLed before control can return to StageGuard;
-   - durable provider-call count is exactly 1;
-   - restart restores `execution_uncertain` / `dispatching`;
-   - provider reconciliation returns `accepted`;
-   - StageGuard gathers fresh Grafana evidence and performs zero replay calls;
-   - a second restart remains synchronized with no approval, proving the stale approval cannot become executable again accidentally.
-
-The test class is skipped on platforms without `SIGKILL` because the acceptance property intentionally depends on abrupt POSIX process-death semantics. Unexpected child paths use distinct non-SIGKILL exit codes so the parent can detect that the intended crash boundary was not reached.
+4. Corrected the new subprocess harness to use the actual default StageGuard telemetry scope: production `broadcast-alpha` and affected uplink `uplink-b`.
 
 ### Tests / checks / results
 
-Attempted a fresh credential-free clone and targeted execution:
+Attempted a fresh credential-free local checkout and targeted run without invoking GitHub Actions:
 
 ```text
-python -m unittest tests.test_subprocess_crash_recovery tests.test_execution_crash_matrix -v
+python -m unittest \
+  tests.test_http_remediation_transport \
+  tests.test_http_remediation_tls_integration \
+  tests.test_http_subprocess_crash_recovery \
+  tests.test_subprocess_crash_recovery -v
 ```
 
-The container again failed before Python started:
+The container failed before Python started:
 
 ```text
 fatal: unable to access 'https://github.com/UnknownGod2011/Grafana.git/': Could not resolve host: github.com
 ```
 
-Therefore the new acceptance harness and existing targeted suite are **not claimed as executed successfully** in this environment. No GitHub Actions workflow was intentionally triggered, rerun, or modified. No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or remediation credentials/resources were used.
+Therefore the new integration/acceptance tests are **not claimed as executed successfully** in this environment. No GitHub Actions workflow was intentionally triggered, rerun, or modified. No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **Use a spawned interpreter instead of another exception-only test.** The safety claim now crosses a real process boundary and reloads only from disk.
-2. **Use SIGKILL rather than `os._exit` for the acceptance boundary.** This better models abrupt worker/container loss where cleanup and normal exception unwinding cannot run.
-3. **Persist the modeled provider acceptance separately and fsync it before the kill.** This makes the post-provider case explicit: the external side effect is durably known to have happened while StageGuard still has only `dispatching` locally.
-4. **Keep recovery adapter execution-fatal.** Any accidental remediation call after restart raises immediately, making replay detectable instead of merely counting it.
-5. **Require fresh Grafana investigation after reconciliation.** Provider state resolves ambiguity only; it never revives the stale approval or marks the incident recovered by itself.
+1. **Inject the opener, not an insecure TLS flag.** This provides deterministic network testing while keeping production endpoint/TLS policy strict.
+2. **Use a real TLS socket rather than another mocked `urlopen`.** The concrete request method, headers, body presence, HTTP status handling, and GET-only reconciliation now cross the HTTP stack.
+3. **Kill after the concrete transport receives provider acceptance.** This models the dangerous boundary where the provider side effect happened but the lifecycle still has only durable `dispatching`.
+4. **Keep provider state external to StageGuard.** Restart learns only `accepted` / `not_found` through the read-only reconciliation contract and never adopts provider detail into checkpoint state.
+5. **Require fresh Grafana evidence after either reconciliation result.** Reconciliation resolves ambiguity; it never resurrects the old approval or proves recovery by itself.
 
 ### Current blockers / unknowns
 
 - Local deterministic Python execution remains blocked because the container cannot resolve `github.com` for checkout.
+- The new TLS tests depend on a local `openssl` executable and POSIX SIGKILL for the hard-crash cases; they skip rather than emulate those guarantees when unavailable.
 - Real GCS two-instance acceptance, Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, and a real provider idempotency endpoint still require external credentials/resources.
-- The subprocess harness models the remediation provider with an fsynced local call ledger rather than a network server. The production HTTP transport itself is separately covered by GET-only reconciliation and execution-transport tests.
+- Malformed/timeout provider reconciliation is covered at unit/in-process layers, but the spawned-process concrete-HTTPS harness currently covers the authoritative `accepted` and `not_found` restart outcomes.
 
 ## Single best next step
 
-**Add a local credential-free HTTPS test server (ephemeral self-signed test certificate or injectable opener/SSL context) around `HttpRemediationTransport`, then run the same spawned-process crash acceptance through the concrete production transport. Prove one POST maximum across process death, GET-only reconciliation after restart, operation-id continuity, malformed/timeout fail-closed behavior, and fresh Grafana evidence before a new approval can exist.**
+**Extend the concrete HTTPS subprocess harness with fail-closed provider ambiguity cases: make the local reconciliation endpoint deliberately return malformed JSON, a wrong operation-id echo, an unknown state, and a bounded timeout; prove `reconcile_execution_uncertainty()` refuses to clear `execution_uncertain`, readiness remains blocked, no second POST occurs, and a later valid GET can safely recover using fresh Grafana evidence.**
+
+## Previous run — 2026-09-08 — real process-death replay-safety acceptance
+
+Added `runtime/tests/test_subprocess_crash_recovery.py` using a spawned interpreter, real `JsonCheckpointStore`, fsynced modeled provider state, and POSIX SIGKILL after durable `dispatching` and after modeled provider acceptance. Restart required reconciliation plus fresh Grafana evidence and never replayed remediation.
 
 ## Previous run — 2026-09-08 — remediation crash-boundary fault matrix
 
