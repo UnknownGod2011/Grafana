@@ -199,36 +199,50 @@ class HttpSubprocessReconciliationAmbiguityTests(unittest.TestCase):
         restarted._readiness_probe = AlwaysReadyEvidenceProbe()
         self.assertEqual("execution_uncertain", restarted.checkpoint_state())
         self.assertEqual("dispatching", restarted.execution_checkpoint_phase())
+        self.assertEqual("durable_dispatching", restarted.execution_reconciliation_reason())
 
         with self.assertRaisesRegex(RuntimeError, "provider idempotency state is unresolved"):
             restarted.reconcile_execution_uncertainty(actor="operator@example.com")
 
-        # Provider ambiguity cannot unlock lifecycle traffic or replay remediation.
+        # Provider ambiguity cannot unlock lifecycle traffic, change the bounded
+        # durable-dispatch reason, or replay remediation.
         self.assertEqual("execution_uncertain", restarted.checkpoint_state())
         self.assertEqual("dispatching", restarted.execution_checkpoint_phase())
+        self.assertEqual("durable_dispatching", restarted.execution_reconciliation_reason())
         readiness = _service_readiness(restarted)
         self.assertFalse(readiness["ready"])
         self.assertEqual("execution_uncertain", readiness["checks"]["checkpoint"])
         self.assertEqual("dispatching", readiness["checks"]["remediation_execution_phase"])
+        self.assertEqual(
+            "durable_dispatching",
+            readiness["checks"]["remediation_reconciliation_reason"],
+        )
         self.assertEqual(1, len([event for event in self.server.events if event[0] == "POST"]))
         self.assertEqual(1, len([event for event in self.server.events if event[0] == "GET"]))
 
-        # A later authoritative read may resolve ambiguity, but still cannot replay.
+        # A later authoritative read may resolve ambiguity only after the service
+        # collects fresh Grafana evidence; the reason clears and remediation is
+        # still never replayed.
         self.server.reconciliation_mode = "normal"
         refreshed = restarted.reconcile_execution_uncertainty(actor="operator@example.com")
         self.assertIsNone(refreshed.approval)
         self.assertEqual("synchronized", restarted.checkpoint_state())
         self.assertEqual("none", restarted.execution_checkpoint_phase())
+        self.assertEqual("clear", restarted.execution_reconciliation_reason())
+        recovered_readiness = _service_readiness(restarted)
+        self.assertEqual("clear", recovered_readiness["checks"]["remediation_reconciliation_reason"])
         self.assertEqual(1, len([event for event in self.server.events if event[0] == "POST"]))
         self.assertEqual(2, len([event for event in self.server.events if event[0] == "GET"]))
 
-        # Recovery wrote a new evidence revision; a final restart has no stale approval.
+        # Recovery wrote a new evidence revision; a final restart has no stale
+        # approval and inherits no process-local reconciliation reason.
         final_restart = build_service(
             JsonCheckpointStore(self.checkpoint_path),
             self.production_client(),
             [],
         )
         self.assertEqual("synchronized", final_restart.checkpoint_state())
+        self.assertEqual("clear", final_restart.execution_reconciliation_reason())
         self.assertIsNone(final_restart.status().approval)
         self.assertEqual(1, len([event for event in self.server.events if event[0] == "POST"]))
 
