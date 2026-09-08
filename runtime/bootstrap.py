@@ -29,6 +29,9 @@ from remediation import ActionResult, RemediationClient, SimulatorRemediationCli
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
 
+_AUDIT_INTEGRITY_POLICIES = {"allow_unbound_legacy", "require_verified"}
+
+
 class DisabledRemediationClient:
     def recover_uplink(self, production_id: str, uplink: str) -> ActionResult:
         return ActionResult(False, "no production remediation adapter is configured")
@@ -54,6 +57,13 @@ def _read_required_secret(env_name: str) -> str:
     if not value:
         raise ValueError(f"required environment variable {env_name} is not set")
     return value
+
+
+def _normalize_audit_integrity_policy(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in _AUDIT_INTEGRITY_POLICIES:
+        raise ValueError("audit integrity policy must be allow_unbound_legacy or require_verified")
+    return normalized
 
 
 def _identity_provider(host: str, *, mode: str, token_env: str, subject_env: str, iap_audience_env: str) -> IdentityProvider:
@@ -157,6 +167,7 @@ def build_runtime(
     checkpoint_bucket_env: str = "STAGEGUARD_CHECKPOINT_BUCKET",
     checkpoint_signing_key_env: str = "STAGEGUARD_CHECKPOINT_HMAC_KEY",
     checkpoint_object: str = "stageguard/incident-checkpoint.json",
+    audit_integrity_policy: str = "allow_unbound_legacy",
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
     logs_factory: Callable[[], McpLokiLogClient] = McpLokiLogClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
@@ -168,6 +179,7 @@ def build_runtime(
     activation_now_unix: int | None = None,
 ) -> RuntimeBundle:
     profile = load_telemetry_profile(telemetry_config)
+    policy = _normalize_audit_integrity_policy(audit_integrity_policy)
     metrics = metrics_factory()
     logs: McpLokiLogClient | None = None
     activation: ActivationRecord | None = None
@@ -229,6 +241,7 @@ def build_runtime(
             logs=logs, log_activation_record=log_activation, commander=commander,
             activation_now_unix=activation_now_unix,
         )
+        setattr(service, "_audit_integrity_policy", policy)
         server = make_server(service, host, port, identity_provider=identity)
         return RuntimeBundle(service, metrics, logs, identity, server)
     except Exception:
@@ -254,6 +267,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-bucket-env", default="STAGEGUARD_CHECKPOINT_BUCKET")
     parser.add_argument("--checkpoint-signing-key-env", default="STAGEGUARD_CHECKPOINT_HMAC_KEY")
     parser.add_argument("--checkpoint-object", default="stageguard/incident-checkpoint.json")
+    parser.add_argument(
+        "--audit-integrity-policy",
+        choices=("allow_unbound_legacy", "require_verified"),
+        default="allow_unbound_legacy",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9110)
     parser.add_argument("--identity-mode", choices=("auto", "local", "bearer", "iap"), default="auto")
@@ -287,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_bucket_env=args.checkpoint_bucket_env,
             checkpoint_signing_key_env=args.checkpoint_signing_key_env,
             checkpoint_object=args.checkpoint_object,
+            audit_integrity_policy=args.audit_integrity_policy,
             host=args.host,
             port=args.port,
             identity_mode=args.identity_mode,

@@ -30,6 +30,7 @@ _EXECUTION_RECONCILIATION_REASONS = (
     "phase_unavailable",
 )
 _AUDIT_INTEGRITY_STATES = ("disabled", "unbound_legacy", "verified", "failed")
+_AUDIT_INTEGRITY_POLICIES = ("allow_unbound_legacy", "require_verified")
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -126,6 +127,22 @@ def _audit_integrity_state(service: IncidentService) -> str:
     return state if state in _AUDIT_INTEGRITY_STATES else "failed"
 
 
+def _audit_integrity_policy(service: IncidentService) -> str:
+    """Return the configured bounded readiness policy; invalid values fail hardened."""
+    policy = getattr(service, "_audit_integrity_policy", "allow_unbound_legacy")
+    return policy if policy in _AUDIT_INTEGRITY_POLICIES else "require_verified"
+
+
+def _audit_integrity_policy_satisfied(service: IncidentService, state: str | None = None) -> bool:
+    integrity = _audit_integrity_state(service) if state is None else state
+    policy = _audit_integrity_policy(service)
+    if integrity == "failed":
+        return False
+    if policy == "require_verified":
+        return integrity == "verified"
+    return True
+
+
 def _execution_checkpoint_phase(service: IncidentService) -> str:
     """Return a fixed-cardinality, provider-detail-free execution phase."""
     getter = getattr(service, "execution_checkpoint_phase", None)
@@ -156,6 +173,7 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
         "incident": None if snapshot is None else snapshot.to_dict(),
         "checkpoint_state": service.checkpoint_state(),
         "audit_integrity": _audit_integrity_state(service),
+        "audit_integrity_policy": _audit_integrity_policy(service),
         "execution_reconciliation_state": _execution_reconciliation_state(service),
         "execution_reconciliation_reason": _execution_reconciliation_reason(service),
     }
@@ -166,11 +184,14 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     readiness = _get_readiness_probe(service).check().to_dict()
     checkpoint_state = service.checkpoint_state()
     audit_integrity = _audit_integrity_state(service)
+    audit_policy = _audit_integrity_policy(service)
+    audit_policy_satisfied = _audit_integrity_policy_satisfied(service, audit_integrity)
     readiness["checks"]["checkpoint"] = checkpoint_state
     readiness["checks"]["audit_integrity"] = audit_integrity
+    readiness["checks"]["audit_integrity_policy"] = audit_policy
     readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
     readiness["checks"]["remediation_reconciliation_reason"] = _execution_reconciliation_reason(service)
-    if checkpoint_state in {"conflicted", "execution_uncertain"} or audit_integrity == "failed":
+    if checkpoint_state in {"conflicted", "execution_uncertain"} or not audit_policy_satisfied:
         readiness["ready"] = False
     return readiness
 
@@ -187,6 +208,8 @@ def _service_metrics(service: IncidentService) -> str:
     execution_phase = _execution_checkpoint_phase(service)
     reconciliation_reason = _execution_reconciliation_reason(service)
     audit_integrity = _audit_integrity_state(service)
+    audit_policy = _audit_integrity_policy(service)
+    audit_policy_satisfied = 1 if _audit_integrity_policy_satisfied(service, audit_integrity) else 0
     metrics += (
         "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
         "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
@@ -214,6 +237,17 @@ def _service_metrics(service: IncidentService) -> str:
     )
     for state in _AUDIT_INTEGRITY_STATES:
         metrics += f'stageguard_audit_integrity{{state="{state}"}} {1 if state == audit_integrity else 0}\n'
+    metrics += (
+        "# HELP stageguard_audit_integrity_policy Fixed-cardinality audit-integrity readiness policy.\n"
+        "# TYPE stageguard_audit_integrity_policy gauge\n"
+    )
+    for policy in _AUDIT_INTEGRITY_POLICIES:
+        metrics += f'stageguard_audit_integrity_policy{{policy="{policy}"}} {1 if policy == audit_policy else 0}\n'
+    metrics += (
+        "# HELP stageguard_audit_integrity_policy_satisfied Whether the current audit state satisfies the configured readiness policy.\n"
+        "# TYPE stageguard_audit_integrity_policy_satisfied gauge\n"
+        f"stageguard_audit_integrity_policy_satisfied {audit_policy_satisfied}\n"
+    )
     return metrics
 
 
@@ -231,7 +265,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.12"
+    server_version = "StageGuard/0.13"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -310,6 +344,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "loki_mcp": "failed",
                         "checkpoint": "failed",
                         "audit_integrity": "failed",
+                        "audit_integrity_policy": "require_verified",
                         "remediation_execution_phase": "unknown",
                         "remediation_reconciliation_reason": "phase_unavailable",
                     },

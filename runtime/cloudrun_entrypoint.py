@@ -56,13 +56,20 @@ def build_bootstrap_argv(environ: Mapping[str, str] | None = None) -> list[str]:
         # Bucket contents can authorize resumption of an approval, so storage write
         # permission alone must never be sufficient to forge checkpoint state.
         _required(env, "STAGEGUARD_CHECKPOINT_HMAC_KEY")
-        argv.extend(["--checkpoint-backend", "gcs"])
+        argv.extend([
+            "--checkpoint-backend", "gcs",
+            "--audit-integrity-policy", "require_verified",
+        ])
         checkpoint_object = env.get("STAGEGUARD_CHECKPOINT_OBJECT", "").strip()
         if checkpoint_object:
             argv.extend(["--checkpoint-object", checkpoint_object])
     else:
-        # Never pretend ephemeral container storage is restart durability.
-        argv.extend(["--checkpoint-backend", "none"])
+        # Never pretend ephemeral container storage is restart durability. Without
+        # a durable checkpoint there is no authenticated v3 head to require.
+        argv.extend([
+            "--checkpoint-backend", "none",
+            "--audit-integrity-policy", "allow_unbound_legacy",
+        ])
 
     if env.get("STAGEGUARD_ENABLE_GEMINI", "").strip().lower() in _TRUE:
         argv.append("--enable-gemini")
