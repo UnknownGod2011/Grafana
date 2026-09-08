@@ -25,7 +25,11 @@ class SequenceMetrics:
 
 
 class FakeRemediation:
+    def __init__(self):
+        self.calls = 0
+
     def recover_uplink(self, _production_id, _uplink):
+        self.calls += 1
         return ActionResult(True, "ok", {})
 
 
@@ -93,13 +97,14 @@ class RuntimeAuditCheckpointBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "audit integrity verification failed"):
                 restarted.investigate()
 
-    def test_orphan_tail_beyond_authenticated_head_fails_closed_on_restore(self):
+    def test_orphan_tail_is_not_adopted_and_does_not_poison_authenticated_winner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             audit_path = root / "audit.jsonl"
             store = JsonCheckpointStore(root / "checkpoint.json")
+            remediation = FakeRemediation()
 
-            first = self.service(IncidentService, diagnosed(), FakeRemediation(), audit_path, store)
+            first = self.service(IncidentService, diagnosed(), remediation, audit_path, store)
             first.investigate()
             checkpoint = store.load()
             self.assertEqual(1, checkpoint.sequence)
@@ -116,15 +121,32 @@ class RuntimeAuditCheckpointBindingTests(unittest.TestCase):
             with audit_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(orphan, sort_keys=True, separators=(",", ":")) + "\n")
 
-            restarted = self.service(ExecutionSafeIncidentService, [], FakeRemediation(), audit_path, store)
-            self.assertEqual("failed", restarted.audit_integrity_state())
-            self.assertEqual("conflicted", restarted.checkpoint_state())
+            restarted = self.service(ExecutionSafeIncidentService, diagnosed(), remediation, audit_path, store)
+            self.assertEqual("verified", restarted.audit_integrity_state())
+            self.assertEqual("synchronized", restarted.checkpoint_state())
             self.assertEqual(checkpoint.sequence, restarted._sequence)
             self.assertIsNone(restarted.status().approval)
-            with self.assertRaisesRegex(RuntimeError, "audit integrity verification failed"):
-                restarted.investigate()
+            self.assertEqual(0, remediation.calls)
+            timeline = restarted.audit_timeline(incident_id=checkpoint.incident_id)
+            self.assertEqual([1], [event["sequence"] for event in timeline["events"]])
 
-    def test_conflicting_duplicate_at_authenticated_sequence_fails_closed(self):
+            # A legitimate winner can reuse sequence 2; the orphan remains forensic
+            # residue while the new authenticated checkpoint selects the real branch.
+            restarted.investigate()
+            committed = store.load()
+            self.assertEqual(2, committed.sequence)
+            self.assertIsNone(committed.approval)
+
+            fresh = self.service(ExecutionSafeIncidentService, [], remediation, audit_path, store)
+            self.assertEqual("verified", fresh.audit_integrity_state())
+            self.assertEqual("synchronized", fresh.checkpoint_state())
+            self.assertIsNone(fresh.status().approval)
+            self.assertEqual(0, remediation.calls)
+            timeline = fresh.audit_timeline(incident_id=checkpoint.incident_id)
+            self.assertEqual([1, 2], [event["sequence"] for event in timeline["events"]])
+            self.assertTrue(all(event["event_type"] == "investigation_completed" for event in timeline["events"]))
+
+    def test_conflicting_duplicate_at_authenticated_sequence_selects_exact_committed_event(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             audit_path = root / "audit.jsonl"
@@ -141,9 +163,12 @@ class RuntimeAuditCheckpointBindingTests(unittest.TestCase):
                 handle.write(json.dumps(duplicate, sort_keys=True, separators=(",", ":")) + "\n")
 
             restarted = self.service(ExecutionSafeIncidentService, [], FakeRemediation(), audit_path, store)
-            self.assertEqual("failed", restarted.audit_integrity_state())
-            self.assertEqual("conflicted", restarted.checkpoint_state())
+            self.assertEqual("verified", restarted.audit_integrity_state())
+            self.assertEqual("synchronized", restarted.checkpoint_state())
             self.assertEqual(checkpoint.sequence, restarted._sequence)
+            timeline = restarted.audit_timeline(incident_id=checkpoint.incident_id)
+            self.assertEqual(1, len(timeline["events"]))
+            self.assertEqual("investigation_completed", timeline["events"][0]["event_type"])
 
     def test_dispatching_barrier_preserves_authenticated_chain_head(self):
         with tempfile.TemporaryDirectory() as directory:
