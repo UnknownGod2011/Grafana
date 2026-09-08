@@ -120,6 +120,25 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("safeReconciliationState", js)
         self.assertIn(":'reload_required'", js)
 
+    def test_uncertain_execution_renders_fixed_non_sensitive_reason_guidance(self):
+        _status, _type, _csp, _cache, html = self.get("/console", authenticated=True)
+        _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
+        self.assertIn('id="lifecycle-recovery-reason"', html)
+        for reason in (
+            "durable_dispatching",
+            "legacy_unknown",
+            "post_dispatch_checkpoint_regression",
+            "phase_unavailable",
+        ):
+            self.assertIn(reason, js)
+        self.assertIn("safeReconciliationReason", js)
+        self.assertIn("data.execution_reconciliation_reason", js)
+        self.assertIn("reconciliationGuidance", js)
+        self.assertIn("fresh Grafana evidence", js)
+        self.assertIn("Do not execute remediation again", js)
+        self.assertNotIn("operation_id", js)
+        self.assertNotIn("provider_url", js)
+
     def test_console_never_exposes_or_accepts_remediation_operation_id(self):
         _status, _type, _csp, _cache, html = self.get("/console", authenticated=True)
         _status, _type, _csp, _cache, js = self.get("/assets/operator.js", authenticated=True)
