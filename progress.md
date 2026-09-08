@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source incident commander for live media workflows. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, and checkpoint schema v2 with a durable pre-side-effect remediation phase.
+StageGuard is a personal open-source incident commander for live media workflows. The executable path now includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 with a durable pre-side-effect remediation phase, and bounded reconciliation audit events.
 
 Core safety invariants:
 
@@ -10,13 +10,12 @@ Core safety invariants:
 - Gemini is advisory and cannot mutate approval, remediation, or recovery state.
 - Human approval is single-use and bound to an exact evidence revision.
 - Production remediation uses a deterministic idempotency identity and never automatically replays ambiguous external side effects.
-- Phase-capable stores persist `dispatching` before provider contact; a clean restart from durable `approved` proves dispatch had not begun in that process lifetime.
-- Restored `dispatching` and legacy-v1 pending approvals fail closed and require provider reconciliation plus fresh Grafana evidence.
-- GCS checkpoints are HMAC-authenticated and use strict generation compare-and-swap.
-- `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution-phase and reconciliation-reason telemetry are fixed-cardinality and provider-detail-free.
+- Phase-capable stores persist `dispatching` before provider contact; restored `dispatching` and legacy ambiguous approvals require provider reconciliation plus fresh Grafana evidence.
+- GCS checkpoints are HMAC-authenticated and use generation compare-and-swap.
+- `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution phase and reconciliation reason telemetry are fixed-cardinality and provider-detail-free.
 - Concrete remediation reconciliation is GET-only and cannot carry a remediation body.
-- After CAS contention, process-local execution uncertainty is rebased from the authenticated durable winner, but direct knowledge that this process may already have crossed the dispatch barrier is never erased merely because a conflicting durable winner reports `approved`.
-- The operator cockpit treats reconciliation reason as bounded safety guidance only; it never renders provider state, operation identity, endpoints, generations, credentials, or exception detail.
+- Reconciliation audit entries contain only bounded result/reason dimensions; provider payloads, operation IDs, endpoints, credentials, generations, and raw exceptions are excluded.
+- Reconciliation audit persistence must never regress the durable `dispatching` barrier back to `approved`.
 
 ## Completed milestones
 
@@ -30,91 +29,75 @@ Core safety invariants:
 - Verified Google IAP identity, Cloud Logging audit integration, and Cloud Run deployment path.
 - Durable checkpoint recovery, strict CAS conflict handling, and operator recovery cockpit.
 - Checkpoint schema v2 phases: `none`, `approved`, `dispatching`, `resolved`, with conservative legacy restore.
-- Fixed-cardinality execution-phase readiness/Prometheus observability.
-- Crash-boundary fault-injection regression matrix for approval persistence, dispatch barrier persistence, provider execution, Grafana recovery verification, and resolved checkpoint persistence.
-- Real spawned-process SIGKILL acceptance using `JsonCheckpointStore` across the two most dangerous remediation boundaries.
+- Crash-boundary and real SIGKILL acceptance across dispatch/provider boundaries.
 - Real loopback TLS coverage for `HttpRemediationTransport` execution and GET-only reconciliation.
 - Concrete HTTPS restart coverage for malformed, wrong-operation, unknown-state, and timeout reconciliation outcomes, including later authoritative recovery.
-- Credential-free spawned-process GCS generation-CAS acceptance with a process-safe fake object backend.
-- End-to-end spawned-process `ExecutionSafeIncidentService` dispatch and reconciliation races over generation-aware GCS semantics.
-- Service-level conflict-reload phase matrix for `none`, `approved`, `dispatching`, `resolved`, and `legacy_unknown`, including fail-closed contradictory `approved` handling.
-- Fixed-cardinality reconciliation-reason model for operator state, readiness, Prometheus telemetry, and same-origin recovery guidance.
-- Concrete SIGKILL/HTTPS crash and ambiguity suites now assert the reconciliation-reason contract across restart, unresolved provider responses, authoritative recovery, and final clean restart.
+- Credential-free spawned-process GCS generation-CAS acceptance and service-level multi-instance dispatch/reconciliation races.
+- Fixed-cardinality reconciliation-reason model in operator state, readiness, Prometheus telemetry, cockpit guidance, conflict matrices, and concrete crash/HTTPS tests.
+- Append-only bounded reconciliation-attempt and recovery audit events integrated into the governed audit stream.
 
-## Run log — 2026-09-08 — concrete HTTPS reconciliation-reason acceptance
+## Run log — 2026-09-08 — bounded reconciliation audit trail
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/tests/test_http_subprocess_reconciliation_ambiguity.py` for malformed JSON, wrong operation echo, unknown provider state, timeout, later authoritative recovery, provider POST/GET accounting, and readiness behavior;
-- `runtime/tests/test_http_subprocess_crash_recovery.py` for the two real SIGKILL boundaries around durable `dispatching` and provider acceptance;
-- `runtime/execution_safety.py` for the fixed-cardinality `execution_reconciliation_reason()` contract and restored `dispatching` semantics;
-- the current `runtime/tests` tree and latest commit status before writing.
+- `runtime/execution_safety.py` for provider reconciliation, durable `dispatching`, uncertainty reasons, and recovery flow;
+- `runtime/incident_service.py` for the append-only audit pipeline, timeline projection, sequencing, and checkpoint coupling;
+- `runtime/cloud_audit.py` for structured Cloud Logging validation and blocked sensitive field classes;
+- `runtime/incident_checkpoint.py` for schema-v2 execution-phase derivation and validation;
+- existing reconciliation observability tests and current repository status.
 
 ### Exact changes made
 
-1. Strengthened `runtime/tests/test_http_subprocess_reconciliation_ambiguity.py`.
-   - A restart from the durable `dispatching` checkpoint must report `durable_dispatching` before reconciliation.
-   - Malformed reconciliation JSON, a wrong operation-ID echo, an unknown provider state, and a bounded timeout must all leave the reason at `durable_dispatching` while execution remains uncertain.
-   - `/readyz` composition is now required to expose `remediation_reconciliation_reason=durable_dispatching` while remaining not ready.
-   - A later authoritative provider read may clear the reason only after the existing reconciliation path gathers fresh Grafana evidence and discards the stale approval.
-   - After safe recovery, the live service and a fresh final restart must both report `clear`.
-   - Existing invariants remain: exactly one original remediation POST, GET-only reconciliation, and no second POST during ambiguity or recovery.
+1. Extended `runtime/execution_safety.py` with bounded reconciliation audit events.
+   - Every provider reconciliation read now records an append-only attempt containing only `result` (`accepted`, `not_found`, `unknown`) and the existing bounded reconciliation reason.
+   - Successful authoritative reconciliation records a second recovery event only after fresh Grafana investigation succeeds.
+   - Operator-visible event types encode only the bounded stage/result/reason dimensions, so the existing timeline remains useful without exposing provider details.
+   - Invalid stage/result/reason inputs fail closed to bounded fallback values.
 
-2. Strengthened `runtime/tests/test_http_subprocess_crash_recovery.py`.
-   - Both real process-death boundaries now assert that restart from durable `dispatching` yields `execution_uncertain`, phase `dispatching`, and reason `durable_dispatching`.
-   - Successful reconciliation plus fresh evidence must transition the reason to `clear`.
-   - A second restart must remain synchronized with `clear` and no executable stale approval.
-   - Provider-call accounting remains unchanged: zero POSTs if killed before provider contact, exactly one POST if killed after provider acceptance, and one bodyless reconciliation GET in either case.
+2. Preserved the durable dispatch barrier while auditing uncertainty.
+   - The generic lifecycle recorder derives checkpoint phase from the pending approval and would therefore serialize `approved` during an uncertain reconciliation attempt.
+   - The new reconciliation-attempt recorder detects phase-capable stores and explicitly persists schema-v2 `dispatching` with the incremented audit sequence.
+   - CAS conflict while recording the audit event marks the service conflicted, clears the reloaded flag, and remains execution-uncertain; it does not enable replay.
+   - Phase-unaware/custom stores retain their existing conservative restart behavior.
+
+3. Added `runtime/tests/test_execution_reconciliation_audit.py`.
+   - Verifies exact bounded payload shape and provider-operation redaction.
+   - Verifies audit sequencing advances while the checkpoint remains `dispatching`.
+   - Verifies CAS conflict fails closed.
+   - Verifies `unknown` produces an attempt event but no recovery event and leaves uncertainty intact.
+   - Verifies authoritative `accepted` produces attempt + recovery events and clears uncertainty only after the modeled fresh-investigation success.
+   - Verifies malformed audit dimensions collapse to bounded fallbacks rather than leaking arbitrary strings.
 
 ### Tests / checks / results
 
 - GitHub repository reads and writes succeeded.
 - Source commits created in this run:
-  - `862a350abd660062a83b555b39c771e974fa303c` — HTTPS ambiguity reason assertions.
-  - `1b50681f939bd9071e0eece2f9214f5620f6e8a8` — SIGKILL crash-recovery reason assertions.
-- GitHub combined status for `1b50681f939bd9071e0eece2f9214f5620f6e8a8` reports zero status contexts; no GitHub Actions workflow was intentionally triggered or rerun.
-- The updated tests are **not claimed as executed successfully in a full local checkout in this environment**.
+  - `efdda8bce890b6fa45056aac688fb63e204ac2ff` — reconciliation audit implementation.
+  - `3a16023cea1bdb45e80f703ff6981b6e290bcd02` — targeted audit safety tests.
+- GitHub combined status for `3a16023cea1bdb45e80f703ff6981b6e290bcd02` reports zero status contexts; no GitHub Actions workflow was intentionally triggered or rerun.
+- A direct local checkout/test attempt is still blocked before Python starts because the container cannot resolve `github.com`; therefore the new suite is **not claimed green locally**.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **`durable_dispatching` survives provider ambiguity.** Malformed/timeout/unknown reconciliation results cannot downgrade or erase the bounded reason because the durable barrier still proves the provider may already have been contacted.
-2. **`clear` is a post-recovery state, not merely a successful GET state.** The tests require the service to complete the existing fresh-evidence recovery path before the reason clears.
-3. **Reason observability is now bound to real failure boundaries.** The contract is exercised through spawned processes, SIGKILL, the concrete HTTPS transport, durable JSON checkpoints, and readiness composition rather than only stubs.
-4. **No-replay remains authoritative.** Adding observability assertions does not add retries or alternate remediation paths; provider POST counts remain the primary safety invariant.
+1. **Auditability cannot weaken dispatch safety.** Reconciliation audit sequence persistence explicitly retains `dispatching` on phase-capable stores.
+2. **Audit dimensions are enums, not provider data.** Event payloads and operator-visible event types contain only bounded result/reason/stage values.
+3. **`unknown` is itself auditable.** Failed, malformed, or timed-out provider reads leave an append-only attempt trail while remaining reconciliation-gated.
+4. **Recovery is audited only after fresh Grafana evidence succeeds.** A successful provider GET alone is not considered recovery completion.
+5. **No new metric labels were introduced.** The audit trail improves diagnosis without increasing Prometheus cardinality.
 
 ### Current blockers / unknowns
 
-- These updated acceptance tests still need execution in a complete local/CI environment with POSIX `SIGKILL` and `openssl` before a green result can be claimed.
-- Real GCS generation behavior is covered by the credential-free multiprocess fake but still needs a live/emulated acceptance environment before provider-backed production validation can be claimed.
-- Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real provider idempotency endpoint still require external credentials/resources.
+- The new targeted test file still needs execution in a complete local/CI checkout before a green result can be claimed.
+- Real GCS generation behavior still needs live/emulated provider-backed acceptance beyond the credential-free generation-aware fake.
+- Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real remediation provider remain external-resource validation tasks.
 
 ## Single best next step
 
-**Add an operator-visible, append-only reconciliation audit event with a bounded result/reason schema for each reconciliation attempt (`accepted`, `not_found`, `unknown`) and recovery completion, while explicitly excluding provider payloads, operation IDs, endpoints, credentials, and raw exceptions. Then test that crash/ambiguity paths produce an auditable sequence without increasing metric cardinality or enabling remediation replay.**
+**Extend the concrete SIGKILL/HTTPS ambiguity suites to assert the new append-only audit sequence end-to-end: one bounded `unknown` attempt per malformed/wrong-operation/timeout reconciliation call, one bounded authoritative attempt plus one recovery event after fresh Grafana evidence, durable sequence monotonicity across restart, and still exactly one remediation POST.**
 
-## Previous run — 2026-09-08 — operator reconciliation guidance and transition contract
+## Previous run summary
 
-Wired the five-value bounded reconciliation reason into the same-origin cockpit and bound reason assertions to real conflict-reload transitions across durable `none`, `approved`, `dispatching`, `resolved`, and legacy winners.
-
-## Previous run — 2026-09-08 — bounded reconciliation-reason observability
-
-Added the five-value provider-detail-free reconciliation reason to execution safety, `/v1/incident`, `/readyz`, and one-hot Prometheus metrics, with fail-closed fallback to `phase_unavailable`.
-
-## Previous run — 2026-09-08 — conflict reload execution-phase matrix
-
-Added `runtime/tests/test_execution_conflict_reload_phases.py` and hardened conflict reload semantics so safe durable winners clear obsolete ambiguity while `dispatching`, legacy ambiguity, and contradictory post-dispatch `approved` states remain reconciliation-gated.
-
-## Previous run — 2026-09-08 — multi-instance reconciliation CAS race
-
-Hardened conflict rebasing and added a spawned-process reconciliation race from durable `dispatching`; exactly one fresh Grafana evidence revision becomes durable and the stale reconciler adopts that winner without remediation replay.
-
-## Previous run — 2026-09-08 — service-level GCS dispatch CAS race
-
-Two independently spawned StageGuard services restore the same approved GCS generation and race `execute_approved()`. Exactly one `dispatching` CAS winner can contact remediation; the stale loser remains conflict-blocked and provider-call count remains exactly one.
-
-## Previous run — 2026-09-08 — concrete HTTPS replay safety
-
-Added real loopback TLS/process-death acceptance for execution and GET-only reconciliation, including malformed, wrong-operation, unknown-state, and timeout outcomes. Ambiguity never causes a second remediation POST and later authoritative recovery requires fresh Grafana evidence.
+The previous run bound reconciliation reasons to real SIGKILL and HTTPS ambiguity paths, requiring `durable_dispatching` while unsafe and `clear` only after authoritative reconciliation plus fresh Grafana evidence.
