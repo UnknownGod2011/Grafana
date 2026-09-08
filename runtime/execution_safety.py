@@ -20,7 +20,13 @@ from __future__ import annotations
 from typing import Literal
 
 from incident_checkpoint import CheckpointConflictError
-from incident_service import AuditEvent, IncidentService, IncidentSnapshot, _MAX_TIMELINE_EVENTS
+from incident_service import (
+    AuditEvent,
+    IncidentService,
+    IncidentSnapshot,
+    _MAX_AUDIT_LINEAGE_READ_EVENTS,
+    _MAX_TIMELINE_EVENTS,
+)
 from remediation import remediation_operation_id
 
 ReconciliationState = Literal["accepted", "not_found", "unknown"]
@@ -145,9 +151,6 @@ class ExecutionSafeIncidentService(IncidentService):
             except Exception:
                 self._audit_integrity_state = "failed"
                 raise RuntimeError("audit integrity chain could not advance safely")
-        self._timeline.append(event)
-        if len(self._timeline) > _MAX_TIMELINE_EVENTS:
-            del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
         checkpoint = self._checkpoint_for_snapshot(snapshot, "dispatching")
         bound = checkpoint.audit_chain_sequence is not None
         try:
@@ -156,6 +159,15 @@ class ExecutionSafeIncidentService(IncidentService):
             self._checkpoint_conflicted = True
             self._execution_reloaded = False
             raise
+        # Only the checkpoint winner is operator-visible committed history. The
+        # append-before-CAS record remains durable forensic residue for lineage
+        # verification if this writer loses the checkpoint race.
+        self._timeline.append(event)
+        self._committed_audit_history.append(event)
+        if len(self._timeline) > _MAX_TIMELINE_EVENTS:
+            del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
+        if len(self._committed_audit_history) > _MAX_AUDIT_LINEAGE_READ_EVENTS:
+            del self._committed_audit_history[: len(self._committed_audit_history) - _MAX_AUDIT_LINEAGE_READ_EVENTS]
         if bound:
             self._audit_integrity_state = "verified"
 
