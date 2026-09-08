@@ -187,7 +187,7 @@ class IncidentService:
         self._logs = logs
         self._remediation = remediation
         self._audit = audit
-        candidate_reader = audit if callable(getattr(audit, "read", None)) else None
+        candidate_reader = audit if isinstance(audit, JsonlAuditLog) else None
         self._audit_reader = audit_reader if audit_reader is not None else candidate_reader
         self._checkpoint_store = checkpoint_store
         self._profile = telemetry_profile
@@ -202,10 +202,12 @@ class IncidentService:
         self._timeline: list[AuditEvent] = []
         self._checkpoint_conflicted = False
         self._audit_chain = None
-        self._audit_integrity_state = "disabled" if checkpoint_store is None else "verified"
+        self._audit_integrity_state = "disabled" if checkpoint_store is None else (
+            "verified" if self._audit_reader is not None else "unbound_legacy"
+        )
         self._lock = threading.RLock()
         self._restore_checkpoint()
-        if self._audit_chain is None and self._snapshot is None:
+        if self._audit_chain is None and self._snapshot is None and self._audit_reader is not None:
             from audit_integrity import AuditChain
             self._audit_chain = AuditChain()
 
