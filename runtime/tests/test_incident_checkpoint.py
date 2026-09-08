@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from incident_checkpoint import JsonCheckpointStore, checkpoint_document, parse_checkpoint_document
@@ -121,9 +122,74 @@ class IncidentCheckpointTests(unittest.TestCase):
             service.investigate()
             checkpoint = store.load()
             document = checkpoint_document(checkpoint)
+            # Existing lifecycle callers stay on v2 until they provide a complete
+            # audit-chain binding; v3 is never emitted with a placeholder proof.
             self.assertEqual("stageguard.incident-checkpoint.v2", document["schema"])
             self.assertEqual("none", document["state"]["execution_phase"])
+            self.assertNotIn("audit_chain_head_sha256", document["state"])
             self.assertEqual(64, len(document["sha256"]))
+
+    def test_v3_round_trips_authenticated_audit_chain_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JsonCheckpointStore(Path(directory) / "checkpoint.json")
+            service = self.service(diagnosed(), FakeRemediation(), store)
+            service.investigate()
+            checkpoint = store.load()
+            bound = replace(
+                checkpoint,
+                audit_chain_sequence=checkpoint.sequence,
+                audit_chain_head_sha256="a" * 64,
+            )
+            key = b"k" * 32
+            document = checkpoint_document(bound, signing_key=key)
+
+            self.assertEqual("stageguard.incident-checkpoint.v3", document["schema"])
+            self.assertEqual(checkpoint.sequence, document["state"]["audit_chain_sequence"])
+            self.assertEqual("a" * 64, document["state"]["audit_chain_head_sha256"])
+            restored = parse_checkpoint_document(document, signing_key=key, require_signature=True)
+            self.assertEqual(checkpoint.sequence, restored.audit_chain_sequence)
+            self.assertEqual("a" * 64, restored.audit_chain_head_sha256)
+            self.assertEqual(checkpoint.execution_phase, restored.execution_phase)
+
+    def test_v3_rejects_partial_or_impossible_audit_chain_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JsonCheckpointStore(Path(directory) / "checkpoint.json")
+            service = self.service(diagnosed(), FakeRemediation(), store)
+            service.investigate()
+            checkpoint = store.load()
+
+            with self.assertRaisesRegex(ValueError, "supplied together"):
+                checkpoint_document(replace(checkpoint, audit_chain_sequence=checkpoint.sequence))
+            with self.assertRaisesRegex(ValueError, "supplied together"):
+                checkpoint_document(replace(checkpoint, audit_chain_head_sha256="a" * 64))
+            with self.assertRaisesRegex(ValueError, "genesis"):
+                checkpoint_document(replace(checkpoint, audit_chain_sequence=0, audit_chain_head_sha256="a" * 64))
+
+            document = checkpoint_document(
+                replace(checkpoint, audit_chain_sequence=checkpoint.sequence, audit_chain_head_sha256="a" * 64)
+            )
+            document["state"]["audit_chain_sequence"] = checkpoint.sequence + 1
+            canonical = json.dumps(document["state"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+            document["sha256"] = hashlib.sha256(canonical).hexdigest()
+            with self.assertRaisesRegex(ValueError, "cannot exceed"):
+                parse_checkpoint_document(document)
+
+    def test_signed_v3_chain_head_tamper_fails_authenticity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JsonCheckpointStore(Path(directory) / "checkpoint.json")
+            service = self.service(diagnosed(), FakeRemediation(), store)
+            service.investigate()
+            checkpoint = store.load()
+            key = b"k" * 32
+            document = checkpoint_document(
+                replace(checkpoint, audit_chain_sequence=checkpoint.sequence, audit_chain_head_sha256="a" * 64),
+                signing_key=key,
+            )
+            document["state"]["audit_chain_head_sha256"] = "b" * 64
+            canonical = json.dumps(document["state"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+            document["sha256"] = hashlib.sha256(canonical).hexdigest()
+            with self.assertRaisesRegex(ValueError, "authenticity"):
+                parse_checkpoint_document(document, signing_key=key, require_signature=True)
 
     def test_v1_pending_approval_restores_as_legacy_unknown(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -143,6 +209,8 @@ class IncidentCheckpointTests(unittest.TestCase):
             }
             restored = parse_checkpoint_document(v1)
             self.assertEqual("legacy_unknown", restored.execution_phase)
+            self.assertIsNone(restored.audit_chain_sequence)
+            self.assertIsNone(restored.audit_chain_head_sha256)
 
     def test_signed_execution_phase_tamper_fails_authenticity(self):
         with tempfile.TemporaryDirectory() as directory:
