@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 execution phases, bounded reconciliation reasons, append-only reconciliation audit events, deterministic tamper-evident audit chaining, checkpoint schema v3 audit-chain binding, restore-time orphan-tail rejection, explicit audit-integrity observability, and hardened audit-integrity readiness policy.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable telemetry mapping, Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, signed checkpoint persistence with optimistic concurrency, provider idempotency reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, checkpoint schema v2 execution phases, bounded reconciliation reasons, append-only reconciliation audit events, deterministic tamper-evident audit chaining, checkpoint schema v3 audit-chain binding, restore-time orphan-tail rejection, explicit audit-integrity observability, hardened audit-integrity readiness policy, and operator-facing integrity migration guidance.
 
 Core safety invariants:
 
@@ -30,65 +30,51 @@ Core safety invariants:
 - Provider-neutral GET-only reconciliation with bounded outcomes.
 - Revision-bound Gemini incident-commander briefing layer.
 - Google IAP identity, Cloud Logging audit integration, and Cloud Run deployment path.
-- Durable checkpoint recovery, CAS conflict handling, operator recovery cockpit, execution phases, crash/SIGKILL ambiguity coverage, reconciliation reason model, bounded reconciliation audit events, tamper-evident audit chain, schema-v3 binding, restore-time audit verification, and integrity observability/policy.
-- Same-origin cockpit now surfaces audit-integrity state/policy and treats hardened policy violations as independent fail-closed lifecycle blocks.
+- Durable checkpoint recovery, CAS conflict handling, operator recovery cockpit, execution phases, crash/SIGKILL ambiguity coverage, reconciliation reason model, bounded reconciliation audit events, tamper-evident audit chain, schema-v3 binding, restore-time audit verification, integrity observability/policy, and operator integrity-policy safety.
 
-## Run log — 2026-09-09 — operator audit-integrity policy safety
+## Run log — 2026-09-09 — legacy-v2 to hardened-v3 migration acceptance
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/api.py`, `runtime/operator_console.py`, `runtime/tests/test_operator_console.py`, and `runtime/tests/test_runtime_audit_checkpoint_binding.py`. Confirmed the previous run enforced `require_verified` in readiness, but the browser cockpit still only modeled checkpoint conflict/execution uncertainty and therefore could not explain a hardened audit-integrity block to operators.
+Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/incident_checkpoint.py`, `runtime/incident_service.py`, `runtime/api.py`, `runtime/readiness.py`, `runtime/tests/test_runtime_audit_checkpoint_binding.py`, and `runtime/tests/test_audit_integrity_policy.py`. Confirmed the prior handoff's highest-priority gap: policy/readiness and v3 binding were individually covered, but no credential-free acceptance test proved a legitimate persisted v2 lineage could migrate through hardened-unready into verified v3 and remain verified after restart without creating approval/remediation replay risk.
 
 ### Exact changes made
 
-1. Extended `runtime/operator_console.py` with a dedicated audit-integrity safety card.
-   - Consumes only bounded `audit_integrity` values: `disabled`, `unbound_legacy`, `verified`, `failed`.
-   - Consumes only bounded policies: `allow_unbound_legacy`, `require_verified`.
-   - Invalid integrity values collapse to `failed`; invalid policies collapse to `require_verified`.
-   - `audit_integrity=failed` blocks lifecycle controls under every policy.
-   - `require_verified` blocks lifecycle controls unless integrity is exactly `verified`.
-   - The block is independent from checkpoint conflict/execution uncertainty and is reflected in the connection safety indicator.
-   - Hardened legacy guidance explicitly says a legitimate lifecycle/audit write must establish authenticated v3 state and warns against bypassing the policy or editing checkpoint files manually.
-   - Existing uncertain-execution recovery remains replay-safe and continues to require fresh Grafana evidence.
-
-2. Added `runtime/tests/test_operator_integrity_policy.py`.
-   - Asserts the bounded state/policy allowlists are present in the browser contract.
-   - Asserts hardened audit policy participates in the lifecycle safety block and disables investigation/approval/execution.
-   - Asserts migration guidance does not suggest bypassing integrity controls.
-   - Asserts provider operation IDs, provider URLs, and browser persistence remain absent.
-   - Asserts invalid server values collapse to the hardened fail-closed states.
-
-3. Added `docs/audit-integrity.md`.
-   - Documents migration versus hardened policy semantics.
-   - Documents the Cloud Run durable-path behavior.
-   - Gives a safe legacy checkpoint migration procedure and explicitly prohibits manual digest/checkpoint fabrication or temporary policy relaxation merely to force readiness green.
-   - Documents fixed-cardinality readiness/metrics checks for operators.
+1. Added `runtime/tests/test_audit_integrity_migration.py`.
+   - Uses the real `JsonCheckpointStore`, `JsonlAuditLog`, `IncidentService`, checkpoint serializer, readiness policy, and audit-chain restore logic.
+   - Adds a small append-only audit wrapper that models a legitimate legacy deployment: audit events are durably written to JSONL, but no reader capability is exposed to the service, so a normal investigation emits a real schema-v2 checkpoint rather than a fabricated fixture.
+   - Restarts the same durable checkpoint/audit pair with the real JSONL reader under `require_verified` and asserts `audit_integrity=unbound_legacy` plus readiness false.
+   - Performs a normal investigation as the migration write; the reconstructed legacy chain is extended by one contiguous event and the checkpoint becomes schema v3 with matching lifecycle/audit sequence 2.
+   - Asserts policy readiness becomes true only after the real v3 binding reports `verified`.
+   - Restarts again from the same durable pair and asserts `verified`, `synchronized`, ready, sequence continuity, identical evidence revision, no stale approval/outcome, and zero remediation calls.
+   - Reads the durable audit stream and requires exactly sequences `[1, 2]`, both legitimate `investigation_completed` events; no approval or remediation audit event is manufactured by migration.
 
 ### Tests / checks / results
 
-- Repository reads and Git object writes succeeded through the GitHub connector.
-- The local execution container still cannot resolve `github.com`, so a complete checkout and Python test run could not be started; the new tests are therefore **not claimed green locally**.
-- No GitHub Actions workflow was manually triggered or rerun.
+- Repository inspection and Git object creation succeeded through the GitHub connector.
+- The acceptance test is intentionally credential-free and uses temporary local stores; no cloud resource is required to execute it.
+- This run could not execute the Python suite in a complete checkout from the current tool environment, so the new test is **not claimed green locally**.
+- No GitHub Actions workflow was manually triggered or rerun, avoiding additional CI/storage noise.
 - No production Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or remediation credentials/resources were touched.
 
 ### Decisions made
 
-1. **Audit policy is a lifecycle safety gate, not cosmetic status.** The cockpit disables mutating and investigative lifecycle controls when hardened integrity is unsatisfied so browser behavior matches `/readyz`.
-2. **State and policy remain separate.** Operators can distinguish `unbound_legacy` migration state from true `failed` integrity without weakening hardened readiness.
-3. **Unknown browser inputs fail hardened.** Future server/UI version skew cannot silently enable controls or create arbitrary policy states.
-4. **No manual migration shortcuts.** A legacy checkpoint becomes trusted only through StageGuard producing a real schema-v3 binding from the durable audit lineage.
+1. **Migration fixtures must be produced by StageGuard itself.** The test does not hand-author, patch, or recompute checkpoint digests; a real legacy-compatible service write creates v2.
+2. **`require_verified` gates readiness, not recovery of a valid legacy lineage.** A complete legacy audit prefix can be reconstructed as `unbound_legacy`, then a legitimate lifecycle audit write seals v3. Failed integrity still blocks lifecycle mutation in the service itself.
+3. **Migration must not imply remediation authority.** The acceptance path contains no approval and invokes the remediation adapter zero times before, during, and after restart.
+4. **Restart is part of the proof.** A process-local transition to `verified` is insufficient; the persisted v3 head must verify against the durable JSONL audit stream in a fresh service instance.
 
 ### Current blockers / unknowns
 
-- The new cockpit regressions still need execution in a complete checkout before a green result can be claimed.
-- The full end-to-end legacy-v2 -> hardened-unready -> legitimate v3 binding -> restart -> verified-ready migration test remains to be implemented; constructing it safely requires reusing the repository's checkpoint helpers rather than hand-authoring an invalid legacy document.
+- The new migration acceptance test still needs execution in a complete checkout before a green result can be claimed.
+- The credential-free test uses the local SHA-256 protected checkpoint store; production GCS additionally HMAC-authenticates the same v3 state and still needs real generation/IAM acceptance against GCS.
 - Multi-instance append-before-CAS can still leave orphan/duplicate events in Cloud Logging; restore rejects them safely, but a production lineage/commit-marker strategy remains desirable.
-- Real GCS generation behavior, Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, and a real remediation provider remain external-resource validation tasks.
+- Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, and a real remediation provider remain external-resource validation tasks.
 
 ## Single best next step
 
-**Implement the credential-free end-to-end migration acceptance test using the real checkpoint serializers/stores: create a legitimate schema-v2 legacy checkpoint, start under `require_verified` and prove `/readyz` is false with `unbound_legacy`, perform the minimum legitimate lifecycle/audit transition that emits authenticated schema-v3 state without bypassing policy semantics, restart from the same durable audit/checkpoint pair, and prove `audit_integrity=verified`, readiness true, sequence continuity, and no stale approval/remediation replay.**
+**Design and implement a committed-lineage audit protocol for multi-instance production writers so append-before-CAS orphan events can be distinguished and safely compacted/ignored without weakening tamper detection: keep the current fail-closed restore behavior as the baseline, add a bounded checkpoint-backed lineage/commit marker, and prove with concurrent-writer tests that a losing writer cannot poison the winning audit lineage or cause remediation replay.**
 
 ## Previous run summary
 
-The previous run added the bounded `allow_unbound_legacy` / `require_verified` production policy, fixed-cardinality policy telemetry, bootstrap configuration, and automatic hardened Cloud Run selection when GCS durable checkpointing is configured.
+The previous run surfaced audit-integrity state/policy in the operator cockpit, blocked lifecycle controls under hardened violations, added fail-closed browser handling for unknown states, documented safe migration guidance, and prohibited manual digest/checkpoint fabrication as a migration shortcut.
