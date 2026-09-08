@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Iterable, Protocol
 
 from incident_service import AuditEvent
 
 GENESIS_SHA256 = "0" * 64
+_MAX_LINEAGE_CANDIDATES_PER_SEQUENCE = 32
+_MAX_LINEAGE_STATES = 128
 
 
 class AuditSink(Protocol):
@@ -124,6 +127,66 @@ def verify_audit_chain(
     if actual != expected:
         raise ValueError("audit chain integrity verification failed")
     return actual
+
+
+def verify_committed_audit_lineage(
+    events: Iterable[AuditEvent],
+    expected: AuditChainCheckpoint,
+    *,
+    initial: AuditChainCheckpoint | None = None,
+    max_candidates_per_sequence: int = _MAX_LINEAGE_CANDIDATES_PER_SEQUENCE,
+    max_states: int = _MAX_LINEAGE_STATES,
+) -> AuditChainCheckpoint:
+    """Verify the checkpoint-authenticated lineage in a branched append-only stream.
+
+    Multi-instance writers append audit data before checkpoint CAS. A losing writer
+    may therefore leave a same-sequence competitor or a later orphan tail. Those
+    records are not authoritative: the authenticated checkpoint's chain head is the
+    commit marker. This verifier accepts the durable stream only when at least one
+    complete contiguous path reaches that exact head. Committed-event mutation or
+    deletion remains fail-closed because no candidate path can reproduce the head.
+
+    Search is deliberately bounded. Excessive competing records are treated as a
+    denial-of-service/integrity condition rather than allowing unbounded work.
+    Events beyond ``expected.sequence`` are ignored as uncommitted tails.
+    """
+    initial = initial or AuditChainCheckpoint(0, GENESIS_SHA256)
+    if expected.sequence < initial.sequence:
+        raise ValueError("expected audit checkpoint precedes trusted initial checkpoint")
+    if not isinstance(max_candidates_per_sequence, int) or max_candidates_per_sequence < 1:
+        raise ValueError("max_candidates_per_sequence must be positive")
+    if not isinstance(max_states, int) or max_states < 1:
+        raise ValueError("max_states must be positive")
+    if expected.sequence == initial.sequence:
+        if expected != initial:
+            raise ValueError("audit chain integrity verification failed")
+        return expected
+
+    grouped: dict[int, list[AuditEvent]] = defaultdict(list)
+    for event in events:
+        if event.sequence <= initial.sequence or event.sequence > expected.sequence:
+            continue
+        bucket = grouped[event.sequence]
+        bucket.append(event)
+        if len(bucket) > max_candidates_per_sequence:
+            raise ValueError("audit lineage has too many competing events")
+
+    states = {initial.head_sha256}
+    for sequence in range(initial.sequence + 1, expected.sequence + 1):
+        candidates = grouped.get(sequence)
+        if not candidates:
+            raise ValueError("audit lineage is incomplete")
+        next_states: set[str] = set()
+        for previous_head in states:
+            for event in candidates:
+                next_states.add(extend_audit_chain(previous_head, event))
+                if len(next_states) > max_states:
+                    raise ValueError("audit lineage search exceeded safe bound")
+        states = next_states
+
+    if expected.head_sha256 not in states:
+        raise ValueError("audit chain integrity verification failed")
+    return expected
 
 
 class ChainedAuditSink:
