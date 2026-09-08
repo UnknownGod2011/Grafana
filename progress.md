@@ -10,12 +10,12 @@ Core safety invariants:
 - Gemini is advisory and cannot mutate approval, remediation, or recovery state.
 - Human approval is single-use and bound to an exact evidence revision.
 - Production remediation uses a deterministic idempotency identity and never automatically replays ambiguous external side effects.
-- Phase-capable stores persist `dispatching` before provider contact; `approved` therefore proves dispatch has not begun.
+- Phase-capable stores persist `dispatching` before provider contact; a clean restart from durable `approved` therefore proves dispatch had not begun in that process lifetime.
 - Restored `dispatching` and legacy-v1 pending approvals fail closed and require provider reconciliation plus fresh Grafana evidence.
 - GCS checkpoints are HMAC-authenticated and use strict generation compare-and-swap.
 - `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution-phase telemetry is fixed-cardinality and provider-detail-free.
 - Concrete remediation reconciliation is GET-only and cannot carry a remediation body.
-- After CAS contention, process-local execution uncertainty is always rebased from the authenticated durable winner; a stale loser cannot force redundant reconciliation after another instance has already cleared the stale approval with fresh evidence.
+- After CAS contention, process-local execution uncertainty is rebased from the authenticated durable winner, but direct knowledge that this process may already have crossed the dispatch barrier is never erased merely because a conflicting durable winner reports `approved`.
 
 ## Completed milestones
 
@@ -38,65 +38,68 @@ Core safety invariants:
 - Credential-free spawned-process GCS generation-CAS acceptance with a process-safe fake object backend.
 - End-to-end spawned-process `ExecutionSafeIncidentService` dispatch race over the generation-aware GCS backend, proving the durable `dispatching` CAS gates provider contact.
 - End-to-end spawned-process reconciliation race from durable `dispatching`, proving exactly one fresh Grafana evidence revision becomes durable and the stale reconciler adopts that winner without remediation replay or redundant reconciliation.
+- Service-level conflict-reload phase matrix for `none`, `approved`, `dispatching`, `resolved`, and `legacy_unknown`, including a fail-closed regression fix for contradictory post-dispatch `approved` winners.
 
-## Run log — 2026-09-08 — multi-instance reconciliation CAS race
+## Run log — 2026-09-08 — conflict reload execution-phase matrix
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/tests/test_execution_gcs_multiprocess_cas.py` for the existing service-level dispatch CAS harness;
-- `runtime/tests/test_gcs_multiprocess_cas.py` for the process-safe generation-aware fake GCS backend;
-- `runtime/execution_safety.py` for restart ambiguity, provider reconciliation, conflict reload, and fresh-investigation behavior;
-- `runtime/incident_service.py` for checkpoint CAS behavior during `investigate()` and explicit conflict reload;
-- `runtime/investigator.py` for the fixed six-query Grafana/Prometheus evidence contract and deterministic revision construction.
+- `runtime/execution_safety.py` for restart ambiguity, dispatch barriers, conflict reload, and provider reconciliation;
+- `runtime/tests/test_execution_safety.py` for the existing exception/CAS safety contract and local vs production adapter behavior;
+- `runtime/incident_checkpoint.py` for schema-v2 phase validation and phase-capable store semantics;
+- `runtime/remediation.py` for deterministic operation IDs and remediation outcome types;
+- `runtime/incident_service.py` for explicit conflict reload, snapshot replacement, checkpoint writes, approval consumption, and lifecycle blocking.
 
 ### Exact changes made
 
-1. Hardened `runtime/execution_safety.py` conflict reload semantics.
-   - Added `_clear_execution_uncertainty()` so ambiguity state is reset consistently.
-   - Changed `reload_checkpoint_after_conflict()` to rebase execution-safety state from the authenticated durable checkpoint winner rather than blindly retaining the losing process's old `execution_uncertain` flag.
-   - If another instance already reconciled successfully and persisted fresh evidence with no stale approval, the loser now becomes synchronized/clear immediately after explicit reload.
-   - If the durable winner is still `dispatching` or legacy ambiguous, the ordinary restored-production guard re-enters fail-closed uncertainty with the correct deterministic operation identity.
-   - A durable schema-v2 `approved` winner remains safe because it proves the dispatch barrier was not crossed.
-   - Reused the new reset helper after successful `reconcile_execution_uncertainty()` to keep state transitions consistent.
+1. Added `runtime/tests/test_execution_conflict_reload_phases.py`.
+   - Creates a phase-capable conflict store and drives a real `ExecutionSafeIncidentService` through successful provider contact followed by a synthetic resolved-checkpoint CAS loss.
+   - Replaces the durable winner with each relevant lifecycle phase and explicitly reloads it.
+   - `none`: stale process ambiguity clears, no approval remains, and execution is impossible.
+   - `resolved`: stale process ambiguity clears, the consumed approval remains non-executable, and provider call count stays one.
+   - `dispatching`: remains `execution_uncertain`, reconciliation-gated, and bound to the same deterministic operation identity.
+   - `legacy_unknown`: remains `execution_uncertain` and reconciliation-gated.
+   - `approved`: verifies a process that already knows it may have crossed dispatch cannot treat a contradictory durable `approved` checkpoint as proof that the action is safe to execute again.
 
-2. Added `runtime/tests/test_execution_reconciliation_gcs_multiprocess_cas.py`.
-   - Seeds a real authenticated schema-v2 `dispatching` checkpoint through `GoogleCloudStorageCheckpointStore` using the credential-free process-safe fake GCS backend.
-   - Spawns two independent StageGuard services restored from the same generation and confirms both begin `execution_uncertain` / `dispatching` / reconciliation-ready.
-   - Both receive an authoritative `accepted` provider reconciliation result and synchronize at a process barrier before collecting fresh Grafana evidence.
-   - Each process receives a slightly different but healthy six-query evidence set so the generated revisions are distinct; therefore the durable winner is observable rather than accidentally identical.
-   - Requires exactly one fresh-evidence checkpoint write to win GCS generation CAS and exactly one reconciler to receive `CheckpointConflictError`.
-   - Requires zero remediation execution calls throughout reconciliation; only two provider reconciliation reads are allowed.
-   - Holds the losing reconciler until the winning evidence revision is durable, then explicitly reloads the winner and verifies its stale process-local uncertainty clears without another provider reconciliation or another checkpoint write.
-   - Verifies a clean third StageGuard instance restores exactly the winning revision, with no approval, phase `none`, synchronized checkpoint state, and no reconciliation requirement.
+2. Hardened `runtime/execution_safety.py::reload_checkpoint_after_conflict()`.
+   - Preserves the useful optimization from the previous run: durable winners with no approval (`none`) or an already-consumed outcome (`resolved`) clear obsolete process-local ambiguity immediately.
+   - Keeps `dispatching` and `legacy_unknown` fail-closed through the existing restore guard.
+   - Fixes the newly identified edge case for `approved`: a schema-v2 `approved` checkpoint is safe on a clean process restart, but it does not erase direct knowledge in the current process that provider dispatch may already have happened before CAS loss.
+   - In this contradictory conflict-reload case StageGuard keeps `execution_uncertain`, preserves the deterministic operation identity, reports bounded execution phase `unknown`, requires reconciliation, and blocks remediation replay.
+   - This distinction prevents regressed/non-monotonic/custom phase-capable store views from converting a possibly consumed stale approval back into an executable action.
 
 ### Tests / checks / results
 
-- GitHub repository writes succeeded.
-- Attempted a credential-free local checkout and targeted unittest run:
-  `python -m unittest tests.test_execution_reconciliation_gcs_multiprocess_cas tests.test_execution_gcs_multiprocess_cas`.
-- The environment again failed before Python started because Git could not resolve `github.com`; therefore the new tests are **not claimed as executed successfully here**.
+- GitHub repository writes succeeded for both the new regression matrix and runtime hardening.
+- Attempted credential-free local validation with:
+  `python -m unittest tests.test_execution_conflict_reload_phases tests.test_execution_safety`.
+- The execution environment failed during `git clone` before Python started because it could not resolve `github.com`; therefore the new tests are **not claimed as executed successfully here**.
 - No GitHub Actions workflow was intentionally triggered, rerun, or modified.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **Rebase safety state from durable truth after conflict.** A process-local ambiguity flag is not authoritative once another instance has won CAS; the authenticated checkpoint is.
-2. **Do not perform redundant reconciliation after adopting a cleared winner.** If the winner has already persisted fresh evidence and removed the stale approval, another provider lookup and evidence write adds contention without improving safety.
-3. **Keep dispatching fail-closed.** Reload only clears stale ambiguity when the durable winner itself proves the ambiguous operation is no longer pending; `dispatching` and legacy-unknown remain reconciliation-gated.
-4. **Use distinct evidence revisions in the race.** This proves exactly which instance won durable recovery instead of allowing identical deterministic reports to hide a write race.
-5. **Keep reconciliation read-only.** The acceptance harness treats any remediation execution call during reconciliation as a test failure.
+1. **Clean restart and conflict reload are different evidence contexts.** Durable `approved` proves the barrier was not crossed only when the process has no stronger local evidence to the contrary.
+2. **Direct post-dispatch knowledge wins over a contradictory safe-looking checkpoint.** Once a process knows provider contact may have occurred, `approved` cannot make that same approval executable again without reconciliation.
+3. **Only terminal/cleared durable winners erase ambiguity immediately.** `none` and `resolved` are sufficient to show the stale approval is gone or consumed; ambiguous/pending states remain gated.
+4. **Expose contradiction as bounded `unknown`.** The operator surface must not falsely claim either `approved` or `dispatching` when durable and process-local evidence disagree.
+5. **Never trade replay safety for convenience.** The fallback is an extra reconciliation + fresh Grafana investigation, not a second remediation execution.
 
 ### Current blockers / unknowns
 
-- The new multiprocess reconciliation acceptance test has not been executed in a full local checkout because the environment cannot currently resolve `github.com`.
-- The process-safe GCS backend models generation preconditions but is not a substitute for a real GCS emulator/live two-instance Cloud Run acceptance run.
+- The new phase-matrix tests have not been executed in a full local checkout because the environment cannot currently resolve `github.com`.
+- Real GCS generation semantics are covered by the existing credential-free multiprocess fake but still need a live/emulated acceptance environment before claiming provider-backed production validation.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real provider idempotency endpoint still require external credentials/resources.
 
 ## Single best next step
 
-**Add a service-level regression matrix for conflict reload rebasing across every durable execution phase (`none`, `approved`, `dispatching`, `resolved`, `legacy_unknown`): prove safe winners clear stale process-local ambiguity, ambiguous winners remain reconciliation-gated with the winner's deterministic operation identity, and no reload path can make an already-consumed or stale approval executable. Then use those invariants to harden readiness/operator-state reporting for multi-instance handoff.**
+**Harden the operator/readiness surface for contradictory multi-instance handoff: add an explicit bounded reconciliation reason (`durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, `phase_unavailable`) to `/readyz` and operator state without leaking operation/provider identifiers, then add fixed-cardinality metrics and tests proving every execution-uncertain reason blocks readiness and no label can grow with incident/provider data.**
+
+## Previous run — 2026-09-08 — multi-instance reconciliation CAS race
+
+Hardened `runtime/execution_safety.py` so ordinary CAS losers rebase execution state from the authenticated durable winner and added `runtime/tests/test_execution_reconciliation_gcs_multiprocess_cas.py`. Two restored reconcilers race fresh Grafana evidence from durable `dispatching`; exactly one evidence revision wins CAS, the loser adopts it without another provider read/write, and remediation is never replayed.
 
 ## Previous run — 2026-09-08 — service-level GCS dispatch CAS race
 
