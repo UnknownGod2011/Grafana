@@ -6,7 +6,7 @@ from execution_safety import ExecutionSafeIncidentService
 from incident_checkpoint import CheckpointConflictError, GoogleCloudStorageCheckpointStore, IncidentCheckpoint
 from incident_service import MemoryAuditLog
 from remediation import ActionResult, Approval
-from test_gcs_multiprocess_cas import KEY, OBJECT, SharedBlob, SharedBucket, checkpoint
+from test_gcs_multiprocess_cas import KEY, OBJECT, SharedBucket, checkpoint
 
 
 class RecoveryMetrics:
