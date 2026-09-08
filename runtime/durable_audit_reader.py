@@ -10,6 +10,7 @@ from cloud_audit import audit_event_document
 from incident_service import AuditEvent
 
 MAX_READ_RESULTS = 101
+MAX_LINEAGE_READ_RESULTS = 4096
 DEFAULT_LOOKBACK_SECONDS = 24 * 60 * 60
 MAX_LOOKBACK_SECONDS = 7 * 24 * 60 * 60
 
@@ -105,26 +106,38 @@ class GoogleCloudAuditReader:
         client = cloud_logging.Client(project=project or None)
         return cls(client.logger(normalized_name), lookback_seconds=lookback_seconds)
 
-    def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
+    def _window(self) -> tuple[int, int]:
+        now_ms = self._clock_ms()
+        if not isinstance(now_ms, int) or isinstance(now_ms, bool) or now_ms < 0:
+            raise RuntimeError("audit reader clock returned an invalid timestamp")
+        return now_ms, max(0, now_ms - self._lookback_seconds * 1000)
+
+    def _base_filter(self, incident_id: str, cutoff_ms: int) -> tuple[str, str]:
         incident_literal = _literal(incident_id, max_bytes=256, field="incident_id")
+        base = " AND ".join(
+            (
+                f"logName={self._log_literal}",
+                'jsonPayload.schema="stageguard.audit.v1"',
+                f"jsonPayload.incident_id={incident_literal}",
+                f'timestamp>="{_rfc3339(cutoff_ms)}"',
+            )
+        )
+        return incident_literal, base
+
+    @staticmethod
+    def _validate_window_event(event: AuditEvent, *, cutoff_ms: int, now_ms: int) -> None:
+        if event.timestamp_unix_ms < cutoff_ms or event.timestamp_unix_ms > now_ms + 60_000:
+            raise ValueError("audit entry timestamp is outside the bounded read window")
+
+    def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
         if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
             raise ValueError("after_sequence must be a non-negative integer")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_READ_RESULTS:
             raise ValueError(f"limit must be between 1 and {MAX_READ_RESULTS}")
 
-        now_ms = self._clock_ms()
-        if not isinstance(now_ms, int) or isinstance(now_ms, bool) or now_ms < 0:
-            raise RuntimeError("audit reader clock returned an invalid timestamp")
-        cutoff_ms = max(0, now_ms - self._lookback_seconds * 1000)
-        filter_ = " AND ".join(
-            (
-                f"logName={self._log_literal}",
-                'jsonPayload.schema="stageguard.audit.v1"',
-                f"jsonPayload.incident_id={incident_literal}",
-                f"jsonPayload.sequence>{after_sequence}",
-                f'timestamp>="{_rfc3339(cutoff_ms)}"',
-            )
-        )
+        now_ms, cutoff_ms = self._window()
+        _, base = self._base_filter(incident_id, cutoff_ms)
+        filter_ = f"{base} AND jsonPayload.sequence>{after_sequence}"
         entries = self._logger.list_entries(
             filter_=filter_, order_by="ASCENDING", max_results=limit, page_size=min(limit, 100)
         )
@@ -132,8 +145,7 @@ class GoogleCloudAuditReader:
         by_sequence: dict[int, AuditEvent] = {}
         for entry in entries:
             event = _parse_document(getattr(entry, "payload", None), incident_id)
-            if event.timestamp_unix_ms < cutoff_ms or event.timestamp_unix_ms > now_ms + 60_000:
-                raise ValueError("audit entry timestamp is outside the bounded read window")
+            self._validate_window_event(event, cutoff_ms=cutoff_ms, now_ms=now_ms)
             if event.sequence <= after_sequence:
                 raise ValueError("audit entry sequence violated the requested lower bound")
             prior = by_sequence.get(event.sequence)
@@ -143,3 +155,50 @@ class GoogleCloudAuditReader:
             if len(by_sequence) >= limit:
                 break
         return [by_sequence[sequence] for sequence in sorted(by_sequence)]
+
+    def read_candidates(
+        self,
+        *,
+        incident_id: str,
+        through_sequence: int,
+        limit: int = MAX_LINEAGE_READ_RESULTS,
+    ) -> list[AuditEvent]:
+        """Read every bounded candidate up to a checkpoint head without de-duplicating branches.
+
+        This is intentionally distinct from ``read``: multi-instance append-before-CAS
+        can produce conflicting same-sequence records, and authenticated lineage
+        verification must see those competitors instead of treating their existence as
+        a reader error. Cloud Logging pagination is consumed by ``list_entries`` under
+        one bounded ``max_results`` request. A sentinel result fails closed if the
+        configured bound is exhausted, preventing silent truncation.
+        """
+        if not isinstance(through_sequence, int) or isinstance(through_sequence, bool) or through_sequence < 0:
+            raise ValueError("through_sequence must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LINEAGE_READ_RESULTS:
+            raise ValueError(f"limit must be between 1 and {MAX_LINEAGE_READ_RESULTS}")
+        if through_sequence == 0:
+            return []
+
+        now_ms, cutoff_ms = self._window()
+        _, base = self._base_filter(incident_id, cutoff_ms)
+        filter_ = (
+            f"{base} AND jsonPayload.sequence>0 "
+            f"AND jsonPayload.sequence<={through_sequence}"
+        )
+        entries = self._logger.list_entries(
+            filter_=filter_,
+            order_by="ASCENDING",
+            max_results=limit + 1,
+            page_size=100,
+        )
+
+        candidates: list[AuditEvent] = []
+        for entry in entries:
+            event = _parse_document(getattr(entry, "payload", None), incident_id)
+            self._validate_window_event(event, cutoff_ms=cutoff_ms, now_ms=now_ms)
+            if event.sequence < 1 or event.sequence > through_sequence:
+                raise ValueError("audit candidate sequence violated the requested range")
+            candidates.append(event)
+            if len(candidates) > limit:
+                raise ValueError("audit candidate read exceeded the safe result bound")
+        return sorted(candidates, key=lambda event: (event.sequence, event.timestamp_unix_ms, event.event_type, event.actor))
