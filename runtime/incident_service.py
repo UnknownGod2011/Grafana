@@ -47,9 +47,15 @@ class MemoryAuditLog:
     def append(self, event: AuditEvent) -> None:
         self.events.append(event)
 
+    def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
+        return [
+            event for event in self.events
+            if event.incident_id == incident_id and event.sequence > after_sequence
+        ][:limit]
+
 
 class JsonlAuditLog:
-    """Append-only local-development audit sink with owner-only permissions."""
+    """Append-only local-development audit sink/reader with owner-only permissions."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -65,6 +71,27 @@ class JsonlAuditLog:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+    def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
+        if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
+            raise ValueError("after_sequence must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        events: list[AuditEvent] = []
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    raw = json.loads(line)
+                    event = AuditEvent(**raw)
+                    if event.incident_id == incident_id and event.sequence > after_sequence:
+                        events.append(event)
+                        if len(events) >= limit:
+                            break
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("local audit log could not be read safely") from exc
+        return events
 
 
 @dataclass(frozen=True)
@@ -93,6 +120,7 @@ _TIMELINE_PAYLOAD_FIELDS = {
     "remediation_completed": ("revision", "status", "sample_count", "action_accepted"),
 }
 _MAX_TIMELINE_EVENTS = 512
+_AUDIT_INTEGRITY_STATES = {"disabled", "unbound_legacy", "verified", "failed"}
 
 
 def _actor_fingerprint(actor: str) -> str:
@@ -159,7 +187,8 @@ class IncidentService:
         self._logs = logs
         self._remediation = remediation
         self._audit = audit
-        self._audit_reader = audit_reader
+        candidate_reader = audit if callable(getattr(audit, "read", None)) else None
+        self._audit_reader = audit_reader if audit_reader is not None else candidate_reader
         self._checkpoint_store = checkpoint_store
         self._profile = telemetry_profile
         self._activation = activation_record
@@ -172,8 +201,13 @@ class IncidentService:
         self._sequence = 0
         self._timeline: list[AuditEvent] = []
         self._checkpoint_conflicted = False
+        self._audit_chain = None
+        self._audit_integrity_state = "disabled" if checkpoint_store is None else "verified"
         self._lock = threading.RLock()
         self._restore_checkpoint()
+        if self._audit_chain is None and self._snapshot is None:
+            from audit_integrity import AuditChain
+            self._audit_chain = AuditChain()
 
     def _validated_snapshot(self, checkpoint: IncidentCheckpoint) -> IncidentSnapshot:
         if checkpoint.revision != _revision(checkpoint.report):
@@ -191,11 +225,69 @@ class IncidentService:
             checkpoint.incident_id, checkpoint.revision, checkpoint.report, checkpoint.approval, checkpoint.outcome
         )
 
+    def _read_audit_prefix(self, incident_id: str, through_sequence: int) -> list[AuditEvent]:
+        if self._audit_reader is None:
+            raise RuntimeError("durable audit reader is required for integrity verification")
+        events: list[AuditEvent] = []
+        after = 0
+        while after < through_sequence:
+            page = self._audit_reader.read(incident_id=incident_id, after_sequence=after, limit=100)
+            if not page:
+                break
+            for event in page:
+                if event.sequence > through_sequence:
+                    break
+                events.append(event)
+                after = event.sequence
+            else:
+                continue
+            break
+        return events
+
+    def _restore_audit_integrity(self, checkpoint: IncidentCheckpoint) -> None:
+        from audit_integrity import AuditChain, AuditChainCheckpoint, verify_audit_chain
+
+        bound = checkpoint.audit_chain_sequence is not None and checkpoint.audit_chain_head_sha256 is not None
+        if not bound:
+            self._audit_integrity_state = "unbound_legacy"
+            if self._audit_reader is None:
+                self._audit_chain = None
+                return
+            try:
+                events = self._read_audit_prefix(checkpoint.incident_id, checkpoint.sequence)
+                chain = AuditChain()
+                for event in events:
+                    chain.append(event)
+                if chain.checkpoint().sequence != checkpoint.sequence:
+                    raise ValueError("legacy audit history is incomplete")
+            except Exception:
+                self._audit_integrity_state = "failed"
+                self._audit_chain = None
+                return
+            self._audit_chain = chain
+            return
+
+        expected = AuditChainCheckpoint(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256)
+        if self._audit_reader is None:
+            self._audit_integrity_state = "failed"
+            self._audit_chain = None
+            return
+        try:
+            events = self._read_audit_prefix(checkpoint.incident_id, expected.sequence)
+            verify_audit_chain(events, expected)
+        except Exception:
+            self._audit_integrity_state = "failed"
+            self._audit_chain = None
+            return
+        self._audit_chain = AuditChain(expected)
+        self._audit_integrity_state = "verified"
+
     def _apply_checkpoint(self, checkpoint: IncidentCheckpoint) -> None:
         snapshot = self._validated_snapshot(checkpoint)
+        self._restore_audit_integrity(checkpoint)
         sequence = checkpoint.sequence
         if self._audit_reader is not None:
-            durable = self._audit_reader.read(incident_id=checkpoint.incident_id, after_sequence=0, limit=101)
+            durable = self._audit_reader.read(incident_id=checkpoint.incident_id, after_sequence=0, limit=100)
             if durable:
                 sequence = max(sequence, max(event.sequence for event in durable))
         self._snapshot = snapshot
@@ -210,6 +302,8 @@ class IncidentService:
         self._apply_checkpoint(checkpoint)
 
     def _require_checkpoint_consistency(self) -> None:
+        if self._audit_integrity_state == "failed":
+            raise RuntimeError("audit integrity verification failed; lifecycle changes are blocked")
         if self._checkpoint_conflicted:
             raise RuntimeError("checkpoint conflict requires explicit reload before lifecycle changes")
 
@@ -218,6 +312,11 @@ class IncidentService:
             if self._checkpoint_store is None:
                 return "disabled"
             return "conflicted" if self._checkpoint_conflicted else "synchronized"
+
+    def audit_integrity_state(self) -> str:
+        with self._lock:
+            state = self._audit_integrity_state
+            return state if state in _AUDIT_INTEGRITY_STATES else "failed"
 
     def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
         """Explicitly adopt and revalidate the winning durable checkpoint after CAS contention."""
@@ -230,29 +329,56 @@ class IncidentService:
             if checkpoint is None:
                 raise RuntimeError("checkpoint conflict recovery could not load durable state")
             self._apply_checkpoint(checkpoint)
-            # Discard speculative process-local events from the losing lifecycle view.
-            # Durable audit reconstruction, when configured, remains the source of truth.
             self._timeline.clear()
             self._checkpoint_conflicted = False
             assert self._snapshot is not None
             return self._snapshot
 
+    def _audit_chain_binding(self) -> tuple[int | None, str | None]:
+        if self._audit_chain is None:
+            return None, None
+        chain = self._audit_chain.checkpoint()
+        if chain.sequence != self._sequence:
+            return None, None
+        return chain.sequence, chain.head_sha256
+
+    def _checkpoint_for_snapshot(self, snapshot: IncidentSnapshot, execution_phase: str | None = None) -> IncidentCheckpoint:
+        audit_sequence, audit_head = self._audit_chain_binding()
+        return IncidentCheckpoint(
+            snapshot.incident_id,
+            snapshot.revision,
+            snapshot.report,
+            snapshot.approval,
+            snapshot.outcome,
+            self._sequence,
+            execution_phase,
+            audit_sequence,
+            audit_head,
+        )
+
     def _save_checkpoint(self) -> None:
         if self._checkpoint_store is None or self._snapshot is None:
             return
         snapshot = self._snapshot
+        bound = self._audit_chain_binding()[0] is not None
         try:
-            self._checkpoint_store.save(IncidentCheckpoint(
-                snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, snapshot.outcome, self._sequence
-            ))
+            self._checkpoint_store.save(self._checkpoint_for_snapshot(snapshot))
         except CheckpointConflictError:
             self._checkpoint_conflicted = True
             raise
+        if bound:
+            self._audit_integrity_state = "verified"
 
     def _record(self, incident_id: str, event_type: str, actor: str, payload: dict) -> None:
         self._sequence += 1
         event = AuditEvent(self._sequence, self._clock_ms(), incident_id, event_type, actor, payload)
         self._audit.append(event)
+        if self._audit_chain is not None:
+            try:
+                self._audit_chain.append(event)
+            except Exception:
+                self._audit_integrity_state = "failed"
+                raise RuntimeError("audit integrity chain could not advance safely")
         self._timeline.append(event)
         if len(self._timeline) > _MAX_TIMELINE_EVENTS:
             del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
@@ -276,7 +402,7 @@ class IncidentService:
             candidates: list[AuditEvent] = []
             if self._audit_reader is not None:
                 candidates.extend(self._audit_reader.read(
-                    incident_id=incident_id, after_sequence=after_sequence, limit=min(limit + 1, 101)
+                    incident_id=incident_id, after_sequence=after_sequence, limit=min(limit + 1, 100)
                 ))
             candidates.extend(event for event in self._timeline if event.incident_id == incident_id and event.sequence > after_sequence)
             by_sequence: dict[int, AuditEvent] = {}
