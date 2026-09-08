@@ -145,8 +145,8 @@ def crash_child(checkpoint_path, endpoint, reconciliation_endpoint, crash_mode):
     transport = CrashBoundaryTransport(inner, checkpoint_path, crash_mode)
     remediation = AllowlistedProductionRemediationClient(
         transport,
-        allowed_production_id="demo-production",
-        allowed_uplink="uplink-a",
+        allowed_production_id="broadcast-alpha",
+        allowed_uplink="uplink-b",
         max_attempts=1,
     )
     service = build_service(JsonCheckpointStore(checkpoint_path), remediation, [])
@@ -222,8 +222,8 @@ class HttpSubprocessCrashRecoveryTests(unittest.TestCase):
         )
         return AllowlistedProductionRemediationClient(
             transport,
-            allowed_production_id="demo-production",
-            allowed_uplink="uplink-a",
+            allowed_production_id="broadcast-alpha",
+            allowed_uplink="uplink-b",
             max_attempts=1,
         )
 
