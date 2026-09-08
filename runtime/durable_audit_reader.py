@@ -161,28 +161,31 @@ class GoogleCloudAuditReader:
         *,
         incident_id: str,
         through_sequence: int,
+        after_sequence: int = 0,
         limit: int = MAX_LINEAGE_READ_RESULTS,
     ) -> list[AuditEvent]:
-        """Read every bounded candidate up to a checkpoint head without de-duplicating branches.
+        """Read a bounded candidate range without de-duplicating writer branches.
 
-        This is intentionally distinct from ``read``: multi-instance append-before-CAS
-        can produce conflicting same-sequence records, and authenticated lineage
-        verification must see those competitors instead of treating their existence as
-        a reader error. Cloud Logging pagination is consumed by ``list_entries`` under
-        one bounded ``max_results`` request. A sentinel result fails closed if the
-        configured bound is exhausted, preventing silent truncation.
+        ``after_sequence`` is the authenticated anchor boundary. Supplying it lets
+        restart verification query only the compact post-anchor suffix instead of
+        replaying sequence 1..head. Existing callers that omit it retain the full
+        prefix behavior.
         """
         if not isinstance(through_sequence, int) or isinstance(through_sequence, bool) or through_sequence < 0:
             raise ValueError("through_sequence must be a non-negative integer")
+        if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
+            raise ValueError("after_sequence must be a non-negative integer")
+        if after_sequence > through_sequence:
+            raise ValueError("audit candidate lower bound cannot exceed upper bound")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LINEAGE_READ_RESULTS:
             raise ValueError(f"limit must be between 1 and {MAX_LINEAGE_READ_RESULTS}")
-        if through_sequence == 0:
+        if through_sequence == after_sequence:
             return []
 
         now_ms, cutoff_ms = self._window()
         _, base = self._base_filter(incident_id, cutoff_ms)
         filter_ = (
-            f"{base} AND jsonPayload.sequence>0 "
+            f"{base} AND jsonPayload.sequence>{after_sequence} "
             f"AND jsonPayload.sequence<={through_sequence}"
         )
         entries = self._logger.list_entries(
@@ -196,7 +199,7 @@ class GoogleCloudAuditReader:
         for entry in entries:
             event = _parse_document(getattr(entry, "payload", None), incident_id)
             self._validate_window_event(event, cutoff_ms=cutoff_ms, now_ms=now_ms)
-            if event.sequence < 1 or event.sequence > through_sequence:
+            if event.sequence <= after_sequence or event.sequence > through_sequence:
                 raise ValueError("audit candidate sequence violated the requested range")
             candidates.append(event)
             if len(candidates) > limit:
