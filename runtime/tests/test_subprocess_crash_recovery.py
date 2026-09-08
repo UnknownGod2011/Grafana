@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,6 @@ from pathlib import Path
 from execution_safety import ExecutionSafeIncidentService
 from incident_checkpoint import JsonCheckpointStore
 from incident_service import MemoryAuditLog
-from remediation import ActionResult
 
 
 class SequenceMetrics:
@@ -35,8 +35,13 @@ class NoopProductionRemediation:
         return "not_found"
 
 
+def hard_kill():
+    os.kill(os.getpid(), signal.SIGKILL)
+    os._exit(93)
+
+
 class CrashRemediation:
-    """Adapter that terminates the process at a precise side-effect boundary."""
+    """Adapter that SIGKILLs the process at a precise side-effect boundary."""
 
     requires_operation_reconciliation = True
 
@@ -50,7 +55,7 @@ class CrashRemediation:
         if checkpoint is None or checkpoint.execution_phase != "dispatching":
             os._exit(90)
         if self.crash_mode == "after_dispatching_before_provider_acceptance":
-            os._exit(71)
+            hard_kill()
         if self.crash_mode != "after_provider_acceptance":
             os._exit(91)
         with open(self.call_log_path, "a", encoding="utf-8") as handle:
@@ -58,8 +63,8 @@ class CrashRemediation:
             handle.flush()
             os.fsync(handle.fileno())
         # Model a provider that accepted the operation immediately before the
-        # StageGuard worker was killed and therefore never returned ActionResult.
-        os._exit(72)
+        # StageGuard worker is killed and therefore cannot return to the caller.
+        hard_kill()
 
     def reconcile_operation(self, operation_id):
         raise AssertionError("crashing child must not reconcile")
@@ -107,6 +112,7 @@ def crash_child(checkpoint_path, call_log_path, crash_mode):
     os._exit(92)
 
 
+@unittest.skipUnless(hasattr(signal, "SIGKILL"), "requires POSIX SIGKILL semantics")
 class SubprocessCrashRecoveryTests(unittest.TestCase):
     def prepare_approved_checkpoint(self, checkpoint_path):
         store = JsonCheckpointStore(checkpoint_path)
@@ -128,7 +134,7 @@ class SubprocessCrashRecoveryTests(unittest.TestCase):
             return []
         return [line for line in Path(path).read_text(encoding="utf-8").splitlines() if line]
 
-    def run_crash_case(self, crash_mode, expected_exit, expected_provider_calls, provider_state):
+    def run_crash_case(self, crash_mode, expected_provider_calls, provider_state):
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint_path = str(Path(tmp) / "incident.json")
             call_log_path = str(Path(tmp) / "provider-calls.log")
@@ -145,7 +151,7 @@ class SubprocessCrashRecoveryTests(unittest.TestCase):
                 process.kill()
                 process.join(5)
                 self.fail("crash child did not terminate at the injected boundary")
-            self.assertEqual(expected_exit, process.exitcode)
+            self.assertEqual(-signal.SIGKILL, process.exitcode)
 
             durable = JsonCheckpointStore(checkpoint_path).load()
             self.assertIsNotNone(durable)
@@ -176,18 +182,16 @@ class SubprocessCrashRecoveryTests(unittest.TestCase):
             self.assertEqual([], final_adapter.execute_calls)
             self.assertEqual(calls_before_restart, self.provider_calls(call_log_path))
 
-    def test_process_death_after_dispatching_before_provider_acceptance_never_executes(self):
+    def test_sigkill_after_dispatching_before_provider_acceptance_never_executes(self):
         self.run_crash_case(
             "after_dispatching_before_provider_acceptance",
-            expected_exit=71,
             expected_provider_calls=0,
             provider_state="not_found",
         )
 
-    def test_process_death_after_provider_acceptance_never_replays(self):
+    def test_sigkill_after_provider_acceptance_never_replays(self):
         self.run_crash_case(
             "after_provider_acceptance",
-            expected_exit=72,
             expected_provider_calls=1,
             provider_state="accepted",
         )
