@@ -246,6 +246,24 @@ class IncidentService:
             break
         return events
 
+    def _assert_no_audit_tail(self, incident_id: str, authenticated_sequence: int) -> None:
+        """Reject durable events that are not committed by the authenticated checkpoint.
+
+        Audit append intentionally happens before checkpoint CAS. A crashed or losing
+        writer can therefore leave a durable event beyond the winning checkpoint.
+        Such a tail is evidence of an uncommitted lineage, not a continuation that a
+        restart is allowed to adopt.
+        """
+        if self._audit_reader is None:
+            return
+        tail = self._audit_reader.read(
+            incident_id=incident_id,
+            after_sequence=authenticated_sequence,
+            limit=1,
+        )
+        if tail:
+            raise ValueError("durable audit contains events beyond authenticated checkpoint head")
+
     def _restore_audit_integrity(self, checkpoint: IncidentCheckpoint) -> None:
         from audit_integrity import AuditChain, AuditChainCheckpoint, verify_audit_chain
 
@@ -262,6 +280,7 @@ class IncidentService:
                     chain.append(event)
                 if chain.checkpoint().sequence != checkpoint.sequence:
                     raise ValueError("legacy audit history is incomplete")
+                self._assert_no_audit_tail(checkpoint.incident_id, checkpoint.sequence)
             except Exception:
                 self._audit_integrity_state = "failed"
                 self._audit_chain = None
@@ -277,6 +296,7 @@ class IncidentService:
         try:
             events = self._read_audit_prefix(checkpoint.incident_id, expected.sequence)
             verify_audit_chain(events, expected)
+            self._assert_no_audit_tail(checkpoint.incident_id, expected.sequence)
         except Exception:
             self._audit_integrity_state = "failed"
             self._audit_chain = None
@@ -287,13 +307,8 @@ class IncidentService:
     def _apply_checkpoint(self, checkpoint: IncidentCheckpoint) -> None:
         snapshot = self._validated_snapshot(checkpoint)
         self._restore_audit_integrity(checkpoint)
-        sequence = checkpoint.sequence
-        if self._audit_reader is not None:
-            durable = self._audit_reader.read(incident_id=checkpoint.incident_id, after_sequence=0, limit=100)
-            if durable:
-                sequence = max(sequence, max(event.sequence for event in durable))
         self._snapshot = snapshot
-        self._sequence = sequence
+        self._sequence = checkpoint.sequence
 
     def _restore_checkpoint(self) -> None:
         if self._checkpoint_store is None:
