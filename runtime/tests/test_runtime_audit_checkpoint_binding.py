@@ -93,6 +93,58 @@ class RuntimeAuditCheckpointBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "audit integrity verification failed"):
                 restarted.investigate()
 
+    def test_orphan_tail_beyond_authenticated_head_fails_closed_on_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit_path = root / "audit.jsonl"
+            store = JsonCheckpointStore(root / "checkpoint.json")
+
+            first = self.service(IncidentService, diagnosed(), FakeRemediation(), audit_path, store)
+            first.investigate()
+            checkpoint = store.load()
+            self.assertEqual(1, checkpoint.sequence)
+            self.assertEqual(1, checkpoint.audit_chain_sequence)
+
+            orphan = {
+                "sequence": 2,
+                "timestamp_unix_ms": 123456790,
+                "incident_id": checkpoint.incident_id,
+                "event_type": "remediation_approved",
+                "actor": "losing-writer@example.com",
+                "payload": {"revision": checkpoint.revision, "action": "recover_primary_uplink"},
+            }
+            with audit_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(orphan, sort_keys=True, separators=(",", ":")) + "\n")
+
+            restarted = self.service(ExecutionSafeIncidentService, [], FakeRemediation(), audit_path, store)
+            self.assertEqual("failed", restarted.audit_integrity_state())
+            self.assertEqual("conflicted", restarted.checkpoint_state())
+            self.assertEqual(checkpoint.sequence, restarted._sequence)
+            self.assertIsNone(restarted.status().approval)
+            with self.assertRaisesRegex(RuntimeError, "audit integrity verification failed"):
+                restarted.investigate()
+
+    def test_conflicting_duplicate_at_authenticated_sequence_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit_path = root / "audit.jsonl"
+            store = JsonCheckpointStore(root / "checkpoint.json")
+
+            first = self.service(IncidentService, diagnosed(), FakeRemediation(), audit_path, store)
+            first.investigate()
+            checkpoint = store.load()
+
+            original = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+            duplicate = dict(original)
+            duplicate["actor"] = "conflicting-writer@example.com"
+            with audit_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(duplicate, sort_keys=True, separators=(",", ":")) + "\n")
+
+            restarted = self.service(ExecutionSafeIncidentService, [], FakeRemediation(), audit_path, store)
+            self.assertEqual("failed", restarted.audit_integrity_state())
+            self.assertEqual("conflicted", restarted.checkpoint_state())
+            self.assertEqual(checkpoint.sequence, restarted._sequence)
+
     def test_dispatching_barrier_preserves_authenticated_chain_head(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
