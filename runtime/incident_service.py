@@ -57,6 +57,8 @@ class MemoryAuditLog:
 class JsonlAuditLog:
     """Append-only local-development audit sink/reader with owner-only permissions."""
 
+    MAX_LINEAGE_READ_RESULTS = 4096
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +95,41 @@ class JsonlAuditLog:
             raise RuntimeError("local audit log could not be read safely") from exc
         return events
 
+    def read_candidates(
+        self,
+        *,
+        incident_id: str,
+        through_sequence: int,
+        limit: int = MAX_LINEAGE_READ_RESULTS,
+    ) -> list[AuditEvent]:
+        """Return every bounded candidate up to the authenticated sequence.
+
+        Unlike ``read``, this deliberately preserves same-sequence competitors left
+        by append-before-CAS writers so the authenticated chain head can select the
+        committed lineage.
+        """
+        if not isinstance(through_sequence, int) or isinstance(through_sequence, bool) or through_sequence < 0:
+            raise ValueError("through_sequence must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= self.MAX_LINEAGE_READ_RESULTS:
+            raise ValueError(f"limit must be between 1 and {self.MAX_LINEAGE_READ_RESULTS}")
+        candidates: list[AuditEvent] = []
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    event = AuditEvent(**json.loads(line))
+                    if event.incident_id != incident_id or event.sequence > through_sequence:
+                        continue
+                    if event.sequence < 1:
+                        raise ValueError("audit candidate sequence must be positive")
+                    candidates.append(event)
+                    if len(candidates) > limit:
+                        raise ValueError("audit candidate read exceeded the safe result bound")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("local audit candidates could not be read safely") from exc
+        return candidates
+
 
 @dataclass(frozen=True)
 class IncidentSnapshot:
@@ -120,6 +157,7 @@ _TIMELINE_PAYLOAD_FIELDS = {
     "remediation_completed": ("revision", "status", "sample_count", "action_accepted"),
 }
 _MAX_TIMELINE_EVENTS = 512
+_MAX_AUDIT_LINEAGE_READ_EVENTS = 4096
 _AUDIT_INTEGRITY_STATES = {"disabled", "unbound_legacy", "verified", "failed"}
 
 
@@ -200,6 +238,7 @@ class IncidentService:
         self._snapshot: IncidentSnapshot | None = None
         self._sequence = 0
         self._timeline: list[AuditEvent] = []
+        self._committed_audit_history: list[AuditEvent] = []
         self._checkpoint_conflicted = False
         self._audit_chain = None
         self._audit_integrity_state = "disabled" if checkpoint_store is None else (
@@ -246,14 +285,24 @@ class IncidentService:
             break
         return events
 
-    def _assert_no_audit_tail(self, incident_id: str, authenticated_sequence: int) -> None:
-        """Reject durable events that are not committed by the authenticated checkpoint.
+    def _read_audit_candidates(self, incident_id: str, through_sequence: int) -> list[AuditEvent] | None:
+        """Read a complete bounded branched prefix when the reader supports it."""
+        if self._audit_reader is None:
+            return None
+        reader = getattr(self._audit_reader, "read_candidates", None)
+        if not callable(reader):
+            return None
+        candidates = reader(
+            incident_id=incident_id,
+            through_sequence=through_sequence,
+            limit=_MAX_AUDIT_LINEAGE_READ_EVENTS,
+        )
+        if not isinstance(candidates, list):
+            raise RuntimeError("durable audit candidate reader returned an invalid result")
+        return candidates
 
-        Audit append intentionally happens before checkpoint CAS. A crashed or losing
-        writer can therefore leave a durable event beyond the winning checkpoint.
-        Such a tail is evidence of an uncommitted lineage, not a continuation that a
-        restart is allowed to adopt.
-        """
+    def _assert_no_audit_tail(self, incident_id: str, authenticated_sequence: int) -> None:
+        """Reject durable events that are not committed by an unbranched/legacy reader."""
         if self._audit_reader is None:
             return
         tail = self._audit_reader.read(
@@ -265,8 +314,14 @@ class IncidentService:
             raise ValueError("durable audit contains events beyond authenticated checkpoint head")
 
     def _restore_audit_integrity(self, checkpoint: IncidentCheckpoint) -> None:
-        from audit_integrity import AuditChain, AuditChainCheckpoint, verify_audit_chain
+        from audit_integrity import (
+            AuditChain,
+            AuditChainCheckpoint,
+            select_committed_audit_lineage,
+            verify_audit_chain,
+        )
 
+        self._committed_audit_history = []
         bound = checkpoint.audit_chain_sequence is not None and checkpoint.audit_chain_head_sha256 is not None
         if not bound:
             self._audit_integrity_state = "unbound_legacy"
@@ -280,12 +335,15 @@ class IncidentService:
                     chain.append(event)
                 if chain.checkpoint().sequence != checkpoint.sequence:
                     raise ValueError("legacy audit history is incomplete")
+                # Legacy state has no authenticated head capable of selecting a winner,
+                # so keep the pre-v3 conservative orphan-tail rule.
                 self._assert_no_audit_tail(checkpoint.incident_id, checkpoint.sequence)
             except Exception:
                 self._audit_integrity_state = "failed"
                 self._audit_chain = None
                 return
             self._audit_chain = chain
+            self._committed_audit_history = events
             return
 
         expected = AuditChainCheckpoint(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256)
@@ -294,14 +352,24 @@ class IncidentService:
             self._audit_chain = None
             return
         try:
-            events = self._read_audit_prefix(checkpoint.incident_id, expected.sequence)
-            verify_audit_chain(events, expected)
-            self._assert_no_audit_tail(checkpoint.incident_id, expected.sequence)
+            candidates = self._read_audit_candidates(checkpoint.incident_id, expected.sequence)
+            if candidates is not None:
+                committed = select_committed_audit_lineage(candidates, expected)
+                # Post-head records are append-before-CAS residue and are intentionally
+                # not read/adopted. Only the authenticated path becomes timeline state.
+            else:
+                committed = self._read_audit_prefix(checkpoint.incident_id, expected.sequence)
+                verify_audit_chain(committed, expected)
+                # Readers that cannot enumerate branches cannot prove that a tail is a
+                # loser lineage, so retain the older fail-closed behavior.
+                self._assert_no_audit_tail(checkpoint.incident_id, expected.sequence)
         except Exception:
             self._audit_integrity_state = "failed"
             self._audit_chain = None
+            self._committed_audit_history = []
             return
         self._audit_chain = AuditChain(expected)
+        self._committed_audit_history = committed
         self._audit_integrity_state = "verified"
 
     def _apply_checkpoint(self, checkpoint: IncidentCheckpoint) -> None:
@@ -396,10 +464,15 @@ class IncidentService:
             except Exception:
                 self._audit_integrity_state = "failed"
                 raise RuntimeError("audit integrity chain could not advance safely")
+        # The append is not lifecycle authority until checkpoint persistence succeeds.
+        # A CAS loser therefore never enters the committed in-process timeline.
+        self._save_checkpoint()
         self._timeline.append(event)
+        self._committed_audit_history.append(event)
         if len(self._timeline) > _MAX_TIMELINE_EVENTS:
             del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
-        self._save_checkpoint()
+        if len(self._committed_audit_history) > _MAX_AUDIT_LINEAGE_READ_EVENTS:
+            del self._committed_audit_history[: len(self._committed_audit_history) - _MAX_AUDIT_LINEAGE_READ_EVENTS]
 
     def status(self) -> IncidentSnapshot | None:
         with self._lock:
@@ -417,7 +490,12 @@ class IncidentService:
             if incident_id != snapshot.incident_id:
                 raise ValueError("timeline request does not match the current incident")
             candidates: list[AuditEvent] = []
-            if self._audit_reader is not None:
+            if self._audit_integrity_state == "verified" and self._committed_audit_history:
+                candidates.extend(
+                    event for event in self._committed_audit_history
+                    if event.incident_id == incident_id and event.sequence > after_sequence
+                )
+            elif self._audit_reader is not None:
                 candidates.extend(self._audit_reader.read(
                     incident_id=incident_id, after_sequence=after_sequence, limit=min(limit + 1, 100)
                 ))
