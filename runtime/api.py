@@ -29,6 +29,7 @@ _EXECUTION_RECONCILIATION_REASONS = (
     "post_dispatch_checkpoint_regression",
     "phase_unavailable",
 )
+_AUDIT_INTEGRITY_STATES = ("disabled", "unbound_legacy", "verified", "failed")
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -113,6 +114,18 @@ def _execution_reconciliation_reason(service: IncidentService) -> str:
     return reason if reason in _EXECUTION_RECONCILIATION_REASONS else "phase_unavailable"
 
 
+def _audit_integrity_state(service: IncidentService) -> str:
+    """Return the bounded audit-integrity state without exposing audit/provider details."""
+    getter = getattr(service, "audit_integrity_state", None)
+    if not callable(getter):
+        return "disabled"
+    try:
+        state = getter()
+    except Exception:
+        return "failed"
+    return state if state in _AUDIT_INTEGRITY_STATES else "failed"
+
+
 def _execution_checkpoint_phase(service: IncidentService) -> str:
     """Return a fixed-cardinality, provider-detail-free execution phase."""
     getter = getattr(service, "execution_checkpoint_phase", None)
@@ -142,6 +155,7 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
     return {
         "incident": None if snapshot is None else snapshot.to_dict(),
         "checkpoint_state": service.checkpoint_state(),
+        "audit_integrity": _audit_integrity_state(service),
         "execution_reconciliation_state": _execution_reconciliation_state(service),
         "execution_reconciliation_reason": _execution_reconciliation_reason(service),
     }
@@ -151,10 +165,12 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     """Build a bounded readiness view from evidence-plane and lifecycle consistency state."""
     readiness = _get_readiness_probe(service).check().to_dict()
     checkpoint_state = service.checkpoint_state()
+    audit_integrity = _audit_integrity_state(service)
     readiness["checks"]["checkpoint"] = checkpoint_state
+    readiness["checks"]["audit_integrity"] = audit_integrity
     readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
     readiness["checks"]["remediation_reconciliation_reason"] = _execution_reconciliation_reason(service)
-    if checkpoint_state in {"conflicted", "execution_uncertain"}:
+    if checkpoint_state in {"conflicted", "execution_uncertain"} or audit_integrity == "failed":
         readiness["ready"] = False
     return readiness
 
@@ -170,6 +186,7 @@ def _service_metrics(service: IncidentService) -> str:
     execution_uncertain = 1 if checkpoint_state == "execution_uncertain" else 0
     execution_phase = _execution_checkpoint_phase(service)
     reconciliation_reason = _execution_reconciliation_reason(service)
+    audit_integrity = _audit_integrity_state(service)
     metrics += (
         "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
         "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
@@ -191,6 +208,12 @@ def _service_metrics(service: IncidentService) -> str:
             f'stageguard_remediation_reconciliation_reason{{reason="{reason}"}} '
             f'{1 if reason == reconciliation_reason else 0}\n'
         )
+    metrics += (
+        "# HELP stageguard_audit_integrity Fixed-cardinality audit-chain integrity state.\n"
+        "# TYPE stageguard_audit_integrity gauge\n"
+    )
+    for state in _AUDIT_INTEGRITY_STATES:
+        metrics += f'stageguard_audit_integrity{{state="{state}"}} {1 if state == audit_integrity else 0}\n'
     return metrics
 
 
@@ -286,6 +309,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "prometheus_mcp": "failed",
                         "loki_mcp": "failed",
                         "checkpoint": "failed",
+                        "audit_integrity": "failed",
                         "remediation_execution_phase": "unknown",
                         "remediation_reconciliation_reason": "phase_unavailable",
                     },
