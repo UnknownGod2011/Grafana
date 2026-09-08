@@ -99,12 +99,14 @@ class ExecutionPhaseV2Tests(unittest.TestCase):
         remediation = ReconcilingRemediation(store)
         service = self.approved(store, remediation)
         self.assertEqual("approved", store.current.execution_phase)
+        self.assertEqual("approved", service.execution_checkpoint_phase())
 
         final = service.execute_approved()
 
         self.assertEqual(1, len(remediation.calls))
         self.assertIn("dispatching", store.saved_phases)
         self.assertEqual("resolved", store.current.execution_phase)
+        self.assertEqual("resolved", service.execution_checkpoint_phase())
         self.assertEqual("recovered", final.outcome.status)
         self.assertLess(store.saved_phases.index("dispatching"), store.saved_phases.index("resolved"))
 
@@ -119,7 +121,9 @@ class ExecutionPhaseV2Tests(unittest.TestCase):
 
         self.assertEqual("synchronized", restarted.checkpoint_state())
         self.assertEqual("clear", restarted.execution_reconciliation_state())
+        self.assertEqual("approved", restarted.execution_checkpoint_phase())
         restarted.execute_approved()
+        self.assertEqual("resolved", restarted.execution_checkpoint_phase())
         self.assertEqual(1, len(restarted_remediation.calls))
         self.assertEqual([], restarted_remediation.reconcile_calls)
 
@@ -137,6 +141,7 @@ class ExecutionPhaseV2Tests(unittest.TestCase):
         restarted = self.service(restarted_remediation, store, diagnosed())
         self.assertEqual("execution_uncertain", restarted.checkpoint_state())
         self.assertEqual("reloaded", restarted.execution_reconciliation_state())
+        self.assertEqual("dispatching", restarted.execution_checkpoint_phase())
         with self.assertRaisesRegex(RuntimeError, "uncertain"):
             restarted.execute_approved()
         self.assertEqual([], restarted_remediation.calls)
@@ -146,6 +151,7 @@ class ExecutionPhaseV2Tests(unittest.TestCase):
         self.assertEqual([], restarted_remediation.calls)
         self.assertIsNone(refreshed.approval)
         self.assertEqual("clear", restarted.execution_reconciliation_state())
+        self.assertEqual("none", restarted.execution_checkpoint_phase())
 
     def test_legacy_v1_pending_approval_remains_fail_closed(self):
         store = PhaseStore()
@@ -178,6 +184,7 @@ class ExecutionPhaseV2Tests(unittest.TestCase):
         restarted = self.service(ReconcilingRemediation(store), store, diagnosed())
         self.assertEqual("execution_uncertain", restarted.checkpoint_state())
         self.assertEqual("legacy_unknown", store.current.execution_phase)
+        self.assertEqual("legacy_unknown", restarted.execution_checkpoint_phase())
 
 
 if __name__ == "__main__":
