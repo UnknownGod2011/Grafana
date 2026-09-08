@@ -19,7 +19,8 @@ from remediation import ActionResult, Approval, RecoverySample, RemediationOutco
 
 SCHEMA_V1 = "stageguard.incident-checkpoint.v1"
 SCHEMA_V2 = "stageguard.incident-checkpoint.v2"
-SCHEMA = SCHEMA_V2
+SCHEMA_V3 = "stageguard.incident-checkpoint.v3"
+SCHEMA = SCHEMA_V3
 _MAX_BYTES = 256 * 1024
 _EXECUTION_PHASES = {"none", "approved", "dispatching", "resolved"}
 
@@ -42,9 +43,14 @@ class IncidentCheckpoint:
     outcome: RemediationOutcome | None
     sequence: int
     # None means callers are using the ordinary lifecycle API; serialization
-    # derives the precise v2 phase from approval/outcome. ``legacy_unknown`` is
-    # internal-only and is produced when restoring an ambiguous v1 checkpoint.
+    # derives the precise v2/v3 phase from approval/outcome. ``legacy_unknown``
+    # is internal-only and is produced when restoring an ambiguous v1 checkpoint.
     execution_phase: str | None = None
+    # Schema v3 binds the append-only audit stream to the authenticated lifecycle
+    # checkpoint. Both values must be supplied together. Existing callers that do
+    # not yet provide them remain on schema v2 rather than emitting a fake proof.
+    audit_chain_sequence: int | None = None
+    audit_chain_head_sha256: str | None = None
 
 
 def _derived_execution_phase(checkpoint: IncidentCheckpoint) -> str:
@@ -73,6 +79,29 @@ def _validate_execution_phase(
         raise ValueError("checkpoint execution phase does not match lifecycle state")
     if phase == "resolved" and (approval is None or outcome is None):
         raise ValueError("checkpoint execution phase does not match lifecycle state")
+
+
+def _valid_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_audit_chain_binding(sequence: object, head_sha256: object) -> None:
+    if sequence is None and head_sha256 is None:
+        return
+    if sequence is None or head_sha256 is None:
+        raise ValueError("checkpoint audit-chain sequence and head must be supplied together")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+        raise ValueError("invalid checkpoint audit-chain sequence")
+    if not _valid_sha256(head_sha256):
+        raise ValueError("invalid checkpoint audit-chain head")
+    if sequence == 0 and head_sha256 != "0" * 64:
+        raise ValueError("empty checkpoint audit chain must use genesis digest")
 
 
 def _safe_outcome_dict(outcome: RemediationOutcome | None) -> dict | None:
@@ -110,10 +139,11 @@ def _outcome_from_dict(value: dict | None) -> RemediationOutcome | None:
     return RemediationOutcome(str(value["status"]), action, samples, str(value["summary"]))
 
 
-def _state(checkpoint: IncidentCheckpoint) -> dict:
+def _state(checkpoint: IncidentCheckpoint, *, include_audit_chain: bool) -> dict:
     phase = _derived_execution_phase(checkpoint)
     _validate_execution_phase(phase, checkpoint.approval, checkpoint.outcome)
-    return {
+    _validate_audit_chain_binding(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256)
+    state = {
         "incident_id": checkpoint.incident_id,
         "revision": checkpoint.revision,
         "report": checkpoint.report.to_dict(),
@@ -122,18 +152,25 @@ def _state(checkpoint: IncidentCheckpoint) -> dict:
         "sequence": checkpoint.sequence,
         "execution_phase": phase,
     }
+    if include_audit_chain:
+        state["audit_chain_sequence"] = checkpoint.audit_chain_sequence
+        state["audit_chain_head_sha256"] = checkpoint.audit_chain_head_sha256
+    return state
 
 
 def checkpoint_document(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> dict:
-    state = _state(checkpoint)
+    has_audit_binding = checkpoint.audit_chain_sequence is not None or checkpoint.audit_chain_head_sha256 is not None
+    _validate_audit_chain_binding(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256)
+    schema = SCHEMA_V3 if has_audit_binding else SCHEMA_V2
+    state = _state(checkpoint, include_audit_chain=has_audit_binding)
     canonical = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256(canonical).hexdigest()
     signature = None if signing_key is None else hmac.new(signing_key, canonical, hashlib.sha256).hexdigest()
-    return {"schema": SCHEMA, "state": state, "sha256": digest, "hmac_sha256": signature}
+    return {"schema": schema, "state": state, "sha256": digest, "hmac_sha256": signature}
 
 
 def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = None, require_signature: bool = False) -> IncidentCheckpoint:
-    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") not in {SCHEMA_V1, SCHEMA_V2}:
+    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") not in {SCHEMA_V1, SCHEMA_V2, SCHEMA_V3}:
         raise ValueError("unsupported incident checkpoint document")
     schema = document["schema"]
     state = document.get("state")
@@ -157,7 +194,9 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
         raise ValueError("signed incident checkpoint cannot be verified")
 
     v1_required = {"incident_id", "revision", "report", "approval", "outcome", "sequence"}
-    required = v1_required if schema == SCHEMA_V1 else v1_required | {"execution_phase"}
+    v2_required = v1_required | {"execution_phase"}
+    v3_required = v2_required | {"audit_chain_sequence", "audit_chain_head_sha256"}
+    required = v1_required if schema == SCHEMA_V1 else (v2_required if schema == SCHEMA_V2 else v3_required)
     if set(state) != required:
         raise ValueError("invalid incident checkpoint state")
     incident_id = state["incident_id"]
@@ -186,7 +225,26 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
         if not isinstance(phase, str):
             raise ValueError("invalid checkpoint execution phase")
         _validate_execution_phase(phase, approval, outcome)
-    return IncidentCheckpoint(incident_id, revision, report, approval, outcome, sequence, phase)
+
+    audit_chain_sequence = None
+    audit_chain_head_sha256 = None
+    if schema == SCHEMA_V3:
+        audit_chain_sequence = state["audit_chain_sequence"]
+        audit_chain_head_sha256 = state["audit_chain_head_sha256"]
+        _validate_audit_chain_binding(audit_chain_sequence, audit_chain_head_sha256)
+        if audit_chain_sequence > sequence:
+            raise ValueError("checkpoint audit chain cannot exceed lifecycle audit sequence")
+    return IncidentCheckpoint(
+        incident_id,
+        revision,
+        report,
+        approval,
+        outcome,
+        sequence,
+        phase,
+        audit_chain_sequence,
+        audit_chain_head_sha256,
+    )
 
 
 def _encode(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> bytes:
