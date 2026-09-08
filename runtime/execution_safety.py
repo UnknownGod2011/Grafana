@@ -87,6 +87,13 @@ class ExecutionSafeIncidentService(IncidentService):
             raise RuntimeError("restored incident checkpoint changed during safety validation")
         return checkpoint.execution_phase
 
+    def _clear_execution_uncertainty(self) -> None:
+        """Reset process-local ambiguity after an authoritative durable transition."""
+        self._execution_uncertain = False
+        self._execution_uncertain_operation_id = None
+        self._execution_reloaded = False
+        self._uncertain_execution_phase = "unknown"
+
     def _guard_restored_production_approval(self) -> None:
         """Apply restart semantics from the durable execution phase.
 
@@ -183,10 +190,22 @@ class ExecutionSafeIncidentService(IncidentService):
                 raise
 
     def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
+        """Adopt the durable winner and recompute ambiguity from that winner.
+
+        A conflict can be caused by another instance completing reconciliation
+        first. In that case the durable winner has already cleared the stale
+        approval, so retaining this process's old ``execution_uncertain`` flag
+        would force a redundant provider reconciliation and another evidence
+        write. Rebase the process-local safety state from the authenticated
+        checkpoint instead: safe ``none``/``resolved``/``approved`` winners clear
+        stale ambiguity, while ``dispatching`` or legacy-unknown winners remain
+        fail-closed through the normal restore guard.
+        """
         with self._lock:
             snapshot = super().reload_checkpoint_after_conflict()
             if self._execution_uncertain:
-                self._execution_reloaded = True
+                self._clear_execution_uncertainty()
+                self._guard_restored_production_approval()
             return snapshot
 
     def execution_reconciliation_state(self) -> str:
@@ -237,10 +256,7 @@ class ExecutionSafeIncidentService(IncidentService):
             except Exception:
                 raise
             else:
-                self._execution_uncertain = False
-                self._execution_uncertain_operation_id = None
-                self._execution_reloaded = False
-                self._uncertain_execution_phase = "unknown"
+                self._clear_execution_uncertainty()
                 return snapshot
             finally:
                 self._allow_uncertainty_investigation = False
