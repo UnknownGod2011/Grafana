@@ -10,10 +10,10 @@ Core safety invariants:
 - Gemini is advisory and cannot mutate approval, remediation, or recovery state.
 - Human approval is single-use and bound to an exact evidence revision.
 - Production remediation uses a deterministic idempotency identity and never automatically replays ambiguous external side effects.
-- Phase-capable stores persist `dispatching` before provider contact; a clean restart from durable `approved` therefore proves dispatch had not begun in that process lifetime.
+- Phase-capable stores persist `dispatching` before provider contact; a clean restart from durable `approved` proves dispatch had not begun in that process lifetime.
 - Restored `dispatching` and legacy-v1 pending approvals fail closed and require provider reconciliation plus fresh Grafana evidence.
 - GCS checkpoints are HMAC-authenticated and use strict generation compare-and-swap.
-- `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution-phase telemetry is fixed-cardinality and provider-detail-free.
+- `/readyz` fails closed for checkpoint conflict or execution uncertainty; execution-phase and reconciliation-reason telemetry are fixed-cardinality and provider-detail-free.
 - Concrete remediation reconciliation is GET-only and cannot carry a remediation body.
 - After CAS contention, process-local execution uncertainty is rebased from the authenticated durable winner, but direct knowledge that this process may already have crossed the dispatch barrier is never erased merely because a conflicting durable winner reports `approved`.
 
@@ -31,88 +31,91 @@ Core safety invariants:
 - Checkpoint schema v2 phases: `none`, `approved`, `dispatching`, `resolved`, with conservative legacy restore.
 - Fixed-cardinality execution-phase readiness/Prometheus observability.
 - Crash-boundary fault-injection regression matrix for approval persistence, dispatch barrier persistence, provider execution, Grafana recovery verification, and resolved checkpoint persistence.
-- Real spawned-process SIGKILL acceptance coverage using `JsonCheckpointStore` across the two most dangerous remediation boundaries.
+- Real spawned-process SIGKILL acceptance using `JsonCheckpointStore` across the two most dangerous remediation boundaries.
 - Real loopback TLS coverage for `HttpRemediationTransport` execution and GET-only reconciliation.
-- Spawned-process SIGKILL acceptance routed through the concrete HTTPS remediation transport and a local idempotent provider server.
 - Concrete HTTPS restart coverage for malformed, wrong-operation, unknown-state, and timeout reconciliation outcomes, including later authoritative recovery.
 - Credential-free spawned-process GCS generation-CAS acceptance with a process-safe fake object backend.
-- End-to-end spawned-process `ExecutionSafeIncidentService` dispatch race over the generation-aware GCS backend, proving the durable `dispatching` CAS gates provider contact.
-- End-to-end spawned-process reconciliation race from durable `dispatching`, proving exactly one fresh Grafana evidence revision becomes durable and the stale reconciler adopts that winner without remediation replay or redundant reconciliation.
-- Service-level conflict-reload phase matrix for `none`, `approved`, `dispatching`, `resolved`, and `legacy_unknown`, including a fail-closed regression fix for contradictory post-dispatch `approved` winners.
+- End-to-end spawned-process `ExecutionSafeIncidentService` dispatch and reconciliation races over generation-aware GCS semantics.
+- Service-level conflict-reload phase matrix for `none`, `approved`, `dispatching`, `resolved`, and `legacy_unknown`, including fail-closed contradictory `approved` handling.
+- Fixed-cardinality reconciliation-reason model for operator state, readiness, and Prometheus telemetry.
 
-## Run log — 2026-09-08 — conflict reload execution-phase matrix
+## Run log — 2026-09-08 — bounded reconciliation-reason observability
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
 
-- `runtime/execution_safety.py` for restart ambiguity, dispatch barriers, conflict reload, and provider reconciliation;
-- `runtime/tests/test_execution_safety.py` for the existing exception/CAS safety contract and local vs production adapter behavior;
-- `runtime/incident_checkpoint.py` for schema-v2 phase validation and phase-capable store semantics;
-- `runtime/remediation.py` for deterministic operation IDs and remediation outcome types;
-- `runtime/incident_service.py` for explicit conflict reload, snapshot replacement, checkpoint writes, approval consumption, and lifecycle blocking.
+- `runtime/execution_safety.py` for restored ambiguity, post-dispatch exceptions, conflict reload, and reconciliation state;
+- `runtime/api.py` for `/v1/incident`, `/readyz`, `/metrics`, bounded execution-phase handling, and fallback behavior;
+- `runtime/operator_console.py` for the existing same-origin fail-closed recovery surface;
+- `runtime/tests/test_checkpoint_observability.py` and `runtime/tests/test_api.py` for current low-cardinality and HTTP contracts;
+- the repository root/runtime trees to confirm the change belongs in the existing safety/observability layer rather than a new subsystem.
 
 ### Exact changes made
 
-1. Added `runtime/tests/test_execution_conflict_reload_phases.py`.
-   - Creates a phase-capable conflict store and drives a real `ExecutionSafeIncidentService` through successful provider contact followed by a synthetic resolved-checkpoint CAS loss.
-   - Replaces the durable winner with each relevant lifecycle phase and explicitly reloads it.
-   - `none`: stale process ambiguity clears, no approval remains, and execution is impossible.
-   - `resolved`: stale process ambiguity clears, the consumed approval remains non-executable, and provider call count stays one.
-   - `dispatching`: remains `execution_uncertain`, reconciliation-gated, and bound to the same deterministic operation identity.
-   - `legacy_unknown`: remains `execution_uncertain` and reconciliation-gated.
-   - `approved`: verifies a process that already knows it may have crossed dispatch cannot treat a contradictory durable `approved` checkpoint as proof that the action is safe to execute again.
+1. Hardened `runtime/execution_safety.py` with an explicit bounded reconciliation reason.
+   - Added only five values: `clear`, `durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, and `phase_unavailable`.
+   - Restored schema-v2 `dispatching` maps to `durable_dispatching`.
+   - Legacy-v1 ambiguous approval maps to `legacy_unknown`.
+   - Stores that cannot prove an execution phase, plus post-provider failures without a durable phase barrier, map to `phase_unavailable`.
+   - A contradictory conflict reload where this process may have dispatched but the durable winner reports `approved` maps to `post_dispatch_checkpoint_regression`.
+   - Clearing execution uncertainty also clears the reason back to `clear`.
+   - The public getter validates the enum and fails closed to `phase_unavailable`; it never returns incident IDs, operation IDs, endpoints, targets, actors, generations, provider states, or exception text.
 
-2. Hardened `runtime/execution_safety.py::reload_checkpoint_after_conflict()`.
-   - Preserves the useful optimization from the previous run: durable winners with no approval (`none`) or an already-consumed outcome (`resolved`) clear obsolete process-local ambiguity immediately.
-   - Keeps `dispatching` and `legacy_unknown` fail-closed through the existing restore guard.
-   - Fixes the newly identified edge case for `approved`: a schema-v2 `approved` checkpoint is safe on a clean process restart, but it does not erase direct knowledge in the current process that provider dispatch may already have happened before CAS loss.
-   - In this contradictory conflict-reload case StageGuard keeps `execution_uncertain`, preserves the deterministic operation identity, reports bounded execution phase `unknown`, requires reconciliation, and blocks remediation replay.
-   - This distinction prevents regressed/non-monotonic/custom phase-capable store views from converting a possibly consumed stale approval back into an executable action.
+2. Extended `runtime/api.py` operator/readiness observability.
+   - `/v1/incident` and conflict/reconciliation lifecycle responses now include `execution_reconciliation_reason`.
+   - `/readyz` includes `checks.remediation_reconciliation_reason` and remains non-ready for every `execution_uncertain` state.
+   - `/metrics` exports one-hot `stageguard_remediation_reconciliation_reason{reason="..."}` across the fixed five-value enum.
+   - Unexpected/throwing service values collapse to `phase_unavailable` rather than becoming a new label.
+   - The fail-closed `/readyz` exception response also reports only `phase_unavailable`.
+   - Bumped the HTTP server identifier from StageGuard/0.11 to StageGuard/0.12 for the operator-contract change.
+
+3. Added `runtime/tests/test_execution_reconciliation_observability.py`.
+   - Proves every non-clear bounded reason blocks readiness when execution is uncertain.
+   - Proves the reconciliation-reason metric has exactly the fixed label set and exactly one active sample.
+   - Proves incident IDs, operation-like IDs, provider URLs, and production IDs do not appear in the metric surface.
+   - Proves arbitrary or exception-producing reason values collapse to `phase_unavailable`.
+   - Proves lifecycle/operator state includes the bounded reason.
+   - Proves the `ExecutionSafeIncidentService` getter itself refuses an unexpected internal reason.
 
 ### Tests / checks / results
 
-- GitHub repository writes succeeded for both the new regression matrix and runtime hardening.
-- Attempted credential-free local validation with:
-  `python -m unittest tests.test_execution_conflict_reload_phases tests.test_execution_safety`.
-- The execution environment failed during `git clone` before Python started because it could not resolve `github.com`; therefore the new tests are **not claimed as executed successfully here**.
-- No GitHub Actions workflow was intentionally triggered, rerun, or modified.
+- GitHub repository inspection and blob writes succeeded.
+- Attempted a credential-free local checkout to run the targeted tests, but `git clone` failed before Python started with `Could not resolve host: github.com`.
+- Therefore `python -m unittest tests.test_execution_reconciliation_observability tests.test_execution_conflict_reload_phases tests.test_execution_safety` is **not claimed as executed successfully in this environment**.
+- No GitHub Actions workflow was intentionally triggered or rerun; the changes are grouped into one Git commit/ref update to minimize CI noise.
 - No Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or production remediation credentials/resources were used.
 
 ### Decisions made
 
-1. **Clean restart and conflict reload are different evidence contexts.** Durable `approved` proves the barrier was not crossed only when the process has no stronger local evidence to the contrary.
-2. **Direct post-dispatch knowledge wins over a contradictory safe-looking checkpoint.** Once a process knows provider contact may have occurred, `approved` cannot make that same approval executable again without reconciliation.
-3. **Only terminal/cleared durable winners erase ambiguity immediately.** `none` and `resolved` are sufficient to show the stale approval is gone or consumed; ambiguous/pending states remain gated.
-4. **Expose contradiction as bounded `unknown`.** The operator surface must not falsely claim either `approved` or `dispatching` when durable and process-local evidence disagree.
-5. **Never trade replay safety for convenience.** The fallback is an extra reconciliation + fresh Grafana investigation, not a second remediation execution.
+1. **Reason is operational classification, not provider state.** Provider reconciliation still has only `accepted` / `not_found` / `unknown`; the new reason explains why StageGuard entered its fail-closed gate.
+2. **No dynamic fallback labels.** Unknown values always become `phase_unavailable`.
+3. **Contradictory multi-instance handoff is explicit.** `post_dispatch_checkpoint_regression` distinguishes a safety-significant regression from ordinary durable `dispatching` without exposing the operation identity.
+4. **Readiness remains tied to the safety state, not the reason string.** Every execution-uncertain reason blocks readiness, so adding diagnosis cannot weaken the gate.
+5. **Operator lifecycle JSON is the authoritative UI contract.** The same-origin cockpit can render reason-specific guidance without needing any sensitive provider details.
 
 ### Current blockers / unknowns
 
-- The new phase-matrix tests have not been executed in a full local checkout because the environment cannot currently resolve `github.com`.
-- Real GCS generation semantics are covered by the existing credential-free multiprocess fake but still need a live/emulated acceptance environment before claiming provider-backed production validation.
+- The new observability tests have not executed in a full local checkout because this environment still cannot resolve `github.com` from the container runtime.
+- Real GCS generation behavior is covered by the credential-free multiprocess fake but still needs a live/emulated acceptance environment before provider-backed production validation can be claimed.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, real GCS acceptance, and a real provider idempotency endpoint still require external credentials/resources.
 
 ## Single best next step
 
-**Harden the operator/readiness surface for contradictory multi-instance handoff: add an explicit bounded reconciliation reason (`durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, `phase_unavailable`) to `/readyz` and operator state without leaking operation/provider identifiers, then add fixed-cardinality metrics and tests proving every execution-uncertain reason blocks readiness and no label can grow with incident/provider data.**
+**Wire `execution_reconciliation_reason` into the same-origin operator cockpit with reason-specific, non-sensitive recovery guidance and add browser-asset tests for all four uncertain reasons. Then add reason-transition assertions to the existing conflict-reload/crash matrices so the UI/telemetry contract is proven against real `ExecutionSafeIncidentService` transitions rather than only an observability stub.**
+
+## Previous run — 2026-09-08 — conflict reload execution-phase matrix
+
+Added `runtime/tests/test_execution_conflict_reload_phases.py` and hardened conflict reload semantics so safe durable winners clear obsolete ambiguity while `dispatching`, legacy ambiguity, and contradictory post-dispatch `approved` states remain reconciliation-gated.
 
 ## Previous run — 2026-09-08 — multi-instance reconciliation CAS race
 
-Hardened `runtime/execution_safety.py` so ordinary CAS losers rebase execution state from the authenticated durable winner and added `runtime/tests/test_execution_reconciliation_gcs_multiprocess_cas.py`. Two restored reconcilers race fresh Grafana evidence from durable `dispatching`; exactly one evidence revision wins CAS, the loser adopts it without another provider read/write, and remediation is never replayed.
+Hardened conflict rebasing and added a spawned-process reconciliation race from durable `dispatching`; exactly one fresh Grafana evidence revision becomes durable and the stale reconciler adopts that winner without remediation replay.
 
 ## Previous run — 2026-09-08 — service-level GCS dispatch CAS race
 
-Added `runtime/tests/test_execution_gcs_multiprocess_cas.py`. Two independently spawned StageGuard services restore the same approved GCS generation and race `execute_approved()`. Exactly one `dispatching` CAS winner can contact remediation; the stale loser remains conflict-blocked even after winner recovery, and provider-call count remains exactly one.
+Two independently spawned StageGuard services restore the same approved GCS generation and race `execute_approved()`. Exactly one `dispatching` CAS winner can contact remediation; the stale loser remains conflict-blocked and provider-call count remains exactly one.
 
-## Previous run — 2026-09-08 — multiprocess GCS generation CAS
+## Previous run — 2026-09-08 — concrete HTTPS replay safety
 
-Added a credential-free process-safe fake GCS backend and spawned-process generation-CAS acceptance. Two stores racing the same generation yield one winner/one conflict; an original stale loser remains unable to overwrite a later recovered checkpoint, and first-object creation is separately protected by generation 0.
-
-## Previous run — 2026-09-08 — fail-closed HTTPS reconciliation ambiguity
-
-Added concrete TLS/process-death reconciliation coverage for malformed JSON, wrong operation-id echoes, unknown provider state, and timeout. Every ambiguous result preserves `execution_uncertain`, blocks readiness, performs no second remediation POST, and requires later authoritative reconciliation plus fresh Grafana evidence.
-
-## Previous run — 2026-09-08 — concrete HTTPS process-death replay safety
-
-Added a real loopback TLS provider and spawned-process SIGKILL acceptance routed through `JsonCheckpointStore`, `ExecutionSafeIncidentService`, `AllowlistedProductionRemediationClient`, and `HttpRemediationTransport`. Proved zero POSTs when killed before HTTP dispatch and exactly one POST when killed after provider acceptance, with GET-only reconciliation and fresh Grafana evidence on restart.
+Added real loopback TLS/process-death acceptance for execution and GET-only reconciliation, including malformed, wrong-operation, unknown-state, and timeout outcomes. Ambiguity never causes a second remediation POST and later authoritative recovery requires fresh Grafana evidence.

@@ -22,6 +22,13 @@ from readiness import EvidencePlaneReadinessProbe
 MAX_BODY_BYTES = 16 * 1024
 _EXECUTION_RECONCILIATION_STATES = {"clear", "reload_required", "reloaded"}
 _EXECUTION_PHASES = ("none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown")
+_EXECUTION_RECONCILIATION_REASONS = (
+    "clear",
+    "durable_dispatching",
+    "legacy_unknown",
+    "post_dispatch_checkpoint_regression",
+    "phase_unavailable",
+)
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -94,6 +101,18 @@ def _execution_reconciliation_state(service: IncidentService) -> str:
     return state if state in _EXECUTION_RECONCILIATION_STATES else "reload_required"
 
 
+def _execution_reconciliation_reason(service: IncidentService) -> str:
+    """Return a fixed-cardinality, provider-detail-free uncertainty reason."""
+    getter = getattr(service, "execution_reconciliation_reason", None)
+    if not callable(getter):
+        return "clear"
+    try:
+        reason = getter()
+    except Exception:
+        return "phase_unavailable"
+    return reason if reason in _EXECUTION_RECONCILIATION_REASONS else "phase_unavailable"
+
+
 def _execution_checkpoint_phase(service: IncidentService) -> str:
     """Return a fixed-cardinality, provider-detail-free execution phase."""
     getter = getattr(service, "execution_checkpoint_phase", None)
@@ -124,6 +143,7 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
         "incident": None if snapshot is None else snapshot.to_dict(),
         "checkpoint_state": service.checkpoint_state(),
         "execution_reconciliation_state": _execution_reconciliation_state(service),
+        "execution_reconciliation_reason": _execution_reconciliation_reason(service),
     }
 
 
@@ -133,6 +153,7 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     checkpoint_state = service.checkpoint_state()
     readiness["checks"]["checkpoint"] = checkpoint_state
     readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
+    readiness["checks"]["remediation_reconciliation_reason"] = _execution_reconciliation_reason(service)
     if checkpoint_state in {"conflicted", "execution_uncertain"}:
         readiness["ready"] = False
     return readiness
@@ -148,6 +169,7 @@ def _service_metrics(service: IncidentService) -> str:
     conflict_blocked = 1 if checkpoint_state == "conflicted" else 0
     execution_uncertain = 1 if checkpoint_state == "execution_uncertain" else 0
     execution_phase = _execution_checkpoint_phase(service)
+    reconciliation_reason = _execution_reconciliation_reason(service)
     metrics += (
         "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
         "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
@@ -160,6 +182,15 @@ def _service_metrics(service: IncidentService) -> str:
     )
     for phase in _EXECUTION_PHASES:
         metrics += f'stageguard_remediation_execution_phase{{phase="{phase}"}} {1 if phase == execution_phase else 0}\n'
+    metrics += (
+        "# HELP stageguard_remediation_reconciliation_reason Fixed-cardinality reason for execution reconciliation gating.\n"
+        "# TYPE stageguard_remediation_reconciliation_reason gauge\n"
+    )
+    for reason in _EXECUTION_RECONCILIATION_REASONS:
+        metrics += (
+            f'stageguard_remediation_reconciliation_reason{{reason="{reason}"}} '
+            f'{1 if reason == reconciliation_reason else 0}\n'
+        )
     return metrics
 
 
@@ -177,7 +208,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.11"
+    server_version = "StageGuard/0.12"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -256,6 +287,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "loki_mcp": "failed",
                         "checkpoint": "failed",
                         "remediation_execution_phase": "unknown",
+                        "remediation_reconciliation_reason": "phase_unavailable",
                     },
                 }
             self._send(200 if readiness["ready"] else 503, readiness)

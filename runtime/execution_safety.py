@@ -24,7 +24,21 @@ from remediation import remediation_operation_id
 
 ReconciliationState = Literal["accepted", "not_found", "unknown"]
 ExecutionPhase = Literal["none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown"]
+ReconciliationReason = Literal[
+    "clear",
+    "durable_dispatching",
+    "legacy_unknown",
+    "post_dispatch_checkpoint_regression",
+    "phase_unavailable",
+]
 _EXECUTION_PHASES = {"none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown"}
+_RECONCILIATION_REASONS = {
+    "clear",
+    "durable_dispatching",
+    "legacy_unknown",
+    "post_dispatch_checkpoint_regression",
+    "phase_unavailable",
+}
 
 
 class ExecutionSafeIncidentService(IncidentService):
@@ -36,6 +50,7 @@ class ExecutionSafeIncidentService(IncidentService):
         self._execution_reloaded = False
         self._allow_uncertainty_investigation = False
         self._uncertain_execution_phase: ExecutionPhase = "unknown"
+        self._execution_reconciliation_reason: ReconciliationReason = "clear"
         super().__init__(*args, **kwargs)
         self._guard_restored_production_approval()
 
@@ -63,6 +78,20 @@ class ExecutionSafeIncidentService(IncidentService):
             phase = self._uncertain_execution_phase
             return phase if phase in _EXECUTION_PHASES else "unknown"
 
+    def execution_reconciliation_reason(self) -> ReconciliationReason:
+        """Return a fixed-cardinality reason for execution uncertainty.
+
+        The value is deliberately provider-detail-free: it never contains an
+        incident id, operation id, target, endpoint, actor, generation, or raw
+        exception text. Operators can distinguish durable ambiguity from legacy
+        state and contradictory multi-instance handoff without cardinality risk.
+        """
+        with self._lock:
+            if not self._execution_uncertain:
+                return "clear"
+            reason = self._execution_reconciliation_reason
+            return reason if reason in _RECONCILIATION_REASONS else "phase_unavailable"
+
     def _phase_capable_store(self):
         store = self._checkpoint_store
         if store is None or not bool(getattr(store, "supports_execution_phase", False)):
@@ -87,12 +116,21 @@ class ExecutionSafeIncidentService(IncidentService):
             raise RuntimeError("restored incident checkpoint changed during safety validation")
         return checkpoint.execution_phase
 
+    @staticmethod
+    def _reason_for_restored_phase(phase: str | None) -> ReconciliationReason:
+        if phase == "dispatching":
+            return "durable_dispatching"
+        if phase == "legacy_unknown":
+            return "legacy_unknown"
+        return "phase_unavailable"
+
     def _clear_execution_uncertainty(self) -> None:
         """Reset process-local ambiguity after an authoritative durable transition."""
         self._execution_uncertain = False
         self._execution_uncertain_operation_id = None
         self._execution_reloaded = False
         self._uncertain_execution_phase = "unknown"
+        self._execution_reconciliation_reason = "clear"
 
     def _guard_restored_production_approval(self) -> None:
         """Apply restart semantics from the durable execution phase.
@@ -115,6 +153,7 @@ class ExecutionSafeIncidentService(IncidentService):
         self._execution_uncertain = True
         self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
         self._uncertain_execution_phase = "unknown" if phase is None else phase
+        self._execution_reconciliation_reason = self._reason_for_restored_phase(phase)
         # Construction has already adopted and validated this durable state.
         self._execution_reloaded = True
 
@@ -177,6 +216,9 @@ class ExecutionSafeIncidentService(IncidentService):
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = operation_id
                 self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
+                self._execution_reconciliation_reason = (
+                    "durable_dispatching" if dispatch_barrier else "phase_unavailable"
+                )
                 self._execution_reloaded = False
                 raise
             except Exception:
@@ -186,6 +228,9 @@ class ExecutionSafeIncidentService(IncidentService):
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = operation_id
                 self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
+                self._execution_reconciliation_reason = (
+                    "durable_dispatching" if dispatch_barrier else "phase_unavailable"
+                )
                 self._execution_reloaded = True
                 raise
 
@@ -228,6 +273,7 @@ class ExecutionSafeIncidentService(IncidentService):
                 # dispatch boundary may have been crossed. Report only bounded
                 # unknown rather than falsely advertising either state as truth.
                 self._uncertain_execution_phase = "unknown"
+                self._execution_reconciliation_reason = "post_dispatch_checkpoint_regression"
                 self._execution_reloaded = True
                 return snapshot
 
@@ -238,6 +284,7 @@ class ExecutionSafeIncidentService(IncidentService):
             self._guard_restored_production_approval()
             if self._execution_uncertain and phase is None and prior_phase == "dispatching":
                 self._uncertain_execution_phase = "unknown"
+                self._execution_reconciliation_reason = "phase_unavailable"
             return snapshot
 
     def execution_reconciliation_state(self) -> str:
