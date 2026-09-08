@@ -129,38 +129,33 @@ def verify_audit_chain(
     return actual
 
 
-def verify_committed_audit_lineage(
+def select_committed_audit_lineage(
     events: Iterable[AuditEvent],
     expected: AuditChainCheckpoint,
     *,
     initial: AuditChainCheckpoint | None = None,
     max_candidates_per_sequence: int = _MAX_LINEAGE_CANDIDATES_PER_SEQUENCE,
     max_states: int = _MAX_LINEAGE_STATES,
-) -> AuditChainCheckpoint:
-    """Verify the checkpoint-authenticated lineage in a branched append-only stream.
+) -> list[AuditEvent]:
+    """Return the exact checkpoint-authenticated path through a branched audit stream.
 
-    Multi-instance writers append audit data before checkpoint CAS. A losing writer
-    may therefore leave a same-sequence competitor or a later orphan tail. Those
-    records are not authoritative: the authenticated checkpoint's chain head is the
-    commit marker. This verifier accepts the durable stream only when at least one
-    complete contiguous path reaches that exact head. Committed-event mutation or
-    deletion remains fail-closed because no candidate path can reproduce the head.
-
-    Search is deliberately bounded. Excessive competing records are treated as a
-    denial-of-service/integrity condition rather than allowing unbounded work.
-    Events beyond ``expected.sequence`` are ignored as uncommitted tails.
+    Audit append precedes checkpoint CAS, so losing writers can leave same-sequence
+    competitors and post-head tails. The authenticated chain head is the commit
+    marker. This bounded dynamic-programming search returns only the contiguous path
+    that reproduces that head; unauthenticated records never become lifecycle or
+    timeline authority.
     """
     initial = initial or AuditChainCheckpoint(0, GENESIS_SHA256)
     if expected.sequence < initial.sequence:
         raise ValueError("expected audit checkpoint precedes trusted initial checkpoint")
-    if not isinstance(max_candidates_per_sequence, int) or max_candidates_per_sequence < 1:
+    if not isinstance(max_candidates_per_sequence, int) or isinstance(max_candidates_per_sequence, bool) or max_candidates_per_sequence < 1:
         raise ValueError("max_candidates_per_sequence must be positive")
-    if not isinstance(max_states, int) or max_states < 1:
+    if not isinstance(max_states, int) or isinstance(max_states, bool) or max_states < 1:
         raise ValueError("max_states must be positive")
     if expected.sequence == initial.sequence:
         if expected != initial:
             raise ValueError("audit chain integrity verification failed")
-        return expected
+        return []
 
     grouped: dict[int, list[AuditEvent]] = defaultdict(list)
     for event in events:
@@ -171,21 +166,54 @@ def verify_committed_audit_lineage(
         if len(bucket) > max_candidates_per_sequence:
             raise ValueError("audit lineage has too many competing events")
 
+    # Each layer maps a derived head to the predecessor head and event that produced
+    # it. Keeping only back-pointers bounds memory to O(sequence * max_states) rather
+    # than copying every candidate path at every step.
     states = {initial.head_sha256}
+    layers: list[dict[str, tuple[str, AuditEvent]]] = []
     for sequence in range(initial.sequence + 1, expected.sequence + 1):
         candidates = grouped.get(sequence)
         if not candidates:
             raise ValueError("audit lineage is incomplete")
-        next_states: set[str] = set()
+        next_layer: dict[str, tuple[str, AuditEvent]] = {}
         for previous_head in states:
             for event in candidates:
-                next_states.add(extend_audit_chain(previous_head, event))
-                if len(next_states) > max_states:
+                next_head = extend_audit_chain(previous_head, event)
+                next_layer.setdefault(next_head, (previous_head, event))
+                if len(next_layer) > max_states:
                     raise ValueError("audit lineage search exceeded safe bound")
-        states = next_states
+        layers.append(next_layer)
+        states = set(next_layer)
 
     if expected.head_sha256 not in states:
         raise ValueError("audit chain integrity verification failed")
+
+    selected: list[AuditEvent] = []
+    head = expected.head_sha256
+    for layer in reversed(layers):
+        previous_head, event = layer[head]
+        selected.append(event)
+        head = previous_head
+    selected.reverse()
+    return selected
+
+
+def verify_committed_audit_lineage(
+    events: Iterable[AuditEvent],
+    expected: AuditChainCheckpoint,
+    *,
+    initial: AuditChainCheckpoint | None = None,
+    max_candidates_per_sequence: int = _MAX_LINEAGE_CANDIDATES_PER_SEQUENCE,
+    max_states: int = _MAX_LINEAGE_STATES,
+) -> AuditChainCheckpoint:
+    """Verify the checkpoint-authenticated lineage in a branched append-only stream."""
+    select_committed_audit_lineage(
+        events,
+        expected,
+        initial=initial,
+        max_candidates_per_sequence=max_candidates_per_sequence,
+        max_states=max_states,
+    )
     return expected
 
 
