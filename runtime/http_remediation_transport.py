@@ -12,7 +12,8 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from production_remediation import RemediationRequest, TransportResult
 
@@ -41,6 +42,12 @@ class HttpRemediationTransport:
     existing local/custom deployments keep working; production uncertainty remains
     fail-closed when it is omitted.
 
+    ``urlopen`` is an optional transport seam for deterministic tests and custom
+    runtime networking policy. Production callers normally leave it unset, in which
+    case Python's standard HTTPS opener is resolved at call time. Keeping the seam
+    at the opener boundary lets tests use a real loopback TLS server without
+    weakening endpoint validation or adding a production insecure-TLS switch.
+
     The reconciliation request contains only the deterministic operation id. It
     does not contain an action, target, production id, or body that could be
     interpreted as a replay command.
@@ -49,6 +56,7 @@ class HttpRemediationTransport:
     endpoint: str
     bearer_token: str
     reconciliation_endpoint: str | None = None
+    urlopen: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _validated_https_endpoint(self.endpoint, name="production remediation endpoint")
@@ -61,6 +69,12 @@ class HttpRemediationTransport:
             raise ValueError("production remediation bearer credential is required")
         if any(ch in self.bearer_token for ch in "\r\n"):
             raise ValueError("production remediation bearer credential contains invalid characters")
+        if self.urlopen is not None and not callable(self.urlopen):
+            raise ValueError("production remediation urlopen override must be callable")
+
+    def _open(self, request: urllib.request.Request, *, timeout_seconds: float):
+        opener = self.urlopen or urllib.request.urlopen
+        return opener(request, timeout=timeout_seconds)
 
     def execute(self, request: RemediationRequest, *, timeout_seconds: float) -> TransportResult:
         payload = json.dumps(
@@ -87,7 +101,7 @@ class HttpRemediationTransport:
         )
 
         try:
-            with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
+            with self._open(http_request, timeout_seconds=timeout_seconds) as response:
                 status = int(response.status)
                 body = self._read_bounded(response)
         except urllib.error.HTTPError as exc:
@@ -140,7 +154,7 @@ class HttpRemediationTransport:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            with self._open(request, timeout_seconds=timeout_seconds) as response:
                 status = int(response.status)
                 body = self._read_bounded(response)
         except urllib.error.HTTPError as exc:
