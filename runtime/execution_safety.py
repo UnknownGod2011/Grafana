@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Literal
 
 from incident_checkpoint import CheckpointConflictError, IncidentCheckpoint
-from incident_service import IncidentService, IncidentSnapshot
+from incident_service import AuditEvent, IncidentService, IncidentSnapshot, _MAX_TIMELINE_EVENTS
 from remediation import remediation_operation_id
 
 ReconciliationState = Literal["accepted", "not_found", "unknown"]
@@ -39,6 +39,8 @@ _RECONCILIATION_REASONS = {
     "post_dispatch_checkpoint_regression",
     "phase_unavailable",
 }
+_RECONCILIATION_RESULTS = {"accepted", "not_found", "unknown"}
+_RECONCILIATION_AUDIT_STAGES = {"attempt", "recovered"}
 
 
 class ExecutionSafeIncidentService(IncidentService):
@@ -124,6 +126,71 @@ class ExecutionSafeIncidentService(IncidentService):
             return "legacy_unknown"
         return "phase_unavailable"
 
+    @staticmethod
+    def _reconciliation_audit_event_type(
+        stage: str, result: ReconciliationState, reason: ReconciliationReason
+    ) -> str:
+        """Encode only bounded reconciliation dimensions into operator-visible type.
+
+        The ordinary timeline intentionally exposes event_type but only whitelisted
+        payload fields. Encoding these two small enums keeps reconciliation events
+        useful after restart without ever exposing provider operation identities,
+        endpoints, response bodies, credentials, or exception strings.
+        """
+        safe_stage = stage if stage in _RECONCILIATION_AUDIT_STAGES else "attempt"
+        safe_result = result if result in _RECONCILIATION_RESULTS else "unknown"
+        safe_reason = reason if reason in _RECONCILIATION_REASONS - {"clear"} else "phase_unavailable"
+        return f"remediation_reconciliation_{safe_stage}.{safe_result}.{safe_reason}"
+
+    def _record_reconciliation_attempt(
+        self,
+        *,
+        actor: str,
+        result: ReconciliationState,
+        reason: ReconciliationReason,
+    ) -> None:
+        """Append an attempt while preserving the fail-closed dispatch barrier.
+
+        ``IncidentService._record`` normally derives checkpoint phase from the
+        lifecycle snapshot. During uncertainty that snapshot still contains the
+        consumed approval, so blindly using it would serialize ``approved`` and
+        regress the durable ``dispatching`` barrier. Phase-capable stores instead
+        receive an explicit ``dispatching`` checkpoint alongside this audit event.
+        """
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise RuntimeError("reconciliation audit requires an incident snapshot")
+        normalized_actor = actor.strip() or "stageguard"
+        event_type = self._reconciliation_audit_event_type("attempt", result, reason)
+        payload = {"result": result, "reason": reason}
+
+        store = self._phase_capable_store()
+        if store is None:
+            self._record(snapshot.incident_id, event_type, normalized_actor, payload)
+            return
+
+        self._sequence += 1
+        event = AuditEvent(self._sequence, self._clock_ms(), snapshot.incident_id, event_type, normalized_actor, payload)
+        self._audit.append(event)
+        self._timeline.append(event)
+        if len(self._timeline) > _MAX_TIMELINE_EVENTS:
+            del self._timeline[: len(self._timeline) - _MAX_TIMELINE_EVENTS]
+        checkpoint = IncidentCheckpoint(
+            snapshot.incident_id,
+            snapshot.revision,
+            snapshot.report,
+            snapshot.approval,
+            snapshot.outcome,
+            self._sequence,
+            "dispatching",
+        )
+        try:
+            store.save(checkpoint)
+        except CheckpointConflictError:
+            self._checkpoint_conflicted = True
+            self._execution_reloaded = False
+            raise
+
     def _clear_execution_uncertainty(self) -> None:
         """Reset process-local ambiguity after an authoritative durable transition."""
         self._execution_uncertain = False
@@ -154,7 +221,6 @@ class ExecutionSafeIncidentService(IncidentService):
         self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
         self._uncertain_execution_phase = "unknown" if phase is None else phase
         self._execution_reconciliation_reason = self._reason_for_restored_phase(phase)
-        # Construction has already adopted and validated this durable state.
         self._execution_reloaded = True
 
     def checkpoint_state(self) -> str:
@@ -203,16 +269,10 @@ class ExecutionSafeIncidentService(IncidentService):
             if snapshot is None or snapshot.approval is None:
                 return super().execute_approved(actor=actor)
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
-            # A phase-capable production store persists the dispatch barrier here.
-            # If this save itself conflicts, the exception is raised before the
-            # try block below and therefore before any provider contact.
             dispatch_barrier = self._persist_dispatching_barrier(snapshot)
             try:
                 return super().execute_approved(actor=actor)
             except CheckpointConflictError:
-                # We entered super().execute_approved(), so provider execution or
-                # verification may already have occurred. This is ambiguous even
-                # for legacy/custom stores that cannot persist schema-v2 phases.
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = operation_id
                 self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
@@ -222,9 +282,6 @@ class ExecutionSafeIncidentService(IncidentService):
                 self._execution_reloaded = False
                 raise
             except Exception:
-                # Any exception after crossing into the provider execution path is
-                # conservatively ambiguous. A v2 barrier can report dispatching;
-                # phase-unaware stores report only the bounded unknown state.
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = operation_id
                 self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
@@ -269,18 +326,11 @@ class ExecutionSafeIncidentService(IncidentService):
             if phase == "approved":
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
-                # The durable winner says approved while this process says the
-                # dispatch boundary may have been crossed. Report only bounded
-                # unknown rather than falsely advertising either state as truth.
                 self._uncertain_execution_phase = "unknown"
                 self._execution_reconciliation_reason = "post_dispatch_checkpoint_regression"
                 self._execution_reloaded = True
                 return snapshot
 
-            # Normal fail-closed restore handling for dispatching, legacy-v1, or
-            # phase-unaware durable winners. ``prior_phase`` is intentionally not
-            # restored: the authenticated winner defines the exposed phase unless
-            # it contradicts direct process knowledge as in the approved case.
             self._guard_restored_production_approval()
             if self._execution_uncertain and phase is None and prior_phase == "dispatching":
                 self._uncertain_execution_phase = "unknown"
@@ -313,25 +363,32 @@ class ExecutionSafeIncidentService(IncidentService):
     def reconcile_execution_uncertainty(self, *, actor: str = "stageguard") -> IncidentSnapshot:
         """Resolve an uncertain execution without replaying the approved action.
 
-        The durable winner must already have been loaded. Production adapters
-        that require provider reconciliation must return either ``accepted`` or
-        ``not_found`` for the deterministic operation id. StageGuard then runs a
-        fresh Grafana investigation, which clears the stale approval/outcome and
-        creates a new evidence revision before remediation can ever be approved
-        again.
+        Every provider status read is appended to the governed audit stream using
+        only bounded result/reason enums. No provider payload, operation id,
+        endpoint, credential, generation, or raw exception is admitted. Recovery
+        completion is recorded only after a fresh Grafana investigation succeeds.
         """
         with self._lock:
             if not self._execution_uncertain:
                 raise RuntimeError("no uncertain remediation execution requires reconciliation")
             if not self._execution_reloaded:
                 raise RuntimeError("durable checkpoint winner must be reloaded before reconciliation")
+
+            reason = self.execution_reconciliation_reason()
             provider_state = self._provider_reconciliation()
+            self._record_reconciliation_attempt(actor=actor, result=provider_state, reason=reason)
             if provider_state == "unknown":
                 raise RuntimeError("remediation provider idempotency state is unresolved")
 
             self._allow_uncertainty_investigation = True
             try:
                 snapshot = super().investigate(actor=actor)
+                self._record(
+                    snapshot.incident_id,
+                    self._reconciliation_audit_event_type("recovered", provider_state, reason),
+                    actor.strip() or "stageguard",
+                    {"result": provider_state, "reason": reason},
+                )
             except Exception:
                 raise
             else:
