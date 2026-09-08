@@ -21,6 +21,7 @@ from readiness import EvidencePlaneReadinessProbe
 
 MAX_BODY_BYTES = 16 * 1024
 _EXECUTION_RECONCILIATION_STATES = {"clear", "reload_required", "reloaded"}
+_EXECUTION_PHASES = ("none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown")
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -93,6 +94,29 @@ def _execution_reconciliation_state(service: IncidentService) -> str:
     return state if state in _EXECUTION_RECONCILIATION_STATES else "reload_required"
 
 
+def _execution_checkpoint_phase(service: IncidentService) -> str:
+    """Return a fixed-cardinality, provider-detail-free execution phase."""
+    getter = getattr(service, "execution_checkpoint_phase", None)
+    if callable(getter):
+        try:
+            phase = getter()
+        except Exception:
+            return "unknown"
+        return phase if phase in _EXECUTION_PHASES else "unknown"
+
+    try:
+        snapshot = service.status()
+    except Exception:
+        return "unknown"
+    if snapshot is None:
+        return "none"
+    if snapshot.outcome is not None:
+        return "resolved"
+    if snapshot.approval is not None:
+        return "approved"
+    return "none"
+
+
 def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
     if snapshot is None:
         snapshot = service.status()
@@ -108,6 +132,7 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     readiness = _get_readiness_probe(service).check().to_dict()
     checkpoint_state = service.checkpoint_state()
     readiness["checks"]["checkpoint"] = checkpoint_state
+    readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
     if checkpoint_state in {"conflicted", "execution_uncertain"}:
         readiness["ready"] = False
     return readiness
@@ -122,6 +147,7 @@ def _service_metrics(service: IncidentService) -> str:
     checkpoint_state = service.checkpoint_state()
     conflict_blocked = 1 if checkpoint_state == "conflicted" else 0
     execution_uncertain = 1 if checkpoint_state == "execution_uncertain" else 0
+    execution_phase = _execution_checkpoint_phase(service)
     metrics += (
         "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
         "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
@@ -129,7 +155,11 @@ def _service_metrics(service: IncidentService) -> str:
         "# HELP stageguard_remediation_execution_uncertain Whether remediation provider execution is ambiguous and lifecycle work is blocked.\n"
         "# TYPE stageguard_remediation_execution_uncertain gauge\n"
         f"stageguard_remediation_execution_uncertain {execution_uncertain}\n"
+        "# HELP stageguard_remediation_execution_phase Current provider-detail-free durable remediation execution phase.\n"
+        "# TYPE stageguard_remediation_execution_phase gauge\n"
     )
+    for phase in _EXECUTION_PHASES:
+        metrics += f'stageguard_remediation_execution_phase{{phase="{phase}"}} {1 if phase == execution_phase else 0}\n'
     return metrics
 
 
@@ -225,6 +255,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "prometheus_mcp": "failed",
                         "loki_mcp": "failed",
                         "checkpoint": "failed",
+                        "remediation_execution_phase": "unknown",
                     },
                 }
             self._send(200 if readiness["ready"] else 503, readiness)
