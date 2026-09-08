@@ -69,7 +69,7 @@ class SharedBucket:
         return SharedBlob(self._state, self._lock)
 
 
-def checkpoint(sequence, *, phase="none"):
+def checkpoint(sequence):
     report = IncidentReport(
         "diagnosed",
         "broadcast-alpha",
@@ -82,7 +82,7 @@ def checkpoint(sequence, *, phase="none"):
     )
     canonical = json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":"))
     revision = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-    return IncidentCheckpoint("incident-001", revision, report, None, None, sequence, phase)
+    return IncidentCheckpoint("incident-001", revision, report, None, None, sequence, "none")
 
 
 def _race_writer(tag, sequence, state, lock, barrier, results, retry_event):
@@ -106,7 +106,21 @@ def _race_writer(tag, sequence, state, lock, barrier, results, retry_event):
         results.put((tag, "first", "winner"))
 
 
-@unittest.skipUnless(os.name == "posix", "multiprocess CAS acceptance requires POSIX process semantics")
+def _create_writer(tag, sequence, state, lock, barrier, results):
+    """Race two brand-new stores using the GCS create-only generation precondition."""
+    store = GoogleCloudStorageCheckpointStore(SharedBucket(state, lock), KEY, OBJECT)
+    loaded = store.load()
+    results.put((tag, "loaded", None if loaded is None else loaded.sequence))
+    barrier.wait()
+    try:
+        store.save(checkpoint(sequence))
+    except CheckpointConflictError:
+        results.put((tag, "first", "conflict"))
+    else:
+        results.put((tag, "first", "winner"))
+
+
+@unittest.skipUnless(os.name == "posix", "multiprocess CAS acceptance requires POSIX process support")
 class GcsMultiprocessCasAcceptanceTests(unittest.TestCase):
     def test_one_generation_winner_and_stale_loser_cannot_overwrite_recovery(self):
         ctx = multiprocessing.get_context("spawn")
@@ -133,15 +147,12 @@ class GcsMultiprocessCasAcceptanceTests(unittest.TestCase):
             self.assertEqual({("a", "loaded", 1), ("b", "loaded", 1)}, set(loaded))
 
             first = [results.get(timeout=10), results.get(timeout=10)]
-            outcomes = {item[2] for item in first}
-            self.assertEqual({"winner", "conflict"}, outcomes)
-            winner_tag = next(item[0] for item in first if item[2] == "winner")
+            self.assertEqual({"winner", "conflict"}, {item[2] for item in first})
             loser_tag = next(item[0] for item in first if item[2] == "conflict")
-            self.assertNotEqual(winner_tag, loser_tag)
             self.assertEqual(2, int(state["generation"]))
 
-            # A fresh process/store adopts the durable winner and writes a newer
-            # recovered state. This models reconciliation/fresh-evidence recovery.
+            # A fresh store adopts the durable winner and writes a newer recovered
+            # state. This models reconciliation plus fresh-evidence recovery.
             recovery = GoogleCloudStorageCheckpointStore(bucket, KEY, OBJECT)
             durable_winner = recovery.load()
             self.assertIn(durable_winner.sequence, {2, 3})
@@ -172,30 +183,26 @@ class GcsMultiprocessCasAcceptanceTests(unittest.TestCase):
             lock = manager.RLock()
             barrier = ctx.Barrier(2)
             results = ctx.Queue()
+            workers = [
+                ctx.Process(target=_create_writer, args=("a", 1, state, lock, barrier, results)),
+                ctx.Process(target=_create_writer, args=("b", 2, state, lock, barrier, results)),
+            ]
+            for worker in workers:
+                worker.start()
 
-            def create_writer(tag, sequence):
-                store = GoogleCloudStorageCheckpointStore(SharedBucket(state, lock), KEY, OBJECT)
-                self.assertIsNone(store.load())
-                barrier.wait()
-                try:
-                    store.save(checkpoint(sequence))
-                except CheckpointConflictError:
-                    results.put((tag, "conflict"))
-                else:
-                    results.put((tag, "winner"))
+            loaded = [results.get(timeout=10), results.get(timeout=10)]
+            self.assertEqual({("a", "loaded", None), ("b", "loaded", None)}, set(loaded))
+            first = [results.get(timeout=10), results.get(timeout=10)]
+            self.assertEqual({"winner", "conflict"}, {item[2] for item in first})
 
-            # Spawn cannot pickle a nested target, so use a small module-level-style
-            # process through the generic worker after seeding is covered above.
-            # Creation semantics themselves are already enforced by if_generation_match=0;
-            # keep this assertion in-process to avoid a platform-specific false proof.
-            store_a = GoogleCloudStorageCheckpointStore(SharedBucket(state, lock), KEY, OBJECT)
-            store_b = GoogleCloudStorageCheckpointStore(SharedBucket(state, lock), KEY, OBJECT)
-            self.assertIsNone(store_a.load())
-            self.assertIsNone(store_b.load())
-            store_a.save(checkpoint(1))
-            with self.assertRaises(CheckpointConflictError):
-                store_b.save(checkpoint(2))
+            for worker in workers:
+                worker.join(timeout=10)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(0, worker.exitcode)
+
             self.assertEqual(1, int(state["generation"]))
+            verifier = GoogleCloudStorageCheckpointStore(SharedBucket(state, lock), KEY, OBJECT)
+            self.assertIn(verifier.load().sequence, {1, 2})
 
 
 if __name__ == "__main__":
