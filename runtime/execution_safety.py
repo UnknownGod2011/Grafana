@@ -184,6 +184,8 @@ class ExecutionSafeIncidentService(IncidentService):
 
     def checkpoint_state(self) -> str:
         with self._lock:
+            if self.audit_integrity_state() == "failed":
+                return "conflicted"
             if self._execution_uncertain:
                 return "execution_uncertain"
             return super().checkpoint_state()
@@ -214,6 +216,7 @@ class ExecutionSafeIncidentService(IncidentService):
             snapshot = self._snapshot
             if snapshot is None or snapshot.approval is None:
                 return super().execute_approved(actor=actor)
+            self._require_checkpoint_consistency()
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
             dispatch_barrier = self._persist_dispatching_barrier(snapshot)
             try:
@@ -297,6 +300,7 @@ class ExecutionSafeIncidentService(IncidentService):
                 raise RuntimeError("no uncertain remediation execution requires reconciliation")
             if not self._execution_reloaded:
                 raise RuntimeError("durable checkpoint winner must be reloaded before reconciliation")
+            self._require_checkpoint_consistency()
 
             reason = self.execution_reconciliation_reason()
             provider_state = self._provider_reconciliation()
