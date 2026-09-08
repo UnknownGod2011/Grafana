@@ -157,28 +157,29 @@ class ExecutionSafeIncidentService(IncidentService):
             if snapshot is None or snapshot.approval is None:
                 return super().execute_approved(actor=actor)
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
+            # A phase-capable production store persists the dispatch barrier here.
+            # If this save itself conflicts, the exception is raised before the
+            # try block below and therefore before any provider contact.
             dispatch_barrier = self._persist_dispatching_barrier(snapshot)
             try:
                 return super().execute_approved(actor=actor)
             except CheckpointConflictError:
-                # If the pre-dispatch barrier itself lost CAS, no provider was
-                # contacted and _persist_dispatching_barrier already marked a
-                # normal checkpoint conflict. Otherwise this conflict happened
-                # after remediate_and_verify returned and execution is ambiguous.
-                if dispatch_barrier:
-                    self._execution_uncertain = True
-                    self._execution_uncertain_operation_id = operation_id
-                    self._uncertain_execution_phase = "dispatching"
-                    self._execution_reloaded = False
+                # We entered super().execute_approved(), so provider execution or
+                # verification may already have occurred. This is ambiguous even
+                # for legacy/custom stores that cannot persist schema-v2 phases.
+                self._execution_uncertain = True
+                self._execution_uncertain_operation_id = operation_id
+                self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
+                self._execution_reloaded = False
                 raise
             except Exception:
-                if dispatch_barrier:
-                    # Once dispatching is durable, any provider/verification
-                    # exception is ambiguous. Never retry the action in-process.
-                    self._execution_uncertain = True
-                    self._execution_uncertain_operation_id = operation_id
-                    self._uncertain_execution_phase = "dispatching"
-                    self._execution_reloaded = True
+                # Any exception after crossing into the provider execution path is
+                # conservatively ambiguous. A v2 barrier can report dispatching;
+                # phase-unaware stores report only the bounded unknown state.
+                self._execution_uncertain = True
+                self._execution_uncertain_operation_id = operation_id
+                self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
+                self._execution_reloaded = True
                 raise
 
     def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
