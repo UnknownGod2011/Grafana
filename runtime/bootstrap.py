@@ -28,6 +28,7 @@ from mcp_metric_client import McpPrometheusMetricClient
 from onboarding import load_telemetry_profile
 from production_remediation import AllowlistedProductionRemediationClient
 from remediation import ActionResult, RemediationClient, SimulatorRemediationClient
+from signed_json_checkpoint import SignedJsonCheckpointStore
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
 
@@ -132,6 +133,9 @@ def _checkpoint_store(
         return None
     if normalized == "json":
         return ObservableCheckpointStore(JsonCheckpointStore(checkpoint_path))
+    if normalized == "signed-json":
+        signing_key = _read_required_secret(checkpoint_signing_key_env).encode("utf-8")
+        return ObservableCheckpointStore(SignedJsonCheckpointStore(checkpoint_path, signing_key))
     if normalized == "gcs":
         bucket = _read_required_secret(checkpoint_bucket_env)
         signing_key = _read_required_secret(checkpoint_signing_key_env)
@@ -142,7 +146,7 @@ def _checkpoint_store(
             project=project,
             object_name=checkpoint_object,
         ))
-    raise ValueError("checkpoint backend must be none, json, or gcs")
+    raise ValueError("checkpoint backend must be none, json, signed-json, or gcs")
 
 
 def _production_remediation_from_env(
@@ -277,7 +281,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-backend", choices=("jsonl", "cloud-logging"), default="jsonl")
     parser.add_argument("--cloud-project-env", default="GOOGLE_CLOUD_PROJECT")
     parser.add_argument("--cloud-log-name", default="stageguard-audit")
-    parser.add_argument("--checkpoint-backend", choices=("none", "json", "gcs"), default="json")
+    parser.add_argument("--checkpoint-backend", choices=("none", "json", "signed-json", "gcs"), default="json")
     parser.add_argument("--checkpoint-path", default=".stageguard/incident-checkpoint.json")
     parser.add_argument("--checkpoint-bucket-env", default="STAGEGUARD_CHECKPOINT_BUCKET")
     parser.add_argument("--checkpoint-signing-key-env", default="STAGEGUARD_CHECKPOINT_HMAC_KEY")
