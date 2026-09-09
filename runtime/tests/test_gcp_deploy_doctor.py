@@ -25,6 +25,7 @@ VALID_ENV = {
     "METRIC_ACTIVATION_SECRET": "stageguard-metric-activation",
     "LOG_ACTIVATION_SECRET": "stageguard-log-activation",
     "GRAFANA_TOKEN_SECRET": "stageguard-grafana-token",
+    "ENABLE_GEMINI": "false",
 }
 
 
@@ -69,6 +70,8 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         payload = self._payload(result)
         self.assertIs(payload["offline_checks_passed"], True)
         self.assertIs(payload["ready_to_deploy"], False)
+        self.assertIs(payload["gemini_enabled"], False)
+        self.assertNotIn("aiplatform.googleapis.com", payload["required_apis"])
         self.assertTrue(any("gcp_deploy_doctor.py --json" in step for step in payload["next_steps"]))
 
     def test_missing_required_variable_fails(self) -> None:
@@ -103,6 +106,32 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         check = self._checks(payload)["image_url_format"]
         self.assertEqual(check["status"], "warning")
         self.assertIs(check["required"], False)
+
+    def test_gemini_true_requires_vertex_ai_api(self) -> None:
+        result = self._run({"ENABLE_GEMINI": "true"})
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        payload = self._payload(result)
+        self.assertIs(payload["gemini_enabled"], True)
+        self.assertIn("aiplatform.googleapis.com", payload["required_apis"])
+        self.assertEqual(self._checks(payload)["enable_gemini_format"]["status"], "ok")
+
+    def test_gemini_boolean_aliases_match_deploy_script(self) -> None:
+        for value in ("1", "yes", "on", "TRUE", "0", "no", "off", "FALSE"):
+            with self.subTest(value=value):
+                result = self._run({"ENABLE_GEMINI": value})
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                payload = self._payload(result)
+                expected = value.strip().lower() in {"1", "true", "yes", "on"}
+                self.assertIs(payload["gemini_enabled"], expected)
+
+    def test_invalid_gemini_value_fails_before_deployment(self) -> None:
+        result = self._run({"ENABLE_GEMINI": "maybe"})
+        self.assertEqual(result.returncode, 2)
+        payload = self._payload(result)
+        self.assertIsNone(payload["gemini_enabled"])
+        self.assertIs(payload["offline_checks_passed"], False)
+        self.assertEqual(self._checks(payload)["enable_gemini_format"]["status"], "failed")
+        self.assertTrue(any("ENABLE_GEMINI" in step for step in payload["next_steps"]))
 
 
 if __name__ == "__main__":
