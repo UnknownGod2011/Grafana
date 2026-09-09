@@ -214,9 +214,9 @@ def _secret_access_check(project_number: str, service_account: str, secret: str,
     )
 
 
-def _logging_access_check(project_number: str, service_account: str, permission: str) -> Check:
+def _logging_access_check(project_id: str, service_account: str, permission: str) -> Check:
     """Verify StageGuard's Cloud Logging write/read permission on the target project."""
-    full_resource_name = f"//cloudresourcemanager.googleapis.com/projects/{project_number}"
+    full_resource_name = f"//cloudresourcemanager.googleapis.com/projects/{project_id}"
     suffix = permission.rsplit(".", 1)[-1]
     return _troubleshoot_permission(
         full_resource_name,
@@ -309,7 +309,7 @@ def _gcloud_checks() -> list[Check]:
         for env_name, secret in existing_secrets:
             checks.append(_secret_access_check(project_number, sa, secret, env_name))
         for permission in LOGGING_RUNTIME_PERMISSIONS:
-            checks.append(_logging_access_check(project_number, sa, permission))
+            checks.append(_logging_access_check(project_id, sa, permission))
 
     image = os.getenv("IMAGE_URL", "").strip()
     if image and ".pkg.dev/" in image:
@@ -318,7 +318,7 @@ def _gcloud_checks() -> list[Check]:
             Check(
                 "container_image",
                 "ok" if code == 0 else "failed",
-                "container image exists" if code == 0 else "failed",
+                "container image exists" if code == 0 else "container image not found or not accessible",
             )
         )
 
