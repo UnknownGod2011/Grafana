@@ -213,7 +213,7 @@ class GcpDeployDoctorLoggingAccessTests(unittest.TestCase):
     def _check_with_response(self, permission: str, returncode: int, payload: str):
         with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
             check = self.doctor._logging_access_check(
-                "123456789012",
+                "stageguard-test",
                 "stageguard@stageguard-test.iam.gserviceaccount.com",
                 permission,
             )
@@ -234,7 +234,7 @@ class GcpDeployDoctorLoggingAccessTests(unittest.TestCase):
         self.assertEqual(check.status, "ok")
         args = run.call_args.args[0]
         self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
-        self.assertIn("//cloudresourcemanager.googleapis.com/projects/123456789012", args)
+        self.assertIn("//cloudresourcemanager.googleapis.com/projects/stageguard-test", args)
         self.assertIn("--principal-email=stageguard@stageguard-test.iam.gserviceaccount.com", args)
         self.assertIn("--permission=logging.logEntries.create", args)
 
