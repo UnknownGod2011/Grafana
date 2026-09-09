@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
 
 
@@ -106,7 +105,8 @@ def _env_checks() -> list[Check]:
 
     image_url = os.getenv("IMAGE_URL", "").strip()
     if image_url:
-        ok = ".pkg.dev/" in image_url and (":" in image_url.rsplit("/", 1)[-1] or "@sha256:" in image_url)
+        leaf = image_url.rsplit("/", 1)[-1]
+        ok = ".pkg.dev/" in image_url and (":" in leaf or "@sha256:" in image_url)
         checks.append(
             Check(
                 "image_url_format",
@@ -138,15 +138,16 @@ def _gcloud_checks() -> list[Check]:
     if code != 0 or not stdout:
         checks.append(Check("project_access", "failed", f"cannot describe project {project_id!r}"))
         return checks
-    checks.append(Check("project_access", "ok", f"project accessible; number {stdout}"))
+    project_number = stdout.splitlines()[0].strip()
+    checks.append(Check("project_access", "ok", f"project accessible; number {project_number}"))
 
     configured_number = os.getenv("PROJECT_NUMBER", "").strip()
     if configured_number:
         checks.append(
             Check(
                 "project_number_match",
-                "ok" if stdout == configured_number else "failed",
-                "PROJECT_NUMBER matches project" if stdout == configured_number else "PROJECT_NUMBER does not match PROJECT_ID",
+                "ok" if project_number == configured_number else "failed",
+                "PROJECT_NUMBER matches project" if project_number == configured_number else "PROJECT_NUMBER does not match PROJECT_ID",
             )
         )
 
@@ -163,7 +164,7 @@ def _gcloud_checks() -> list[Check]:
             Check(
                 f"api:{api}",
                 "ok" if api in enabled_set else "failed",
-                "enabled" if api in enabled_set else "required API is not enabled",
+                "enabled" if api in enabled_set else "required API is not enabled or could not be verified",
             )
         )
 
@@ -204,9 +205,11 @@ def _gcloud_checks() -> list[Check]:
     return checks
 
 
-def _next_steps(checks: list[Check]) -> list[str]:
+def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
     failures = [check for check in checks if check.required and check.status in {"failed", "missing"}]
     if not failures:
+        if offline:
+            return ["Run: python scripts/gcp_deploy_doctor.py --json to verify live Google Cloud prerequisites before deployment."]
         return ["Run: bash scripts/deploy_cloud_run.sh"]
     names = {check.name for check in failures}
     steps: list[str] = []
@@ -241,10 +244,11 @@ def main(argv: list[str] | None = None) -> int:
 
     hard_failures = [check for check in checks if check.required and check.status in {"failed", "missing"}]
     payload = {
-        "ready_to_deploy": not hard_failures,
+        "ready_to_deploy": not hard_failures and not args.offline,
+        "offline_checks_passed": not hard_failures,
         "offline": args.offline,
         "checks": [asdict(check) for check in checks],
-        "next_steps": _next_steps(checks),
+        "next_steps": _next_steps(checks, offline=args.offline),
     }
 
     if args.json:
