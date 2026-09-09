@@ -120,13 +120,18 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         self.assertEqual(check["status"], "warning")
         self.assertIs(check["required"], False)
 
-    def test_gemini_true_requires_vertex_ai_api(self) -> None:
+    def test_gemini_true_requires_vertex_ai_api_and_resolves_runtime_defaults(self) -> None:
         result = self._run({"ENABLE_GEMINI": "true"})
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
         payload = self._payload(result)
         self.assertIs(payload["gemini_enabled"], True)
         self.assertIn("aiplatform.googleapis.com", payload["required_apis"])
-        self.assertEqual(self._checks(payload)["enable_gemini_format"]["status"], "ok")
+        self.assertEqual(payload["gemini_location"], "global")
+        self.assertEqual(payload["gemini_model"], "gemini-2.5-flash")
+        checks = self._checks(payload)
+        self.assertEqual(checks["enable_gemini_format"]["status"], "ok")
+        self.assertEqual(checks["gemini_location_format"]["status"], "ok")
+        self.assertEqual(checks["gemini_model_format"]["status"], "ok")
 
     def test_gemini_boolean_aliases_match_deploy_script(self) -> None:
         for value in ("1", "yes", "on", "TRUE", "0", "no", "off", "FALSE"):
@@ -145,6 +150,21 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         self.assertIs(payload["offline_checks_passed"], False)
         self.assertEqual(self._checks(payload)["enable_gemini_format"]["status"], "failed")
         self.assertTrue(any("ENABLE_GEMINI" in step for step in payload["next_steps"]))
+
+    def test_gemini_runtime_identifiers_reject_resource_paths_and_urls(self) -> None:
+        result = self._run(
+            {
+                "ENABLE_GEMINI": "true",
+                "GOOGLE_CLOUD_LOCATION": "https://us-central1-aiplatform.googleapis.com",
+                "STAGEGUARD_GEMINI_MODEL": "publishers/google/models/gemini-2.5-flash",
+            }
+        )
+        self.assertEqual(result.returncode, 2)
+        payload = self._payload(result)
+        checks = self._checks(payload)
+        self.assertEqual(checks["gemini_location_format"]["status"], "failed")
+        self.assertEqual(checks["gemini_model_format"]["status"], "failed")
+        self.assertTrue(any("GOOGLE_CLOUD_LOCATION" in step for step in payload["next_steps"]))
 
 
 class GcpDeployDoctorSecretAccessTests(unittest.TestCase):
@@ -286,6 +306,67 @@ class GcpDeployDoctorLoggingAccessTests(unittest.TestCase):
         steps = self.doctor._next_steps(checks, offline=False)
         self.assertTrue(any("logging.logEntries.create" in step for step in steps))
         self.assertTrue(any("logging.logEntries.list" in step for step in steps))
+
+
+class GcpDeployDoctorVertexAccessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.doctor = _load_doctor_module()
+
+    def _check_with_response(self, returncode: int, payload: str):
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
+            check = self.doctor._vertex_predict_access_check(
+                "stageguard-test",
+                "stageguard@stageguard-test.iam.gserviceaccount.com",
+                "global",
+                "gemini-2.5-flash",
+            )
+        return check, run
+
+    def test_vertex_permission_matches_generate_content_runtime_contract(self) -> None:
+        self.assertEqual(self.doctor.VERTEX_PREDICT_PERMISSION, "aiplatform.endpoints.predict")
+        check, run = self._check_with_response(0, json.dumps({"overallAccessState": "CAN_ACCESS"}))
+        self.assertEqual(check.status, "ok")
+        args = run.call_args.args[0]
+        self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
+        self.assertIn(
+            "//aiplatform.googleapis.com/projects/stageguard-test/locations/global/publishers/google/models/gemini-2.5-flash",
+            args,
+        )
+        self.assertIn("--principal-email=stageguard@stageguard-test.iam.gserviceaccount.com", args)
+        self.assertIn("--permission=aiplatform.endpoints.predict", args)
+
+    def test_vertex_permission_denied_fails_closed(self) -> None:
+        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "CANNOT_ACCESS"}))
+        self.assertEqual(check.status, "failed")
+        self.assertIn("lacks effective aiplatform.endpoints.predict", check.detail)
+
+    def test_vertex_permission_unknown_fails_closed(self) -> None:
+        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "UNKNOWN"}))
+        self.assertEqual(check.status, "failed")
+        self.assertIn("could not determine", check.detail)
+
+    def test_vertex_permission_command_failure_fails_closed(self) -> None:
+        check, _ = self._check_with_response(1, "")
+        self.assertEqual(check.status, "failed")
+        self.assertIn("could not be verified", check.detail)
+
+    def test_vertex_permission_invalid_json_fails_closed(self) -> None:
+        check, _ = self._check_with_response(0, "not-json")
+        self.assertEqual(check.status, "failed")
+        self.assertIn("unreadable response", check.detail)
+
+    def test_next_steps_explain_vertex_predict_permission(self) -> None:
+        checks = [
+            self.doctor.Check(
+                "vertex_access:predict",
+                "failed",
+                "runtime service account lacks effective aiplatform.endpoints.predict",
+            )
+        ]
+        steps = self.doctor._next_steps(checks, offline=False)
+        self.assertTrue(any("aiplatform.endpoints.predict" in step for step in steps))
+        self.assertTrue(any("roles/aiplatform.user" in step for step in steps))
 
 
 if __name__ == "__main__":
