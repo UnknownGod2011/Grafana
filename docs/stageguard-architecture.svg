@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+  <title id="title">StageGuard incident commander architecture</title>
+  <desc id="desc">Live production telemetry flows through Grafana and the official Grafana MCP server into StageGuard investigation and Gemini briefing. A human approves a bounded remediation, and Grafana telemetry verifies recovery.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset="1" stop-color="#10253d"/></linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#183451"/><stop offset="1" stop-color="#10263e"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity=".28"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#55d6be"/></marker>
+    <style>
+      .title{font:700 38px Inter,Segoe UI,sans-serif;fill:#f2f7fb}.sub{font:400 18px Inter,Segoe UI,sans-serif;fill:#9fb6c8}.label{font:700 22px Inter,Segoe UI,sans-serif;fill:#f2f7fb}.small{font:400 16px Inter,Segoe UI,sans-serif;fill:#b5c9d7}.accent{fill:#55d6be}.line{stroke:#55d6be;stroke-width:4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1600" height="720" rx="28" fill="url(#bg)"/>
+  <text x="80" y="82" class="title">StageGuard</text>
+  <text x="80" y="120" class="sub">Observe → Investigate → Reason → Approve → Act → Verify</text>
+  <g filter="url(#shadow)">
+    <rect x="80" y="220" width="220" height="170" rx="18" fill="url(#card)" stroke="#2c5272"/>
+    <rect x="350" y="220" width="220" height="170" rx="18" fill="url(#card)" stroke="#2c5272"/>
+    <rect x="620" y="220" width="220" height="170" rx="18" fill="url(#card)" stroke="#2c5272"/>
+    <rect x="890" y="220" width="220" height="170" rx="18" fill="url(#card)" stroke="#2c5272"/>
+    <rect x="1160" y="220" width="220" height="170" rx="18" fill="url(#card)" stroke="#2c5272"/>
+    <rect x="620" y="495" width="220" height="130" rx="18" fill="#163d49" stroke="#55d6be" stroke-width="2"/>
+  </g>
+  <path class="line" d="M300 305 H340"/><path class="line" d="M570 305 H610"/><path class="line" d="M840 305 H880"/><path class="line" d="M1110 305 H1150"/>
+  <path class="line" d="M1270 390 V455 H840 V485"/>
+  <g text-anchor="middle">
+    <text x="190" y="280" class="label">Live production</text><text x="190" y="316" class="small">camera feeds</text><text x="190" y="342" class="small">uplinks + encoder</text>
+    <text x="460" y="280" class="label">Grafana</text><text x="460" y="316" class="small">Prometheus evidence</text><text x="460" y="342" class="small">dashboards + alerts</text>
+    <text x="730" y="280" class="label">Grafana MCP</text><text x="730" y="316" class="small">official read-only</text><text x="730" y="342" class="small">bounded queries</text>
+    <text x="1000" y="280" class="label">StageGuard</text><text x="1000" y="316" class="small">investigate + diagnose</text><text x="1000" y="342" class="small">evidence revision</text>
+    <text x="1270" y="280" class="label">Operator</text><text x="1270" y="316" class="small">explicit approval</text><text x="1270" y="342" class="small">bounded action</text>
+    <text x="730" y="548" class="label">Grafana verification</text><text x="730" y="582" class="small">fresh healthy telemetry</text><text x="730" y="606" class="small accent">recovered</text>
+  </g>
+  <text x="80" y="675" class="sub">Gemini may brief the operator; it never controls infrastructure.</text>
+</svg>

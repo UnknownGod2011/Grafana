@@ -74,3 +74,19 @@ Confirmed the checked-in highest-priority goal had shifted from more retention w
 ## Previous run summary
 
 The previous run completed the signed local runtime checkpoint -> retention coordinator -> compacted audit -> hardened restart/no-remediation-replay acceptance path, removing the last major local retention composition gap.
+
+## FINAL SUBMISSION STATUS — 2026-09-09
+
+Demo: BLOCKED ON LOCAL DOCKER ENGINE — `docker compose` is installed, but Docker Desktop's Linux engine was unavailable on this laptop; the repository's deterministic demo runner remains the intended judge-machine path.
+
+Grafana MCP: NOT LIVE-VERIFIED HERE — the checked-in runner gates readiness on the official `grafana/mcp-grafana:1.3.0` read-only smoke query.
+
+Gemini: NOT USED — optional and intentionally not faked without working Vertex/ADC credentials.
+
+Video: NOT CREATED — no honest live runtime capture was possible without Docker; do not submit a fabricated demo video.
+
+Devpost: NOT SUBMITTED — Devpost rules were inspected; the current browser session is not authenticated.
+
+Submission: BLOCKED
+
+Any remaining blocker: Start Docker Desktop on a judge-capable machine, run the documented demo twice, record/upload the required public 3-minute video, then authenticate Devpost and submit to the Grafana Labs partner track.
