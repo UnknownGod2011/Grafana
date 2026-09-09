@@ -2,148 +2,126 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the indispensable runtime evidence and observability plane. The proven core vertical slice remains intact: deterministic broadcast telemetry, Prometheus/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, explicit human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, and a same-origin operator cockpit.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the indispensable runtime evidence plane. The proven vertical slice remains intact: deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, and a same-origin operator cockpit.
 
-The repository is in productization mode. Current priorities are real Grafana Cloud/self-hosted onboarding, production Google Cloud deployment, testability, maintainability, and operational safety.
+Current productization priorities are real Grafana onboarding, production Google Cloud deployment, empirical acceptance testing, maintainability, and operational safety.
 
-Core invariants:
+Core invariants remain unchanged:
 
 - Grafana is the evidence plane; infrastructure write credentials stay isolated from Grafana/MCP access.
-- Gemini is optional/advisory and cannot mutate approval, remediation, or recovery state.
+- Gemini is optional/advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Human approval is single-use and bound to the exact evidence revision.
 - Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-10 — conditional Vertex AI runtime authorization gate
+## Run log — 2026-09-10 — opt-in Vertex/Gemini acceptance smoke
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected:
+Read `progress.md` completely before choosing work. Inspected the current production-deployment path, especially:
 
 - `scripts/gcp_deploy_doctor.py`
 - `runtime/tests/test_gcp_deploy_doctor.py`
-- retained Cloud Run/Gemini environment contract from `scripts/deploy_cloud_run.sh`
-- prior Secret Manager and Cloud Logging Policy Troubleshooter gates
+- `runtime/gemini_commander.py`
+- `README.md`
+- the prior Secret Manager, Cloud Logging, and conditional Vertex `aiplatform.endpoints.predict` Policy Troubleshooter gates
 
-The previous single best next step was directly actionable, so this run implemented it rather than widening architecture scope.
+The previous run's live GCP verification step is still blocked by the absence of an authorized disposable Google Cloud environment in this runtime, so this run completed the next useful unblocked engineering step instead of stopping.
 
 ### Official documentation checked
 
-Current Google Cloud documentation was checked before changing the deployment contract:
+Current Google documentation was rechecked before implementing the smoke path:
 
-- Vertex AI `generateContent` uses a publisher-model resource formatted as `projects/{project}/locations/{location}/publishers/*/models/*`.
-- Google Gemini publisher requests use the `:generateContent` path; the global route uses `locations/global`.
-- Runtime inference requires `aiplatform.endpoints.predict`.
-- Google documents `roles/aiplatform.user` as the standard predefined role that includes the prediction permission, while StageGuard continues to gate the underlying permission rather than requiring that broad role by name.
+- the Google Gen AI SDK exposes `client.models.generate_content(...)`;
+- Vertex AI usage is configured with a Google Cloud project and location;
+- `gemini-2.5-flash` remains a valid documented generation model in the SDK documentation/examples;
+- Application Default Credentials are the expected local authentication path for Vertex AI client use.
 
 References:
 
-- https://docs.cloud.google.com/workflows/docs/reference/googleapis/aiplatform/v1/projects.locations.endpoints/generateContent
-- https://docs.cloud.google.com/workflows/docs/tutorials/use-vertex-ai-models
-- https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/iam-permissions
-- https://docs.cloud.google.com/gemini-enterprise-agent-platform/resources/locations
+- https://googleapis.github.io/python-genai/
+- https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/googlegenaisdk-textgen-with-multi-img
 
 ### Exact changes made
 
-Updated `scripts/gcp_deploy_doctor.py`:
+Added `scripts/gemini_acceptance_smoke.py`:
 
-- added `VERTEX_PREDICT_PERMISSION = "aiplatform.endpoints.predict"`;
-- resolved Gemini runtime location/model with the same deployment defaults already used by StageGuard:
-  - `GOOGLE_CLOUD_LOCATION=global` by default;
-  - `STAGEGUARD_GEMINI_MODEL=gemini-2.5-flash` by default;
-- added syntax validation for the optional location/model identifiers when Gemini is enabled, rejecting URLs/resource paths before deployment;
-- added `_vertex_predict_access_check(...)`, which asks IAM Policy Troubleshooter about the exact configured publisher-model full resource:
-  `//aiplatform.googleapis.com/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/MODEL`;
-- made the Vertex permission proof conditional on `ENABLE_GEMINI=true`; Gemini-disabled deployments do not acquire this extra IAM requirement;
-- reused the existing fail-closed Troubleshooter semantics: denied, unknown, malformed JSON, empty output, or command failure all block readiness;
-- kept the check read-only: it does not invoke the model, alter IAM, enable APIs, or mutate cloud resources;
-- exposed the resolved Gemini location/model in JSON doctor output for deployment debugging;
-- added actionable remediation guidance naming `aiplatform.endpoints.predict`, while explicitly allowing a narrower custom/inherited grant instead of forcing `roles/aiplatform.user`.
+- defaults to configuration-only validation and sends zero model requests;
+- requires an explicit `--execute` flag before any live Gemini request is possible;
+- resolves the same production environment contract used by StageGuard (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `STAGEGUARD_GEMINI_MODEL`);
+- validates project/location/model identifiers before SDK initialization;
+- performs exactly one bounded `generate_content` call when explicitly executed;
+- sends only a synthetic connectivity prompt, with no incident, Grafana, PromQL, LogQL, secret, approval, remediation, or recovery data;
+- requests a tiny locked JSON schema with `temperature=0` and `max_output_tokens=48`;
+- validates the response exactly as `{status: ok, purpose: stageguard-gemini-acceptance}`;
+- reports `state_mutation=false` and never changes StageGuard state or any Google Cloud resource;
+- distinguishes pre-request failures from actual request attempts;
+- suppresses arbitrary provider exception text so SDK/transport details are not copied into CI logs or deployment reports.
 
-Updated `runtime/tests/test_gcp_deploy_doctor.py`:
+Added `runtime/tests/test_gemini_acceptance_smoke.py`:
 
-- locks the exact Vertex runtime permission contract;
-- verifies the exact publisher-model Policy Troubleshooter resource shape for the default global Gemini path;
-- verifies runtime service-account principal and permission arguments;
-- covers CAN_ACCESS, CANNOT_ACCESS, UNKNOWN, command failure, and invalid JSON;
-- verifies remediation guidance includes the required permission;
-- verifies Gemini runtime defaults in offline JSON output;
-- verifies malformed location/model values fail before live deployment;
-- retained existing Secret Manager, Cloud Logging, API, and offline readiness coverage.
+- proves default mode is validation-only;
+- covers missing/malformed project, location, and model identifiers;
+- proves `_execute_smoke` is not called without `--execute`;
+- proves the explicit execute path calls the executor once;
+- covers safe pre-request and request-started failure accounting;
+- locks the state-isolation/no-Grafana-secret contract.
+
+Added `docs/gemini-acceptance.md`:
+
+- documents the safe sequence: config validation -> live `gcp_deploy_doctor.py --json` -> one opt-in acceptance request;
+- explicitly states that the smoke proves only Vertex/Gemini connectivity/authorization and does not prove diagnosis, approval, remediation, or recovery correctness.
 
 Commits created this run:
 
-- `07cad996136f69a6c3880da0d6ae1f6fec19c254` — conditional Vertex AI runtime permission gate
-- `cca40b3388cea04d80868562e5f6945c8137e90f` — Vertex permission and configuration regression coverage
+- `fa11165de9021b7e6b1c47c313fe62267dfd3615` — initial opt-in Gemini acceptance smoke
+- `f40f342b684239f0708f5c11909ee24210d756ad` — acceptance smoke regression tests
+- `dccc6f0a892a6e2eb6087e6f1f8835486be55519` — acceptance documentation
+- `44b57c1a34e0fa275cb8fb6d92aeb61f25ce4618` — safe failure reporting and request-attempt accounting
+- `2a20e054617a419644978b68428ac67e0b371b89` — aligned safe-failure regression coverage
 
 ### Tests / checks / results
 
-- Source-level review completed for the new Gemini location/model resolution, publisher-model full resource, conditional live gate, JSON output, and next-step remediation.
-- Attempted to obtain a fresh executable checkout using `git clone`; this execution container still cannot resolve `github.com`, so empirical local execution was blocked before Python could run.
-- No PASS claim is made for the newly expanded test module.
-- No GitHub Actions workflow was added, triggered, or rerun.
+- Source-level inspection of the committed smoke command and tests completed through the GitHub connector.
+- Attempted a fresh executable checkout with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution container still cannot resolve `github.com`, so the committed unittest module could not be executed locally.
+- No PASS claim is made for the new tests.
+- No GitHub Actions workflow was created, triggered, or rerun.
 - No Google Cloud resource, IAM policy, API, secret, Grafana instance, Gemini endpoint, or remediation endpoint was modified.
+- The live `--execute` smoke was intentionally not attempted because this runtime has no authorized disposable Google Cloud environment.
 
 ### Decisions made
 
-1. **Gate the runtime permission, not a role name.** StageGuard checks effective `aiplatform.endpoints.predict`; inherited/custom least-privilege IAM remains valid.
-2. **Make Gemini IAM conditional.** `ENABLE_GEMINI=false` retains the smaller runtime authorization surface.
-3. **Use the publisher-model resource StageGuard actually calls.** The preflight target mirrors the documented `projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent` path.
-4. **Fail closed on IAM uncertainty.** An indeterminate Troubleshooter result cannot produce `ready_to_deploy=true`.
-5. **Keep the doctor read-only.** It verifies authorization without making a paid/model inference request or altering access.
+1. **Live inference must be explicit.** Merely running the smoke command cannot incur a Gemini request.
+2. **Keep acceptance state-isolated.** The smoke verifies SDK/auth/model connectivity with synthetic data rather than passing a real incident through Gemini.
+3. **Bound cost and output.** One request, deterministic temperature, tiny schema, and a small output-token limit are sufficient for acceptance.
+4. **Do not leak provider errors.** Arbitrary SDK exception strings are replaced with bounded operator-safe failure codes/messages.
+5. **Do not confuse connectivity with correctness.** Passing the smoke cannot mark StageGuard production-ready by itself; deterministic policy and Grafana verification remain separate gates.
 
 ### Current blockers / unknowns
 
-- The expanded `runtime.tests.test_gcp_deploy_doctor` suite still needs empirical execution on a checkout with working GitHub/DNS access.
-- A disposable authorized Google Cloud project is still needed to confirm that Policy Troubleshooter accepts the publisher-model full resource exactly as constructed and returns the expected `overallAccessState` contract.
-- Gemini/Vertex production acceptance still requires a real authorized `generateContent` call after the read-only IAM gate passes.
+- The new `runtime.tests.test_gemini_acceptance_smoke` module still needs empirical execution from a checkout with working GitHub/DNS access.
+- The existing live `gcp_deploy_doctor.py --json` Vertex Policy Troubleshooter check still needs confirmation in a disposable authorized Google Cloud project.
+- The new `gemini_acceptance_smoke.py --execute --json` path still needs one real authorized Vertex AI run after the doctor passes.
 - Historical broader-suite failures/errors still need systematic triage.
 
 ## Single best next step
 
-**Run `python scripts/gcp_deploy_doctor.py --json` in a disposable authorized Google Cloud project with `ENABLE_GEMINI=true` and verify the live Policy Troubleshooter result for `//aiplatform.googleapis.com/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/MODEL`; once that read-only gate is empirically confirmed, add a separate opt-in Gemini acceptance smoke test that performs one minimal `generateContent` call without changing StageGuard state.**
+**On a disposable authorized Google Cloud project, run `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json`; if and only if the doctor reports ready, run `python scripts/gemini_acceptance_smoke.py --execute --json` once and record the exact non-secret result. If credentials are still unavailable, the next unblocked engineering task is to triage the historical full-suite failures into real product defects versus optional/environmental integration failures.**
 
 ## Retained production hardening
 
 ### Google Cloud deployment doctor
 
-`scripts/gcp_deploy_doctor.py` now validates:
-
-- required deployment environment syntax;
-- active `gcloud` identity;
-- `PROJECT_ID` / `PROJECT_NUMBER` consistency;
-- required APIs, with Vertex AI conditional on `ENABLE_GEMINI=true`;
-- runtime service-account existence;
-- mounted Secret Manager resource existence without payload reads;
-- effective `secretmanager.versions.access` for every mounted secret through Policy Troubleshooter;
-- effective `logging.logEntries.create` and `logging.logEntries.list` for the runtime service account;
-- conditional effective `aiplatform.endpoints.predict` on the configured Gemini publisher-model path;
-- Artifact Registry image availability.
-
-Offline syntax validation can never report `ready_to_deploy=true`.
+`scripts/gcp_deploy_doctor.py` validates required deployment configuration, active `gcloud` identity, project consistency, required APIs, runtime service-account existence, Secret Manager resources without payload reads, effective secret access, effective Cloud Logging read/write permissions, conditional effective Vertex prediction permission, and Artifact Registry image availability. Offline validation can never report `ready_to_deploy=true`.
 
 ### Cloud Run / Vertex runtime contract
 
-`scripts/deploy_cloud_run.sh` explicitly forwards:
+`scripts/deploy_cloud_run.sh` forwards `GOOGLE_CLOUD_PROJECT`, optional `GOOGLE_CLOUD_LOCATION` (default `global`), and optional `STAGEGUARD_GEMINI_MODEL` (default `gemini-2.5-flash`). The standard Cloud Run artifact exposes no production-remediation switch or write credential.
 
-- `GOOGLE_CLOUD_PROJECT=${PROJECT_ID}`;
-- optional `GOOGLE_CLOUD_LOCATION` (default `global`);
-- optional `STAGEGUARD_GEMINI_MODEL` (default `gemini-2.5-flash`).
+### Operator and evidence safety
 
-The standard Cloud Run artifact exposes no production-remediation switch or write credential.
-
-### Production onboarding doctor
-
-`scripts/stageguard_doctor.py` validates Python 3.11+, strict telemetry mapping, `GRAFANA_URL`, token-file presence/non-emptiness/permissions without reading token contents, Grafana MCP launcher discovery, and optional activation-file presence. `runtime/preflight.py` remains authoritative for live Grafana/MCP evidence acceptance.
-
-### Operator cockpit
-
-The cockpit surfaces incident state, root cause, confidence, evidence revision, human approval, Grafana MCP provenance, and the `ACTION ACCEPTED ≠ INCIDENT RESOLVED` recovery-verification sequence. Bounded lifecycle responses expose provider, read-only status, datasource UID, query/recovery counts, and tool latency while excluding raw queries and secrets.
-
-### Cross-platform persistence
-
-Windows checkpoint/retention persistence avoids unavailable `os.fchmod`, invalid fsync behavior on read-only handles, and unsupported directory-fsync assumptions.
+The cockpit surfaces incident state, root cause, confidence, evidence revision, human approval, Grafana MCP provenance, and the `ACTION ACCEPTED ≠ INCIDENT RESOLVED` recovery-verification sequence. Bounded lifecycle responses expose provenance and timing while excluding raw queries and secrets.
 
 ## Validation baseline retained
 
@@ -152,5 +130,5 @@ Windows checkpoint/retention persistence avoids unavailable `os.fchmod`, invalid
 - Historical full suite baseline: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
 - Live Docker rehearsal: PASS twice consecutively.
 - Official Grafana MCP read-only smoke path: PASS using `grafana/mcp-grafana:1.3.0`.
-- Incident flow: investigate → diagnose `uplink-b packet loss` → exact revision approval → bounded remediation → telemetry-verified recovered.
-- Gemini: integration implemented but not exercised in the last local capture because credentials were unavailable.
+- Incident flow: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
+- Gemini integration is implemented; live production authorization/inference acceptance remains pending an authorized disposable GCP environment.
