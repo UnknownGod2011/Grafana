@@ -51,6 +51,9 @@ LOGGING_RUNTIME_PERMISSIONS = (
     "logging.logEntries.create",
     "logging.logEntries.list",
 )
+VERTEX_PREDICT_PERMISSION = "aiplatform.endpoints.predict"
+DEFAULT_GEMINI_LOCATION = "global"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off", ""}
 
@@ -84,6 +87,14 @@ def _gemini_enabled() -> bool | None:
     return None
 
 
+def _gemini_location() -> str:
+    return os.getenv("GOOGLE_CLOUD_LOCATION", DEFAULT_GEMINI_LOCATION).strip() or DEFAULT_GEMINI_LOCATION
+
+
+def _gemini_model() -> str:
+    return os.getenv("STAGEGUARD_GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+
+
 def _required_apis() -> tuple[str, ...]:
     apis = list(BASE_REQUIRED_APIS)
     if _gemini_enabled() is True:
@@ -115,6 +126,26 @@ def _env_checks() -> list[Check]:
             ),
         )
     )
+
+    if gemini_enabled is True:
+        location = _gemini_location()
+        model = _gemini_model()
+        location_ok = bool(re.match(r"^[a-z0-9-]+$", location))
+        model_ok = bool(re.match(r"^[A-Za-z0-9._-]+$", model))
+        checks.append(
+            Check(
+                "gemini_location_format",
+                "ok" if location_ok else "failed",
+                f"Vertex AI location: {location}" if location_ok else "GOOGLE_CLOUD_LOCATION must be a Vertex AI location identifier",
+            )
+        )
+        checks.append(
+            Check(
+                "gemini_model_format",
+                "ok" if model_ok else "failed",
+                f"Gemini publisher model: {model}" if model_ok else "STAGEGUARD_GEMINI_MODEL must be a model identifier, not a resource path or URL",
+            )
+        )
 
     project_number = os.getenv("PROJECT_NUMBER", "").strip()
     if project_number:
@@ -229,6 +260,28 @@ def _logging_access_check(project_id: str, service_account: str, permission: str
     )
 
 
+def _vertex_predict_access_check(
+    project_id: str,
+    service_account: str,
+    location: str,
+    model: str,
+) -> Check:
+    """Verify the exact permission StageGuard needs for Gemini generateContent."""
+    full_resource_name = (
+        f"//aiplatform.googleapis.com/projects/{project_id}/locations/{location}"
+        f"/publishers/google/models/{model}"
+    )
+    return _troubleshoot_permission(
+        full_resource_name,
+        service_account,
+        VERTEX_PREDICT_PERMISSION,
+        "vertex_access:predict",
+        f"runtime service account has effective {VERTEX_PREDICT_PERMISSION} on Gemini publisher model {model}",
+        f"runtime service account lacks effective {VERTEX_PREDICT_PERMISSION} on Gemini publisher model {model}",
+        f"IAM Policy Troubleshooter could not determine effective {VERTEX_PREDICT_PERMISSION} access",
+    )
+
+
 def _gcloud_checks() -> list[Check]:
     if not shutil.which("gcloud"):
         return [Check("gcloud", "missing", "Google Cloud CLI is not installed or not on PATH")]
@@ -310,6 +363,15 @@ def _gcloud_checks() -> list[Check]:
             checks.append(_secret_access_check(project_number, sa, secret, env_name))
         for permission in LOGGING_RUNTIME_PERMISSIONS:
             checks.append(_logging_access_check(project_id, sa, permission))
+        if _gemini_enabled() is True:
+            checks.append(
+                _vertex_predict_access_check(
+                    project_id,
+                    sa,
+                    _gemini_location(),
+                    _gemini_model(),
+                )
+            )
 
     image = os.getenv("IMAGE_URL", "").strip()
     if image and ".pkg.dev/" in image:
@@ -337,6 +399,8 @@ def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
         steps.append("Set every required deployment environment variable documented in GOOGLE_CLOUD_DEPLOYMENT.md.")
     if "enable_gemini_format" in names:
         steps.append("Set ENABLE_GEMINI to true or false using the same accepted boolean forms as scripts/deploy_cloud_run.sh.")
+    if "gemini_location_format" in names or "gemini_model_format" in names:
+        steps.append("Set GOOGLE_CLOUD_LOCATION and STAGEGUARD_GEMINI_MODEL to plain Vertex AI location/model identifiers; do not pass URLs or resource paths.")
     if "gcloud" in names:
         steps.append("Install the Google Cloud CLI and place gcloud on PATH.")
     if "gcloud_auth" in names:
@@ -349,6 +413,8 @@ def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
         steps.append("Grant the runtime service account secretmanager.versions.access on each mounted secret (normally roles/secretmanager.secretAccessor at the secret or an appropriate parent), then rerun the doctor.")
     if any(name.startswith("logging_access:") for name in names):
         steps.append("Grant the runtime service account the minimum Cloud Logging permissions needed by StageGuard: logging.logEntries.create for audit writes and logging.logEntries.list for restart/reconciliation reads, then rerun the doctor.")
+    if any(name.startswith("vertex_access:") for name in names):
+        steps.append("When ENABLE_GEMINI=true, grant the runtime service account aiplatform.endpoints.predict for the configured Vertex AI publisher-model path (roles/aiplatform.user is the standard predefined role, but a narrower custom/inherited grant is acceptable), then rerun the doctor.")
     if "container_image" in names:
         steps.append("Build and push the StageGuard API image to Artifact Registry, then set IMAGE_URL to that image.")
     if "runtime_service_account" in names:
@@ -374,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
         "offline_checks_passed": not hard_failures,
         "offline": args.offline,
         "gemini_enabled": _gemini_enabled(),
+        "gemini_location": _gemini_location(),
+        "gemini_model": _gemini_model(),
         "required_apis": list(_required_apis()),
         "checks": [asdict(check) for check in checks],
         "next_steps": _next_steps(checks, offline=args.offline),
