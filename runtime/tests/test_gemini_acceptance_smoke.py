@@ -121,12 +121,37 @@ class GeminiAcceptanceSmokeUnitTests(unittest.TestCase):
         self.assertEqual(plan.location, "global")
         self.assertEqual(plan.model, "gemini-2.5-flash")
 
-    def test_execute_failure_fails_closed(self) -> None:
+    def test_pre_request_failure_reports_zero_requests_and_safe_error(self) -> None:
+        failure = self.smoke.SmokeExecutionError(
+            "dependency_missing",
+            "install google-genai to run the live Gemini acceptance smoke test",
+            request_started=False,
+        )
         with mock.patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "stageguard-test"}, clear=True), mock.patch.object(
-            self.smoke, "_execute_smoke", side_effect=RuntimeError("synthetic auth failure")
-        ), mock.patch("builtins.print"):
+            self.smoke, "_execute_smoke", side_effect=failure
+        ), mock.patch("builtins.print") as output:
             code = self.smoke.main(["--execute", "--json"])
         self.assertEqual(code, 1)
+        payload = json.loads(output.call_args.args[0])
+        self.assertEqual(payload["request_count"], 0)
+        self.assertEqual(payload["error_code"], "dependency_missing")
+        self.assertNotIn("token", payload["error"].lower())
+
+    def test_request_failure_reports_one_attempt_without_provider_exception_text(self) -> None:
+        failure = self.smoke.SmokeExecutionError(
+            "generate_content_failed",
+            "Gemini generateContent failed; verify ADC, Vertex AI API, model/location, quota, and runtime IAM",
+            request_started=True,
+        )
+        with mock.patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "stageguard-test"}, clear=True), mock.patch.object(
+            self.smoke, "_execute_smoke", side_effect=failure
+        ), mock.patch("builtins.print") as output:
+            code = self.smoke.main(["--execute", "--json"])
+        self.assertEqual(code, 1)
+        payload = json.loads(output.call_args.args[0])
+        self.assertEqual(payload["request_count"], 1)
+        self.assertEqual(payload["error_code"], "generate_content_failed")
+        self.assertNotIn("synthetic-secret", payload["error"])
 
     def test_live_result_contract_is_state_isolated(self) -> None:
         self.assertNotIn("incident", self.smoke._execute_smoke.__doc__.lower())
