@@ -15,7 +15,7 @@ Core invariants:
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-10 — effective Cloud Logging IAM deployment gate
+## Run log — 2026-09-10 — conditional Vertex AI runtime authorization gate
 
 ### Inspected at start
 
@@ -23,88 +23,86 @@ Read `progress.md` completely before choosing work. Inspected:
 
 - `scripts/gcp_deploy_doctor.py`
 - `runtime/tests/test_gcp_deploy_doctor.py`
-- `GOOGLE_CLOUD_DEPLOYMENT.md`
-- the retained Cloud Run/Gemini deployment contract and prior Secret Manager Policy Troubleshooter gate
+- retained Cloud Run/Gemini environment contract from `scripts/deploy_cloud_run.sh`
+- prior Secret Manager and Cloud Logging Policy Troubleshooter gates
 
-The prior single best next step was directly actionable without mutating cloud resources, so this run implemented it rather than widening scope.
+The previous single best next step was directly actionable, so this run implemented it rather than widening architecture scope.
 
 ### Official documentation checked
 
-Current Google Cloud documentation was re-checked before changing the preflight contract:
+Current Google Cloud documentation was checked before changing the deployment contract:
 
-- Policy Troubleshooter accepts a service-account principal, full resource name, and underlying IAM permission.
-- A project resource is addressed as `//cloudresourcemanager.googleapis.com/projects/PROJECT_ID`.
-- Cloud Logging `entries.write` requires `logging.logEntries.create`.
-- Cloud Logging `entries.list` requires `logging.logEntries.list` for ordinary log entries.
+- Vertex AI `generateContent` uses a publisher-model resource formatted as `projects/{project}/locations/{location}/publishers/*/models/*`.
+- Google Gemini publisher requests use the `:generateContent` path; the global route uses `locations/global`.
+- Runtime inference requires `aiplatform.endpoints.predict`.
+- Google documents `roles/aiplatform.user` as the standard predefined role that includes the prediction permission, while StageGuard continues to gate the underlying permission rather than requiring that broad role by name.
 
 References:
 
-- https://cloud.google.com/policy-intelligence/docs/troubleshoot-access
-- https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/write
-- https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list
-- https://cloud.google.com/iam/docs/roles-permissions/logging
+- https://docs.cloud.google.com/workflows/docs/reference/googleapis/aiplatform/v1/projects.locations.endpoints/generateContent
+- https://docs.cloud.google.com/workflows/docs/tutorials/use-vertex-ai-models
+- https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/iam-permissions
+- https://docs.cloud.google.com/gemini-enterprise-agent-platform/resources/locations
 
 ### Exact changes made
 
 Updated `scripts/gcp_deploy_doctor.py`:
 
-- added the exact production audit permission contract:
-  - `logging.logEntries.create`
-  - `logging.logEntries.list`
-- factored Policy Troubleshooter result handling into one fail-closed `_troubleshoot_permission(...)` helper so Secret Manager and Logging checks share identical `CAN_ACCESS` / `CANNOT_ACCESS` / unknown / malformed / command-failure semantics;
-- preserved the Secret Manager proof without reading any secret version payload;
-- added `_logging_access_check(...)` using the target project full resource name and runtime service-account principal;
-- only attempts IAM proofs after the configured runtime service account is confirmed to exist and the project lookup succeeds;
-- makes both Logging permissions mandatory deployment checks, so a live doctor cannot report `ready_to_deploy=true` when StageGuard would be unable to append lifecycle audit or read it during restart/reconciliation;
-- added actionable remediation text that names both required Logging permissions without mutating IAM;
-- corrected the Logging resource identifier to use `PROJECT_ID` rather than the numeric project number after reviewing the official resource shape;
-- retained the existing Artifact Registry failure detail and all prior no-secret/no-IAM-mutation behavior.
+- added `VERTEX_PREDICT_PERMISSION = "aiplatform.endpoints.predict"`;
+- resolved Gemini runtime location/model with the same deployment defaults already used by StageGuard:
+  - `GOOGLE_CLOUD_LOCATION=global` by default;
+  - `STAGEGUARD_GEMINI_MODEL=gemini-2.5-flash` by default;
+- added syntax validation for the optional location/model identifiers when Gemini is enabled, rejecting URLs/resource paths before deployment;
+- added `_vertex_predict_access_check(...)`, which asks IAM Policy Troubleshooter about the exact configured publisher-model full resource:
+  `//aiplatform.googleapis.com/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/MODEL`;
+- made the Vertex permission proof conditional on `ENABLE_GEMINI=true`; Gemini-disabled deployments do not acquire this extra IAM requirement;
+- reused the existing fail-closed Troubleshooter semantics: denied, unknown, malformed JSON, empty output, or command failure all block readiness;
+- kept the check read-only: it does not invoke the model, alter IAM, enable APIs, or mutate cloud resources;
+- exposed the resolved Gemini location/model in JSON doctor output for deployment debugging;
+- added actionable remediation guidance naming `aiplatform.endpoints.predict`, while explicitly allowing a narrower custom/inherited grant instead of forcing `roles/aiplatform.user`.
 
 Updated `runtime/tests/test_gcp_deploy_doctor.py`:
 
-- locks the exact two-permission Cloud Logging runtime contract;
-- verifies Policy Troubleshooter receives `//cloudresourcemanager.googleapis.com/projects/stageguard-test`;
-- verifies the runtime service-account principal and exact permission flag;
-- covers allowed, denied, unknown, command-failure, and invalid-JSON outcomes;
-- verifies denied/indeterminate states fail closed;
-- verifies remediation guidance contains both `logging.logEntries.create` and `logging.logEntries.list`;
-- retained all existing offline, Gemini API, and Secret Manager access tests.
+- locks the exact Vertex runtime permission contract;
+- verifies the exact publisher-model Policy Troubleshooter resource shape for the default global Gemini path;
+- verifies runtime service-account principal and permission arguments;
+- covers CAN_ACCESS, CANNOT_ACCESS, UNKNOWN, command failure, and invalid JSON;
+- verifies remediation guidance includes the required permission;
+- verifies Gemini runtime defaults in offline JSON output;
+- verifies malformed location/model values fail before live deployment;
+- retained existing Secret Manager, Cloud Logging, API, and offline readiness coverage.
 
 Commits created this run:
 
-- `7d6f6a8726ab765806721397b93c7a1458f8ca4c` — initial Cloud Logging IAM gate
-- `b7768ab0467c7246e301a1190eee4fc68ba71554` — credential-free Logging permission tests
-- `6e8338a5cdeeb378ba6603f5a066b3a4eaa65f4f` — correct Logging project resource to PROJECT_ID
-- `dc9739ba856aa5b1a511f4e170198da0ab388bb2` — align tests with project-ID resource contract
+- `07cad996136f69a6c3880da0d6ae1f6fec19c254` — conditional Vertex AI runtime permission gate
+- `cca40b3388cea04d80868562e5f6945c8137e90f` — Vertex permission and configuration regression coverage
 
 ### Tests / checks / results
 
-- Source-level review completed for the new IAM helper, Secret Manager wrapper, Logging wrapper, live preflight integration, and next-step generation.
-- Attempted to download the exact committed doctor/test files and run `py_compile` plus `python -m unittest runtime.tests.test_gcp_deploy_doctor -v` in the execution container.
-- The container could not resolve `raw.githubusercontent.com`, so the executable validation attempt failed before Python ran.
-- No PASS claim is made for the newly added tests.
-- No GitHub Actions workflow was added or triggered.
+- Source-level review completed for the new Gemini location/model resolution, publisher-model full resource, conditional live gate, JSON output, and next-step remediation.
+- Attempted to obtain a fresh executable checkout using `git clone`; this execution container still cannot resolve `github.com`, so empirical local execution was blocked before Python could run.
+- No PASS claim is made for the newly expanded test module.
+- No GitHub Actions workflow was added, triggered, or rerun.
 - No Google Cloud resource, IAM policy, API, secret, Grafana instance, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. **Gate underlying permissions, not role names.** Custom/inherited IAM can satisfy the runtime contract; the doctor checks effective permissions instead of requiring broad predefined roles.
-2. **Fail closed on indeterminate IAM.** `UNKNOWN`, malformed Policy Troubleshooter output, command failure, or denied access all block deployment readiness.
-3. **Keep authorization verification read-only.** The doctor never calls Cloud Logging write/list itself and never grants IAM; Policy Troubleshooter evaluates effective access only.
-4. **Use project ID for the Cloud Logging resource.** This matches the documented project resource and the resource name used by `entries.list`.
-5. **Do not add the Vertex permission gate yet.** `aiplatform.endpoints.predict` remains the next candidate only after its correct Policy Troubleshooter target resource shape is validated for the Gemini/Vertex path StageGuard actually uses.
+1. **Gate the runtime permission, not a role name.** StageGuard checks effective `aiplatform.endpoints.predict`; inherited/custom least-privilege IAM remains valid.
+2. **Make Gemini IAM conditional.** `ENABLE_GEMINI=false` retains the smaller runtime authorization surface.
+3. **Use the publisher-model resource StageGuard actually calls.** The preflight target mirrors the documented `projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent` path.
+4. **Fail closed on IAM uncertainty.** An indeterminate Troubleshooter result cannot produce `ready_to_deploy=true`.
+5. **Keep the doctor read-only.** It verifies authorization without making a paid/model inference request or altering access.
 
 ### Current blockers / unknowns
 
 - The expanded `runtime.tests.test_gcp_deploy_doctor` suite still needs empirical execution on a checkout with working GitHub/DNS access.
-- A disposable authorized Google Cloud project is still needed to validate the live Policy Troubleshooter response contract for Secret Manager and both Logging permissions end-to-end.
-- Conditional effective authorization for Gemini (`aiplatform.endpoints.predict`) is not yet a deployment gate.
-- Gemini/Vertex AI production acceptance still requires a real authorized project/model call.
+- A disposable authorized Google Cloud project is still needed to confirm that Policy Troubleshooter accepts the publisher-model full resource exactly as constructed and returns the expected `overallAccessState` contract.
+- Gemini/Vertex production acceptance still requires a real authorized `generateContent` call after the read-only IAM gate passes.
 - Historical broader-suite failures/errors still need systematic triage.
 
 ## Single best next step
 
-**Validate the correct Policy Troubleshooter resource target for StageGuard's actual Vertex/Gemini `aiplatform.endpoints.predict` call path using current official Vertex AI resource semantics, then add a conditional fail-closed permission gate only when `ENABLE_GEMINI=true`, with credential-free response-contract tests.**
+**Run `python scripts/gcp_deploy_doctor.py --json` in a disposable authorized Google Cloud project with `ENABLE_GEMINI=true` and verify the live Policy Troubleshooter result for `//aiplatform.googleapis.com/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/MODEL`; once that read-only gate is empirically confirmed, add a separate opt-in Gemini acceptance smoke test that performs one minimal `generateContent` call without changing StageGuard state.**
 
 ## Retained production hardening
 
@@ -120,6 +118,7 @@ Commits created this run:
 - mounted Secret Manager resource existence without payload reads;
 - effective `secretmanager.versions.access` for every mounted secret through Policy Troubleshooter;
 - effective `logging.logEntries.create` and `logging.logEntries.list` for the runtime service account;
+- conditional effective `aiplatform.endpoints.predict` on the configured Gemini publisher-model path;
 - Artifact Registry image availability.
 
 Offline syntax validation can never report `ready_to_deploy=true`.
