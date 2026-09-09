@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +29,16 @@ VALID_ENV = {
     "GRAFANA_TOKEN_SECRET": "stageguard-grafana-token",
     "ENABLE_GEMINI": "false",
 }
+
+
+def _load_doctor_module():
+    spec = importlib.util.spec_from_file_location("stageguard_gcp_deploy_doctor_test_module", DOCTOR)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load gcp_deploy_doctor.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class GcpDeployDoctorOfflineTests(unittest.TestCase):
@@ -72,6 +84,7 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         self.assertIs(payload["ready_to_deploy"], False)
         self.assertIs(payload["gemini_enabled"], False)
         self.assertNotIn("aiplatform.googleapis.com", payload["required_apis"])
+        self.assertIn("policytroubleshooter.googleapis.com", payload["required_apis"])
         self.assertTrue(any("gcp_deploy_doctor.py --json" in step for step in payload["next_steps"]))
 
     def test_missing_required_variable_fails(self) -> None:
@@ -132,6 +145,64 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         self.assertIs(payload["offline_checks_passed"], False)
         self.assertEqual(self._checks(payload)["enable_gemini_format"]["status"], "failed")
         self.assertTrue(any("ENABLE_GEMINI" in step for step in payload["next_steps"]))
+
+
+class GcpDeployDoctorSecretAccessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.doctor = _load_doctor_module()
+
+    def _check_with_response(self, returncode: int, payload: str):
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
+            check = self.doctor._secret_access_check(
+                "123456789012",
+                "stageguard@stageguard-test.iam.gserviceaccount.com",
+                "stageguard-grafana-token",
+                "GRAFANA_TOKEN_SECRET",
+            )
+        return check, run
+
+    def test_effective_secret_access_uses_policy_troubleshooter_without_accessing_version(self) -> None:
+        check, run = self._check_with_response(0, json.dumps({"overallAccessState": "CAN_ACCESS"}))
+        self.assertEqual(check.status, "ok")
+        self.assertIn("payload not read", check.detail)
+        args = run.call_args.args[0]
+        self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
+        self.assertIn("//secretmanager.googleapis.com/projects/123456789012/secrets/stageguard-grafana-token", args)
+        self.assertIn("--permission=secretmanager.versions.access", args)
+        self.assertFalse(any("versions access" in arg for arg in args))
+
+    def test_effective_secret_access_denied_fails_closed(self) -> None:
+        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "CANNOT_ACCESS"}))
+        self.assertEqual(check.status, "failed")
+        self.assertIn("lacks effective secretmanager.versions.access", check.detail)
+
+    def test_effective_secret_access_unknown_state_fails_closed(self) -> None:
+        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "UNKNOWN"}))
+        self.assertEqual(check.status, "failed")
+        self.assertIn("could not determine", check.detail)
+
+    def test_effective_secret_access_command_failure_fails_closed(self) -> None:
+        check, _ = self._check_with_response(1, "")
+        self.assertEqual(check.status, "failed")
+        self.assertIn("could not be verified", check.detail)
+
+    def test_effective_secret_access_invalid_json_fails_closed(self) -> None:
+        check, _ = self._check_with_response(0, "not-json")
+        self.assertEqual(check.status, "failed")
+        self.assertIn("unreadable response", check.detail)
+
+    def test_next_steps_explain_runtime_secret_permission(self) -> None:
+        checks = [
+            self.doctor.Check(
+                "secret_access:GRAFANA_TOKEN_SECRET",
+                "failed",
+                "runtime service account lacks effective secretmanager.versions.access",
+            )
+        ]
+        steps = self.doctor._next_steps(checks, offline=False)
+        self.assertTrue(any("secretmanager.versions.access" in step for step in steps))
+        self.assertTrue(any("roles/secretmanager.secretAccessor" in step for step in steps))
 
 
 if __name__ == "__main__":
