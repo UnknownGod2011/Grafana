@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from audit_anchor import AuditAnchor, DEFAULT_ANCHOR_INTERVAL, roll_audit_anchor, select_anchored_committed_lineage
+from audit_file_lock import audit_file_lock
 from audit_integrity import AuditChain, AuditChainCheckpoint
 from incident_checkpoint import CheckpointConflictError, IncidentCheckpoint
 from incident_service import (
@@ -22,7 +23,15 @@ from incident_service import (
 
 
 class AnchoredJsonlAuditLog(JsonlAuditLog):
-    """JSONL audit reader with an exclusive lower bound for anchored restore."""
+    """Lock-coordinated JSONL sink/reader with anchored candidate bounds."""
+
+    def append(self, event: AuditEvent) -> None:
+        with audit_file_lock(self.path):
+            super().append(event)
+
+    def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
+        with audit_file_lock(self.path):
+            return super().read(incident_id=incident_id, after_sequence=after_sequence, limit=limit)
 
     def read_candidates(
         self,
@@ -45,20 +54,21 @@ class AnchoredJsonlAuditLog(JsonlAuditLog):
 
         candidates: list[AuditEvent] = []
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    event = AuditEvent(**json.loads(line))
-                    if event.incident_id != incident_id:
-                        continue
-                    if event.sequence < 1:
-                        raise ValueError("audit candidate sequence must be positive")
-                    if event.sequence <= after_sequence or event.sequence > through_sequence:
-                        continue
-                    candidates.append(event)
-                    if len(candidates) > limit:
-                        raise ValueError("audit candidate read exceeded the safe result bound")
+            with audit_file_lock(self.path):
+                with self.path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        event = AuditEvent(**json.loads(line))
+                        if event.incident_id != incident_id:
+                            continue
+                        if event.sequence < 1:
+                            raise ValueError("audit candidate sequence must be positive")
+                        if event.sequence <= after_sequence or event.sequence > through_sequence:
+                            continue
+                        candidates.append(event)
+                        if len(candidates) > limit:
+                            raise ValueError("audit candidate read exceeded the safe result bound")
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError("local audit candidates could not be read safely") from exc
         return candidates
