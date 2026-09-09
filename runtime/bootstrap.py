@@ -11,15 +11,17 @@ from pathlib import Path
 from typing import Callable
 
 from activation import ActivationRecord, load_activation_record
+from anchored_execution_safety import AnchoredExecutionSafeIncidentService
+from anchored_incident_service import AnchoredJsonlAuditLog
 from api import _is_loopback, make_server
+from audit_anchor import DEFAULT_ANCHOR_INTERVAL, MAX_VERIFICATION_SUFFIX_EVENTS
 from cloud_audit import GoogleCloudLoggingAuditSink
 from durable_audit_reader import GoogleCloudAuditReader
-from execution_safety import ExecutionSafeIncidentService
 from gemini_commander import GeminiCommander, GoogleGenAICommanderModel
 from http_remediation_transport import HttpRemediationTransport
 from identity import GoogleIapIdentityProvider, IdentityProvider, LocalDevelopmentIdentityProvider, StaticBearerIdentityProvider
 from incident_checkpoint import CheckpointStore, GoogleCloudStorageCheckpointStore, JsonCheckpointStore, ObservableCheckpointStore
-from incident_service import AuditReader, AuditSink, IncidentService, JsonlAuditLog
+from incident_service import AuditReader, AuditSink, IncidentService
 from log_activation import LogActivationRecord, load_log_activation_record, verify_log_activation_record
 from mcp_log_client import McpLokiLogClient
 from mcp_metric_client import McpPrometheusMetricClient
@@ -66,6 +68,16 @@ def _normalize_audit_integrity_policy(value: str) -> str:
     return normalized
 
 
+def _normalize_audit_anchor_interval(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError("audit anchor interval must be an integer")
+    if not 1 <= value <= MAX_VERIFICATION_SUFFIX_EVENTS:
+        raise ValueError(
+            f"audit anchor interval must be between 1 and {MAX_VERIFICATION_SUFFIX_EVENTS}"
+        )
+    return value
+
+
 def _identity_provider(host: str, *, mode: str, token_env: str, subject_env: str, iap_audience_env: str) -> IdentityProvider:
     normalized_mode = mode.strip().lower()
     if normalized_mode not in {"auto", "local", "bearer", "iap"}:
@@ -94,7 +106,7 @@ def _identity_provider(host: str, *, mode: str, token_env: str, subject_env: str
 def _audit_sink(*, backend: str, audit_path: str | Path, cloud_project_env: str, cloud_log_name: str) -> AuditSink:
     normalized = backend.strip().lower()
     if normalized == "jsonl":
-        return JsonlAuditLog(audit_path)
+        return AnchoredJsonlAuditLog(audit_path)
     if normalized == "cloud-logging":
         project = os.getenv(cloud_project_env, "").strip() or None
         return GoogleCloudLoggingAuditSink.from_environment(project=project, log_name=cloud_log_name)
@@ -168,6 +180,7 @@ def build_runtime(
     checkpoint_signing_key_env: str = "STAGEGUARD_CHECKPOINT_HMAC_KEY",
     checkpoint_object: str = "stageguard/incident-checkpoint.json",
     audit_integrity_policy: str = "allow_unbound_legacy",
+    audit_anchor_interval: int = DEFAULT_ANCHOR_INTERVAL,
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
     logs_factory: Callable[[], McpLokiLogClient] = McpLokiLogClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
@@ -180,6 +193,7 @@ def build_runtime(
 ) -> RuntimeBundle:
     profile = load_telemetry_profile(telemetry_config)
     policy = _normalize_audit_integrity_policy(audit_integrity_policy)
+    anchor_interval = _normalize_audit_anchor_interval(audit_anchor_interval)
     metrics = metrics_factory()
     logs: McpLokiLogClient | None = None
     activation: ActivationRecord | None = None
@@ -234,12 +248,13 @@ def build_runtime(
             remediation = DisabledRemediationClient()
 
         commander = commander_factory() if enable_gemini else None
-        service = ExecutionSafeIncidentService(
+        service = AnchoredExecutionSafeIncidentService(
             metrics, remediation, audit, audit_reader=audit_reader, checkpoint_store=checkpoint_store,
             telemetry_profile=profile, activation_record=activation,
             datasource_identity=metrics.datasource_uid if activation is not None else None,
             logs=logs, log_activation_record=log_activation, commander=commander,
             activation_now_unix=activation_now_unix,
+            audit_anchor_interval=anchor_interval,
         )
         setattr(service, "_audit_integrity_policy", policy)
         server = make_server(service, host, port, identity_provider=identity)
@@ -271,6 +286,12 @@ def _parser() -> argparse.ArgumentParser:
         "--audit-integrity-policy",
         choices=("allow_unbound_legacy", "require_verified"),
         default="allow_unbound_legacy",
+    )
+    parser.add_argument(
+        "--audit-anchor-interval",
+        type=int,
+        default=DEFAULT_ANCHOR_INTERVAL,
+        help=f"authenticated audit events between anchor rolls (1-{MAX_VERIFICATION_SUFFIX_EVENTS})",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9110)
@@ -306,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_signing_key_env=args.checkpoint_signing_key_env,
             checkpoint_object=args.checkpoint_object,
             audit_integrity_policy=args.audit_integrity_policy,
+            audit_anchor_interval=args.audit_anchor_interval,
             host=args.host,
             port=args.port,
             identity_mode=args.identity_mode,

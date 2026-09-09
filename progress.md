@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, authenticated approval-gated remediation, Grafana recovery verification, durable checkpointing with optimistic concurrency, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, checkpoint schema v3 audit-chain binding, hardened audit-integrity readiness policy, authenticated winning-lineage selection for multi-writer append-before-CAS audit streams, schema-v4 authenticated audit-anchor checkpoints, an anchor-aware incident-service/runtime layer for bounded-suffix restore, and an explicit composition that combines anchor-aware restore with execution-safe remediation semantics.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path now includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable checkpointing with optimistic concurrency, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, and the anchor-aware + execution-safe service as the default bootstrap composition.
 
 Core safety invariants:
 
@@ -13,72 +13,61 @@ Core safety invariants:
 - `dispatching` is durably persisted before provider contact when the checkpoint store supports execution phases.
 - Reconciliation is GET-only and ambiguous provider state requires fresh Grafana evidence before recovery completion.
 - GCS checkpoints are HMAC-authenticated and generation-CAS protected.
-- Audit chain state is domain-separated SHA-256 with contiguous sequence numbers.
-- The authenticated checkpoint chain head is lifecycle authority; losing-writer audit residue cannot manufacture approval, outcome, recovery, or operator timeline state.
-- Audit anchors are authenticated compaction boundaries, not new trust roots, and must satisfy `anchor <= chain <= lifecycle`.
-- Anchor promotion becomes in-memory authority only after checkpoint persistence succeeds; a CAS-losing writer cannot promote its proposed anchor.
-- Branched lineage selection and durable candidate reads are explicitly bounded and fail closed on candidate/state explosion or silent truncation.
+- The authenticated checkpoint audit-chain head is lifecycle authority; losing-writer residue cannot manufacture lifecycle state.
+- Audit anchors are authenticated compaction boundaries, not independent trust roots; promotion becomes authoritative only after checkpoint persistence succeeds.
+- Branched-lineage verification and candidate reads are bounded and fail closed on state/candidate explosion or silent truncation.
 - `/readyz` fails closed for checkpoint conflict, execution uncertainty, audit-integrity failure, or configured integrity-policy violation.
 
-## Completed milestones
-
-- Deterministic media telemetry simulator and local Prometheus/Grafana stack.
-- Official Grafana MCP integration with bounded Prometheus/Loki evidence tools.
-- Configurable telemetry mappings, activation preflight, and evidence-scope validation.
-- Approval-gated remediation and telemetry-only recovery proof.
-- Credential-isolated HTTPS remediation transport with deterministic idempotency identity.
-- Provider-neutral GET-only reconciliation with bounded outcomes/reasons.
-- Revision-bound Gemini incident commander briefing layer.
-- Google IAP identity, Cloud Logging audit integration, and Cloud Run deployment path.
-- Durable checkpoint recovery, CAS conflict handling, operator cockpit, crash/SIGKILL ambiguity coverage, tamper-evident audit chain, schema-v3 binding, integrity observability/policy, legacy-v2 to verified-v3 migration acceptance, and authenticated winning-lineage runtime restore.
-- Authenticated audit-anchor primitive, Cloud Logging post-anchor candidate-range reads, schema-v4 anchor persistence contract, executable anchor-aware JSONL/runtime service layer, and cooperative execution-safe + anchor-aware service composition.
-
-## Run log — 2026-09-09 — anchor + execution-safety composition
+## Run log — 2026-09-09 — production bootstrap activation of audit anchors
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/anchored_incident_service.py`, `runtime/execution_safety.py`, `runtime/bootstrap.py`, `runtime/incident_service.py`, the anchored runtime tests, and the bootstrap execution-safety regression. Confirmed the next safe integration seam: the anchor-aware subclass and execution-safe subclass both use cooperative `super()` over `IncidentService`, so they can be composed without duplicating base initialization or weakening either layer.
+Read `progress.md` completely before deciding work. Inspected current `main`, `runtime/bootstrap.py`, `runtime/cloudrun_entrypoint.py`, `runtime/anchored_incident_service.py`, `runtime/anchored_execution_safety.py`, `runtime/audit_anchor.py`, `runtime/incident_service.py`, `runtime/tests/test_bootstrap_execution_safety.py`, and `runtime/tests/test_cloudrun_entrypoint.py`. Confirmed the previous handoff was accurate: the anchor-aware execution-safe composition existed but production/bootstrap still selected `ExecutionSafeIncidentService`, JSONL bootstrap still used `JsonlAuditLog`, and no operator configuration bounded anchor cadence.
 
 ### Exact changes made
 
-1. Added `runtime/anchored_execution_safety.py`.
-   - Added `AnchoredExecutionSafeIncidentService(AnchoredIncidentService, ExecutionSafeIncidentService)`.
-   - The intentional MRO is `AnchoredIncidentService -> ExecutionSafeIncidentService -> IncidentService`, preserving anchor initialization/persistence plus execution uncertainty, dispatch barriers, and reconciliation behavior while reaching base initialization exactly once.
-   - No production/bootstrap default was switched in this increment; the composition is isolated and reversible until regression execution can be completed.
-2. Added `runtime/tests/test_anchored_execution_safety.py`.
-   - Verifies the service satisfies both parent runtime contracts.
-   - Verifies schema-v4 emission and verified restart after physical pre-anchor JSONL compaction while execution reconciliation remains clear.
-   - Verifies checkpoint CAS conflict leaves the proposed anchor unauthenticated and preserves the execution-safety conflict state.
-3. Preserved CI/resource safety.
-   - Changes are prepared as one Git tree/commit/ref update rather than repeated per-file pushes.
-   - No workflow rerun, production credential use, or external remediation/Grafana/GCP mutation is part of this increment.
+1. Switched the default runtime constructor to `AnchoredExecutionSafeIncidentService`.
+   - This activates authenticated anchor restore while retaining execution dispatch barriers, reconciliation, checkpoint conflict handling, and existing incident lifecycle semantics.
+2. Switched the local JSONL audit backend to `AnchoredJsonlAuditLog`.
+   - This preserves the sink contract while adding the exclusive `after_sequence` candidate enumeration required for compacted-prefix restart verification.
+3. Added bounded `audit_anchor_interval` runtime configuration.
+   - `build_runtime(..., audit_anchor_interval=...)` now defaults to `DEFAULT_ANCHOR_INTERVAL` (1024).
+   - `--audit-anchor-interval` is available on the CLI.
+   - Bootstrap rejects booleans, values below 1, and values above `MAX_VERIFICATION_SUFFIX_EVENTS` (2048), ensuring configured cadence cannot exceed the authenticated suffix verifier's hard bound.
+4. Preserved the Cloud Run security composition.
+   - `cloudrun_entrypoint.py` requires no special-case code: it continues to force IAP, Cloud Logging, non-loopback bind, disabled remediation, and `require_verified` whenever GCS durable checkpoints are configured; the new bootstrap default automatically supplies the anchor-aware service and conservative 1024-event cadence.
+5. Extended `runtime/tests/test_bootstrap_execution_safety.py`.
+   - Asserts default bootstrap returns `AnchoredExecutionSafeIncidentService` while still satisfying `ExecutionSafeIncidentService`.
+   - Asserts JSONL bootstrap uses `AnchoredJsonlAuditLog`.
+   - Asserts the conservative default interval, a custom bounded interval, and rejection of zero/oversized/boolean values.
+6. Landed source, tests, and this handoff through one Git tree/commit/ref update to avoid repeated push-triggered CI noise.
 
 ### Tests / checks / results
 
-- Repository inspection and Git object creation succeeded through the connected GitHub integration.
-- The execution environment still does not provide a complete local checkout/import path for running the repository test suite, so no green pytest/unittest result is claimed for the new composition yet.
-- The composition is deliberately small and relies on cooperative `super()` already present in both parent classes; runtime tests were added specifically to catch MRO/initialization regressions once executable in a complete checkout.
-- No GitHub Actions workflow was manually triggered or rerun.
-- No production Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, operator, or remediation credentials/resources were touched.
+- Repository reads and Git object construction succeeded through the connected GitHub integration.
+- No GitHub Actions workflow was manually started or rerun.
+- The automation environment still does not expose a complete repository checkout/import path suitable for executing the Python regression suite, so no green pytest/unittest claim is made for this change.
+- The changed bootstrap surface is covered by focused unit regressions, but those tests still need execution in a complete checkout.
+- No live Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, remediation endpoint, or operator resource was touched.
 
 ### Decisions made
 
-1. **Compose before replacing bootstrap defaults.** This closes the architectural gap between anchor restore and execution safety without immediately changing the production constructor path.
-2. **Keep one `IncidentService` initialization.** Multiple inheritance is acceptable here only because both feature layers use cooperative `super()`; the explicit regression checks protect that assumption.
-3. **Do not weaken execution uncertainty semantics for compaction.** Audit anchors reduce verification history, not provider-side safety requirements.
-4. **Do not trigger CI merely to validate this increment.** The repository has a history of noisy Actions/storage usage; manual workflow execution remains avoided.
+1. **Activate the composed runtime now, but retain conservative defaults.** The composition had already been isolated and regression-specified; leaving production on the older class would make schema-v4 support unreachable through normal startup.
+2. **Bound configuration by verifier capacity.** An anchor interval greater than the maximum authenticated suffix span could produce checkpoints that cannot be safely restored before the next anchor roll.
+3. **Do not add a Cloud Run-only anchor flag.** A single bootstrap invariant avoids divergent local/production semantics; Cloud Run inherits the safe default while continuing to harden identity, audit, and checkpoint policy independently.
+4. **Keep credentials out of argv.** The existing Cloud Run path continues to pass only environment-variable names/config selectors, not bucket secrets or HMAC material.
 
 ### Current blockers / unknowns
 
-- The new composition has not yet executed in a complete repository checkout, so import/MRO behavior is regression-covered but not claimed green.
-- `bootstrap.py` and `cloudrun_entrypoint.py` still instantiate `ExecutionSafeIncidentService` rather than `AnchoredExecutionSafeIncidentService`.
-- The JSONL bootstrap sink still constructs `JsonlAuditLog`; production activation of anchors requires using `AnchoredJsonlAuditLog` for the local durable path or otherwise supplying an anchor-capable reader.
-- Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, production GCS generation/IAM validation, Cloud Logging schema-v4 suffix restore, and a real remediation provider remain external-resource validation tasks.
+- The updated bootstrap regressions have not executed in a complete checkout during this run.
+- A real GCS + Cloud Logging schema-v4 restart has not been exercised against Google Cloud credentials/resources.
+- Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, production GCS generation/IAM validation, and a real remediation provider remain external-resource validation tasks.
+- Automatic physical compaction/retention of local JSONL audit history is not yet implemented; anchors make such compaction safe to verify, but StageGuard does not yet perform destructive log compaction itself.
 
 ## Single best next step
 
-**Switch the default bootstrap composition to `AnchoredExecutionSafeIncidentService` and use `AnchoredJsonlAuditLog` for the JSONL backend, add a bounded `--audit-anchor-interval` configuration with a conservative default, then extend bootstrap/Cloud Run tests to prove local v4 compaction restart and production GCS+Cloud Logging constructor wiring without triggering a live workflow or touching real credentials.**
+**Add a credential-free bootstrap acceptance test that uses the default `build_runtime` path with a JSON checkpoint, a deliberately tiny anchor interval, real local JSONL audit events, physical deletion of the authenticated pre-anchor prefix, and a restart proving `audit_integrity=verified` plus no approval/remediation replay. Then add a constructor-only GCS + Cloud Logging wiring test using fakes so the production reader/sink/checkpoint composition is verified without touching Google Cloud.**
 
 ## Previous run summary
 
-The previous run added `AnchoredIncidentService` and `AnchoredJsonlAuditLog`, including schema-v4 anchor promotion, bounded suffix restore, physical-prefix-compaction coverage, post-anchor tamper rejection, and save-before-promote CAS safety, while intentionally leaving production bootstrap on the established execution-safe service.
+The previous run added `AnchoredExecutionSafeIncidentService`, combining anchor-aware bounded-suffix restore with the existing execution-safe remediation state machine while intentionally leaving bootstrap on the older service until this integration increment.
