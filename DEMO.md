@@ -1,199 +1,178 @@
-# StageGuard — 3-Minute Judge Demo
+# StageGuard — Local Demo + 3-Minute Recording Runbook
 
-## Demo objective
+StageGuard is an incident commander for live media operations. Grafana is the runtime evidence plane; the deterministic safety core diagnoses bounded failure hypotheses, requires explicit human approval for remediation, and returns to Grafana telemetry before it declares recovery. Gemini is an optional, revision-bound operator briefing layer and has no remediation authority.
 
-Prove, visibly and quickly, that StageGuard is not a chatbot and not a Grafana dashboard wrapper. The demo must show a real media-production incident, genuine Grafana MCP tool use, bounded agentic action, human control, and telemetry-based verification.
+## Fastest reliable local start
 
-## Narrative
+Prerequisites: Python 3.11+ and Docker with the Compose plugin.
 
-**One-line pitch:** StageGuard is an autonomous incident commander for live media production: it uses Grafana to understand what broke, Gemini to decide what to do, and Grafana again to prove the fix worked.
+From the repository root:
 
-## Primary scenario
+```bash
+python scripts/demo_local.py demo --open
+```
 
-A three-camera live broadcast is healthy. Camera 3 is routed through uplink B. A deterministic fault injector increases packet loss on uplink B, which causes frame drops on Camera 3 while the encoder itself remains healthy.
+That one command:
 
-The correct diagnosis is **network uplink degradation**, not encoder overload.
+1. starts the deterministic broadcast simulator, Prometheus, and Grafana;
+2. resets the broadcast to a healthy baseline;
+3. creates/reuses a short-lived **Viewer** Grafana service-account token locally;
+4. executes the official `grafana/mcp-grafana` read-only Prometheus smoke query;
+5. starts the StageGuard API + same-origin operator cockpit with an HMAC-authenticated local checkpoint;
+6. writes `.stageguard/demo/readiness.json`;
+7. waits for you to press Enter before injecting the visible `uplink-b` fault.
 
-The correct bounded action is **reroute Camera 3 to uplink A**, requiring operator approval.
+Useful commands:
 
-The incident is resolved only after Grafana telemetry shows frame drops and packet loss recovering.
+```bash
+python scripts/demo_local.py up --fresh --open
+python scripts/demo_local.py fault
+python scripts/demo_local.py reset
+python scripts/demo_local.py status
+python scripts/demo_local.py stop
+```
 
-## Timeline
+Enable the optional Vertex AI Gemini briefing only when its environment/ADC configuration is already valid:
 
-### 0:00–0:15 — Establish stakes
+```bash
+python scripts/demo_local.py demo --gemini --open
+```
 
-Show the live production console:
+Do **not** turn Gemini on five minutes before recording if the credential path has not already been tested. The deterministic Grafana → diagnosis → approval → remediation → Grafana verification loop works without it.
 
-- Camera 1 healthy
-- Camera 2 healthy
-- Camera 3 healthy
-- broadcast output healthy
+### Demo URLs
 
-Narration: “When a live production fails, operators have minutes—or seconds—to correlate alerts, metrics, logs and dependencies while viewers are already seeing the outage.”
+- Operator cockpit: `http://127.0.0.1:9110/console`
+- Grafana: `http://127.0.0.1:3000` (`admin` / `stageguard-local-only`, local demo only)
+- Prometheus: `http://127.0.0.1:9090`
+- Simulator state: `http://127.0.0.1:9108/state`
+- StageGuard API log: `.stageguard/demo/stageguard-api.log`
+- Demo readiness report: `.stageguard/demo/readiness.json`
 
-### 0:15–0:30 — Trigger failure
+Generated state and secrets are under gitignored `.stageguard/` / `runtime/.secrets/` paths. The script does not create or use production credentials.
 
-Inject uplink-B degradation.
+## What must be visible in the recording
 
-Visible effects:
+The goal is not to show a chatbot. Show this closed loop:
 
-- Camera 3 health turns degraded
-- frame-drop metric rises
-- Grafana alert appears
+`broadcast fault → Grafana evidence → bounded diagnosis → human approval → safe action → Grafana recovery proof`
 
-Do not explain the cause yet.
+The official Grafana MCP query must be real. The action endpoint returning HTTP 200 is **not** sufficient evidence of recovery.
 
-### 0:30–1:15 — Agent investigation
+## Recommended 3-minute sequence
 
-StageGuard begins automatically.
+### 0:00–0:15 — Stakes + healthy system
 
-The UI should expose concise tool/evidence steps rather than hidden chain-of-thought:
-
-1. alert inspected
-2. Camera 3 dropped-frame metric confirmed
-3. peer feeds compared
-4. encoder resource telemetry checked
-5. uplink packet-loss telemetry checked
-6. relevant logs/traces checked if available
-
-Then show the structured conclusion:
-
-- **Root cause:** uplink B packet loss
-- **Confidence:** high
-- **Blast radius:** Camera 3 only
-- **Why not encoder:** CPU/GPU normal
-- **Evidence:** linked Grafana observations/deeplinks
-
-This section proves actual sponsor integration.
-
-### 1:15–1:40 — Safe agency
-
-StageGuard proposes:
-
-> Reroute Camera 3 from uplink B to uplink A.
-
-Show:
-
-- action risk tier
-- expected impact
-- explicit **Approve** / **Reject** controls
-
-Operator approves.
-
-The agent invokes only the allowlisted remediation adapter.
-
-### 1:40–2:05 — Verification
-
-The adapter reports completion, but StageGuard does **not** declare success yet.
-
-It returns to Grafana MCP and checks:
-
-- uplink assignment / relevant state
-- Camera 3 frame-drop rate
-- packet-loss exposure
-- output health
-
-Only then show:
-
-**Incident resolved — recovery verified by telemetry.**
-
-This is the defining agentic loop: **observe → reason → act → verify**.
-
-### 2:05–2:30 — Product credibility
-
-Show the incident evidence trail:
-
-- timestamps
-- Grafana evidence links
-- action approval
-- remediation result
-- verification
-
-Then briefly show onboarding/safety controls:
-
-- connect Grafana
-- select dashboards/data sources
-- map labels
-- choose allowed actions
-- investigation-only vs controlled-autonomy mode
-
-### 2:30–2:50 — Sponsor reveal
-
-Show Grafana MCP / Agent Observability view if implemented:
-
-- tool calls
-- latency
-- MCP health
-- agent trace/cost information where available
+Show the StageGuard cockpit and Grafana.
 
 Narration:
 
-“Grafana gives StageGuard eyes into the production. And Grafana gives operators eyes into StageGuard.”
+> “A live broadcast can lose viewers in seconds. StageGuard gives the production an incident commander that investigates through Grafana, keeps humans in control of consequential actions, and verifies the recovery from telemetry.”
 
-### 2:50–3:00 — Close
+Keep Camera 1/2/3 healthy at the start.
+
+### 0:15–0:30 — Inject the failure
+
+In the terminal running `demo_local.py`, press Enter.
+
+The deterministic simulator creates:
+
+- `uplink-b` packet loss at 18%;
+- Camera 3 frame drops;
+- normal Camera 3 encoder CPU/GPU;
+- healthy peer cameras/uplink.
+
+Show Grafana changing. Do not announce the root cause yet.
+
+### 0:30–1:15 — Investigate through Grafana
+
+In the cockpit click **Investigate**.
+
+StageGuard executes the fixed six-query evidence contract through the official Grafana MCP path and should conclude:
+
+- status: **diagnosed**;
+- hypothesis: **uplink-b packet loss**;
+- affected feed: **cam-3**;
+- encoder CPU/GPU are normal;
+- peer uplink/feed evidence is healthy.
+
+Show the structured evidence and revision. Do not expose chain-of-thought; the evidence itself is the proof.
+
+If Gemini is already configured, request the revision-bound briefing here. Frame it as operator communication, not the safety authority.
+
+### 1:15–1:45 — Human-controlled action
+
+Show the proposed `recover_uplink` action and the exact evidence revision.
+
+Type/confirm the revision and explicitly approve it. Then execute.
+
+Narration:
+
+> “The model cannot directly execute infrastructure changes. Approval is single-use and bound to the evidence revision.”
+
+### 1:45–2:20 — Prove recovery
+
+The simulator action stops the uplink fault, but StageGuard keeps the incident open until telemetry is healthy.
+
+Recovery uses:
+
+- current `uplink-b` packet loss; and
+- a short 15-second dropped-frame-rate window suitable for bounded live-production verification.
+
+Require consecutive healthy samples before showing **recovered**.
+
+Keep Grafana visible during this section.
+
+### 2:20–2:45 — Product credibility
+
+Briefly show:
+
+- the incident audit/timeline;
+- approval provenance;
+- recovery samples;
+- `/metrics` or the bounded runtime health indicators if useful.
+
+One sentence is enough for the deeper safety work:
+
+> “StageGuard also persists authenticated incident state and fails closed on multi-instance checkpoint or ambiguous execution races, but the operator flow stays simple.”
+
+Do not spend the demo explaining retention internals.
+
+### 2:45–3:00 — Close
+
+Show this architecture strip:
+
+`Live Production → Grafana → Grafana MCP → StageGuard → Human-approved Action → Grafana Verification`
 
 Final line:
 
-> **StageGuard doesn't generate the show. It keeps the show on air.**
+> **“StageGuard doesn't generate the show. It keeps the show on air.”**
 
-Show architecture strip:
+## Recording checklist
 
-`Live Production → Grafana → Grafana MCP → Gemini Agent → Human-approved Action → Grafana Verification`
+Before recording, all of these should be true:
 
-## Minimum proof required before recording
+- `python scripts/demo_local.py status` shows simulator, Prometheus, Grafana, and StageGuard API healthy;
+- `.stageguard/demo/readiness.json` has `grafana_mcp_read_only_query: true`;
+- the simulator is healthy before the take;
+- one test fault produces a `diagnosed` result;
+- approval + execute reaches `recovered` within the bounded verification loop;
+- the cockpit can be reset/restarted for a second take;
+- no terminal window shows credentials or token files.
 
-Do not record a fake-looking demo. The following must be real in the permitted implementation:
-
-- actual Gemini/Google agent runtime call path
-- actual official Grafana MCP connection
-- actual Grafana telemetry query through MCP
-- deterministic fault reflected in Grafana
-- root-cause output grounded in retrieved evidence
-- action approval interaction
-- real invocation of safe demo remediation adapter
-- post-action Grafana query demonstrating recovery
-
-## Nice-to-have proof
-
-- logs plus metrics instead of metrics only
-- Tempo trace evidence
-- Grafana Incident/annotation update
-- rendered panel evidence
-- Grafana MCP/agent observability
-- second failure scenario available for judges to test
-
-## Judge mapping
-
-### Technological Implementation
-
-Show that both Google Cloud and Grafana are active runtime dependencies, with a multi-step workflow and verification loop.
-
-### Design
-
-Use an incident cockpit rather than generic chat. Make evidence, approval and current state visually obvious.
-
-### Potential Impact
-
-Frame the user as live broadcast / streaming operations teams where downtime has immediate audience and revenue consequences.
-
-### Quality of Idea
-
-The non-obvious element is applying agentic observability to **live production operations**, with Grafana as both the production evidence plane and the agent-observability plane.
-
-## Demo anti-patterns
-
-Avoid:
-
-- spending 30+ seconds on slides before showing the product
-- a prewritten “AI diagnosis” without visible MCP evidence
-- claiming a fix worked solely because an action endpoint returned 200
-- long chat exchanges
-- too many failure types
-- showing destructive/unbounded autonomy
-- emphasizing AI Observability while failing to show the required Grafana MCP runtime integration
+If the first full rehearsal does not pass, fix **only the blocker in this path**. Do not add more architecture/security features before recording.
 
 ## Backup plan
 
-The hosted demo should have a **Reset Scenario** action that deterministically returns the synthetic production to healthy state, then allows the same failure to be injected again. This is essential for reliable judging.
+If optional Gemini/Vertex credentials are unavailable, record the deterministic Grafana MCP workflow without Gemini. Do not fake a model call.
 
-If any optional service is unavailable during recording, the core flow must still work using metrics + Grafana MCP + safe remediation + verification.
+If a remote deployment is unavailable, record the local Docker stack. The strongest proof is the real official Grafana MCP query and the complete observe → diagnose → approve → act → verify loop, not the hosting location.
+
+If a recording attempt gets into a bad state:
+
+```bash
+python scripts/demo_local.py stop
+python scripts/demo_local.py demo --open
+```
+
+The `demo` command starts from fresh StageGuard demo state and resets the simulated broadcast to healthy before fault injection.

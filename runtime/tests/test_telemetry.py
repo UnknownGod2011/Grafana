@@ -77,6 +77,11 @@ class TelemetryProfileTests(unittest.TestCase):
         self.assertEqual({"packet_loss", "dropped_frames"}, set(queries))
         self.assertEqual(2, len(queries))
 
+    def test_recovery_uses_short_rate_window_for_bounded_live_verification(self):
+        query = recovery_queries(self.custom_profile())["dropped_frames"][0]
+        self.assertIn("[15s]", query)
+        self.assertNotIn("[2m]", query)
+
     def test_missing_mapped_evidence_still_abstains(self):
         profile = self.custom_profile()
         queries = investigation_queries(profile)

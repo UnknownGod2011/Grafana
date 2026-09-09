@@ -72,7 +72,12 @@ def recovery_queries(profile: TelemetryProfile) -> dict[str, tuple[str, float]]:
     pl, fl, ul = profile.production_label, profile.feed_label, profile.uplink_label
     return {
         "packet_loss": (f'{profile.packet_loss_metric}{{{pl}="{p}",{ul}="{uplink}"}}', 1.0),
-        "dropped_frames": (f'rate({profile.dropped_frames_metric}{{{pl}="{p}",{fl}="{feed}"}}[2m])', 1.0),
+        # Recovery needs a deliberately short observation window: a 2-minute
+        # rate window can remain elevated long after a successful live-broadcast
+        # remediation and exceed the bounded 25-second verification loop. The
+        # 15-second window still requires multiple 2-second Prometheus scrapes
+        # while allowing the post-action evidence to converge during the demo.
+        "dropped_frames": (f'rate({profile.dropped_frames_metric}{{{pl}="{p}",{fl}="{feed}"}}[15s])', 1.0),
     }
 
 
