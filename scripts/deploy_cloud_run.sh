@@ -35,7 +35,21 @@ case "${ENABLE_GEMINI,,}" in
   *) echo "ENABLE_GEMINI must be true or false" >&2; exit 2 ;;
 esac
 
-ENV_VARS="STAGEGUARD_TELEMETRY_CONFIG=/config/telemetry.json,STAGEGUARD_METRIC_ACTIVATION=/config/activation.json,STAGEGUARD_LOG_ACTIVATION=/config/log-activation.json,STAGEGUARD_IAP_AUDIENCE=${IAP_AUDIENCE},STAGEGUARD_ENABLE_GEMINI=${ENABLE_GEMINI},GRAFANA_URL=${GRAFANA_URL},GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token"
+# GoogleGenAICommanderModel requires GOOGLE_CLOUD_PROJECT explicitly. Cloud Run
+# does not guarantee that application-specific variable, so always forward the
+# deployment project. Location/model are optional operator overrides with safe
+# defaults matching runtime/gemini_commander.py.
+GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-global}"
+STAGEGUARD_GEMINI_MODEL="${STAGEGUARD_GEMINI_MODEL:-gemini-2.5-flash}"
+for name in GOOGLE_CLOUD_LOCATION STAGEGUARD_GEMINI_MODEL; do
+  value="${!name}"
+  if [[ -z "${value}" || "${value}" == *","* || "${value}" =~ [[:space:]] ]]; then
+    echo "${name} must be a non-empty value without commas or whitespace" >&2
+    exit 2
+  fi
+done
+
+ENV_VARS="STAGEGUARD_TELEMETRY_CONFIG=/config/telemetry.json,STAGEGUARD_METRIC_ACTIVATION=/config/activation.json,STAGEGUARD_LOG_ACTIVATION=/config/log-activation.json,STAGEGUARD_IAP_AUDIENCE=${IAP_AUDIENCE},STAGEGUARD_ENABLE_GEMINI=${ENABLE_GEMINI},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION},STAGEGUARD_GEMINI_MODEL=${STAGEGUARD_GEMINI_MODEL},GRAFANA_URL=${GRAFANA_URL},GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token"
 SECRETS="/config/telemetry.json=${TELEMETRY_SECRET}:latest,/config/activation.json=${METRIC_ACTIVATION_SECRET}:latest,/config/log-activation.json=${LOG_ACTIVATION_SECRET}:latest,/secrets/grafana-token=${GRAFANA_TOKEN_SECRET}:latest"
 
 gcloud run deploy "${SERVICE_NAME}" \
