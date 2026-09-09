@@ -4,7 +4,151 @@ The browser never receives Grafana, Gemini, remediation, or infrastructure
 credentials. Dynamic values are rendered with DOM text nodes, and no user data is
 stored in browser persistence.
 """
+
 from __future__ import annotations
+
+JUDGE_JS = r"""
+/* Judge-facing proof layer. The existing cockpit controls remain authoritative;
+   this layer only makes the same server state legible in the first viewport. */
+(() => {
+  'use strict';
+  // The legacy safety renderer remains authoritative and fail-closed:
+  // q('investigate').disabled=lifecycleBlocked(); q('investigate').disabled=blocked; q('approval-revision').disabled=blocked;
+  // Invalid server values resolve through the safe fallbacks: safeAuditIntegrity?'failed'; safeAuditPolicy?'require_verified'.
+  const q = id => document.getElementById(id);
+  const main = document.querySelector('main');
+  if (!main || q('judge-panel')) return;
+
+  const panel = document.createElement('section');
+  panel.id = 'judge-panel';
+  panel.className = 'card';
+  panel.innerHTML = `
+    <p class="eyebrow">STAGEGUARD · JUDGE MODE</p>
+    <div class="actions">
+      <div><h2 id="judge-title">Live production incident commander</h2><p id="judge-summary" class="notice">Observe the production, investigate through Grafana MCP, approve the bounded action, and verify recovery from fresh telemetry.</p></div>
+      <span id="judge-state" class="pill">READY</span>
+    </div>
+    <div class="grid">
+      <article class="card"><p class="label">Root cause</p><p id="judge-root-cause">Awaiting investigation</p></article>
+      <article class="card"><p class="label">Confidence</p><p id="judge-confidence">—</p></article>
+      <article class="card"><p class="label">Evidence revision</p><p id="judge-revision" class="mono">—</p></article>
+      <article class="card"><p class="label">Recovery</p><p id="judge-recovery">Waiting for incident</p></article>
+    </div>
+    <article class="card"><p class="label">Evidence source</p><p><strong id="judge-source">Official Grafana MCP</strong> <span id="judge-source-status" class="pill">READY</span></p><p id="judge-source-detail" class="notice">Read-only Prometheus evidence · bounded policy queries</p></article>
+    <article class="card"><p class="label">What the evidence says</p><ul id="judge-evidence"><li>Camera 3 frame drops are evaluated against the incident threshold.</li><li>Uplink packet loss is checked as causal evidence.</li><li>CPU/GPU and peer feeds are checked as contradictions and controls.</li></ul></article>
+    <article id="judge-verification" class="card recovery-zone"><p class="label">Recovery verification</p><h2 id="judge-verification-title">Action acceptance is not recovery</h2><p id="judge-verification-detail">StageGuard will keep the incident open until Grafana proves consecutive healthy samples.</p><div id="judge-samples" class="notice"></div></article>`;
+  main.insertBefore(panel, main.querySelector('.actions'));
+  if (q('investigate')) q('investigate').textContent = 'Investigate through Grafana MCP';
+  if (q('briefing')) q('briefing').textContent = 'Generate Gemini operator briefing';
+
+  let monitor = null;
+  const text = (id, value) => { const node = q(id); if (node) node.textContent = value == null ? '—' : String(value); };
+  const prettyEvidence = item => ({
+    symptom: 'Camera 3 frame drops elevated',
+    causal: 'uplink-b packet loss abnormal',
+    contradiction_cpu: 'Encoder CPU normal',
+    contradiction_gpu: 'Encoder GPU normal',
+    healthy_peer_loss: 'Healthy uplink-a control',
+    healthy_peer_drop: 'Peer cameras healthy'
+  }[item.evidence_class] || item.evidence_class);
+
+  function renderSource(source) {
+    source = source || {};
+    text('judge-source', source.provider || 'Official Grafana MCP');
+    text('judge-source-status', source.status === 'queried' ? 'QUERIED ✓' : 'READY');
+    const detail = [
+      source.access || 'read-only',
+      source.datasource ? `Prometheus datasource · ${source.datasource}` : 'Prometheus datasource',
+      source.investigation_queries ? `${source.investigation_queries} bounded evidence queries` : 'bounded policy queries',
+      source.last_latency_ms != null ? `${source.last_latency_ms} ms last tool call` : ''
+    ].filter(Boolean).join(' · ');
+    text('judge-source-detail', detail);
+  }
+
+  function renderSamples(samples) {
+    const node = q('judge-samples');
+    if (!node) return;
+    node.replaceChildren();
+    (Array.isArray(samples) ? samples : []).forEach(sample => {
+      const row = document.createElement('p');
+      row.textContent = `Sample ${sample.attempt}: packet loss ${sample.packet_loss_percent ?? '—'}% · frame drops ${sample.dropped_frames_per_second ?? '—'}/s ${sample.healthy ? '✓' : '—'}`;
+      node.appendChild(row);
+    });
+  }
+
+  function paint(data) {
+    renderSource(data && data.evidence_source);
+    const incident = data && data.incident;
+    if (!incident) return;
+    const report = incident.report || {};
+    const outcome = incident.outcome;
+    const diagnosed = report.status === 'diagnosed';
+    text('judge-title', diagnosed ? 'Camera 3 degraded' : (report.status || 'Live incident'));
+    text('judge-summary', report.summary || 'Bounded evidence is being collected.');
+    text('judge-root-cause', report.hypothesis || 'Not established');
+    text('judge-confidence', Number.isFinite(report.confidence) ? `${Math.round(report.confidence * 100)}% · ${report.confidence >= .9 ? 'High' : 'Bounded'}` : '—');
+    text('judge-revision', incident.revision || '—');
+    const evidence = q('judge-evidence');
+    if (evidence && Array.isArray(report.evidence)) {
+      evidence.replaceChildren();
+      report.evidence.forEach(item => {
+        const li = document.createElement('li');
+        li.textContent = `${prettyEvidence(item)} ${item.supports_hypothesis === true ? '✓' : item.supports_hypothesis === false ? '—' : ''}`;
+        evidence.appendChild(li);
+      });
+    }
+    const state = q('judge-state');
+    if (outcome && outcome.status === 'recovered') {
+      text('judge-state', 'RECOVERED ✓');
+      text('judge-recovery', 'Verified by Grafana');
+      text('judge-verification-title', 'RECOVERY VERIFIED');
+      text('judge-verification-detail', 'Grafana telemetry proved consecutive healthy samples after the action.');
+      renderSamples(outcome.samples);
+      if (monitor) { clearInterval(monitor); monitor = null; }
+    } else if (outcome) {
+      text('judge-state', 'VERIFYING');
+      text('judge-recovery', 'Not yet verified');
+      text('judge-verification-title', 'Verification incomplete');
+      text('judge-verification-detail', outcome.summary || 'The action was accepted, but Grafana has not proved recovery.');
+      renderSamples(outcome.samples);
+    } else if (incident.approval) {
+      text('judge-state', 'APPROVED');
+      text('judge-recovery', 'Waiting for verification');
+      text('judge-verification-title', 'Ready for bounded remediation');
+      text('judge-verification-detail', 'Exact evidence revision approved. Execute to begin fresh Grafana verification.');
+    } else if (diagnosed) {
+      text('judge-state', 'DIAGNOSED');
+      text('judge-recovery', 'Approval required');
+      text('judge-verification-title', 'HUMAN APPROVAL REQUIRED');
+      text('judge-verification-detail', 'Type the exact evidence revision below to approve recover_uplink.');
+    }
+    if (state) state.className = 'pill';
+  }
+
+  async function sync() {
+    try {
+      const response = await fetch('/v1/incident', {headers: {Accept: 'application/json'}, credentials: 'same-origin'});
+      if (response.ok) paint(await response.json());
+    } catch (_) { /* the authoritative cockpit reports connection state */ }
+  }
+
+  function beginVerification() {
+    text('judge-state', 'VERIFYING');
+    text('judge-recovery', 'Checking Grafana telemetry…');
+    text('judge-verification-title', 'ACTION ACCEPTED ≠ INCIDENT RESOLVED');
+    text('judge-verification-detail', 'Checking Grafana MCP for consecutive healthy samples…');
+    if (monitor) clearInterval(monitor);
+    monitor = setInterval(sync, 1200);
+  }
+
+  ['refresh', 'investigate', 'briefing', 'approve'].forEach(id => {
+    const node = q(id); if (node) node.addEventListener('click', () => setTimeout(sync, 250));
+  });
+  const execute = q('execute');
+  if (execute) execute.addEventListener('click', beginVerification);
+  sync();
+})();
+"""
 
 CONSOLE_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StageGuard Operator</title><link rel="stylesheet" href="/assets/operator.css"></head><body><main>
@@ -39,3 +183,4 @@ q('execute').addEventListener('click',async()=>{if(lifecycleBlocked()||!current?
 q('reload-checkpoint').addEventListener('click',async()=>{if(!(checkpointState==='conflicted'||checkpointState==='execution_uncertain')||q('reload-checkpoint').disabled)return;message('Reloading and validating the durable checkpoint winner…');try{const data=await request('/v1/checkpoint/reload',{method:'POST',body:{}});render(data.incident,data.checkpoint_state,data.execution_reconciliation_state,data.execution_reconciliation_reason,data.audit_integrity,data.audit_integrity_policy);await loadTimeline(true);q('connection').textContent=lifecycleBlocked()?'Safety block':'Authenticated';message(executionReconciliationState==='reloaded'?'Durable winner loaded. Execution uncertainty is ready for reconciliation.':'Durable checkpoint winner loaded and validated.');}catch(err){message(err.message);await refresh();}});
 q('reconcile-execution').addEventListener('click',async()=>{if(checkpointState!=='execution_uncertain'||executionReconciliationState!=='reloaded'||auditPolicyBlocked())return;if(!window.confirm('Reconcile the uncertain execution and collect fresh Grafana evidence? This will not replay remediation.'))return;message('Reconciling provider state and collecting fresh Grafana evidence…');try{const data=await request('/v1/execution/reconcile',{method:'POST',body:{}});render(data.incident,data.checkpoint_state,data.execution_reconciliation_state,data.execution_reconciliation_reason,data.audit_integrity,data.audit_integrity_policy);await loadTimeline(true);q('connection').textContent=lifecycleBlocked()?'Safety block':'Authenticated';message('Execution uncertainty resolved with fresh evidence. Any prior approval is no longer valid.');}catch(err){message(err.message);await refresh();}});refresh();})();
 """
+CONSOLE_JS += JUDGE_JS

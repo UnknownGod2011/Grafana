@@ -119,7 +119,11 @@ class RetentionExecutorTests(unittest.TestCase):
         self.assertEqual(lines[2] + lines[3], path.read_bytes())
         backup = Path(result.backup_path)
         self.assertEqual(original, backup.read_bytes())
-        self.assertEqual(0o600, backup.stat().st_mode & 0o777)
+        if os.name != "nt":
+            # Windows exposes ACL-backed permissions rather than POSIX mode
+            # bits through stat(); the implementation still applies its
+            # owner-only intent where the platform supports these bits.
+            self.assertEqual(0o600, backup.stat().st_mode & 0o777)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), result.output_sha256)
 
     def test_execution_refuses_checkpoint_drift_without_modifying_audit(self):

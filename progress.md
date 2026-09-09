@@ -88,4 +88,12 @@ Any remaining blocker: Start Docker Desktop on a judge-capable machine, run the 
 - Fixed Windows checkpoint persistence: `JsonCheckpointStore` and `SignedJsonCheckpointStore` no longer call unavailable `os.fchmod` while holding an open temporary descriptor.
 - Fixed Windows retention persistence: temporary audit output now closes cleanly before cleanup, backup durability uses a writable descriptor, and directory fsync is skipped where Windows cannot open directory descriptors.
 - Verification: checkpoint schema, incident checkpoint, retention planner, and focused incident/Gemini/MCP/remediation tests were rerun; the core focused suite is green with 35/35 passing.
-- Full suite after portability fixes: 352 tests, 12 failures, 17 errors, 19 skipped. Remaining failures are contract/platform-specific outside the demo path; no claim of full-suite green.
+- Full suite after portability fixes: 352 tests, 9 failures, 15 errors, 19 skipped. Remaining failures are contract/platform-specific outside the demo path; no claim of full-suite green.
+
+## Final judge-facing pass — 2026-09-09
+
+- Added a judge-first README opening with the closed-loop story, architecture diagram, 60-second architecture, and release runner command.
+- Added a judge-facing presentation layer to the existing cockpit. It surfaces Camera 3 degradation, uplink-b root cause, confidence, evidence revision, evidence labels, human approval, and the `ACTION ACCEPTED ≠ INCIDENT RESOLVED` verification transition.
+- Added bounded `evidence_source` metadata to lifecycle responses: Grafana MCP provider, read-only access, Prometheus datasource UID, investigation query count, recovery sample count, and last tool latency. Raw queries and secrets remain excluded.
+- Focused judge/core/API/UI suite: 81/81 passed. Full suite: 352 tests, 9 failures, 15 errors, 19 skipped.
+- Created `FINAL_RELEASE_REPORT.md` with the current readiness status and criterion-to-proof matrix. Architecture is frozen after this pass.

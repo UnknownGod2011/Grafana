@@ -1,10 +1,48 @@
 # StageGuard
 
-**Production-oriented Gemini/Google Cloud incident commander for live media workflows, with Grafana as the operational evidence plane.**
+**An agentic incident commander for live media production.**
 
-StageGuard is a personal open-source project. It investigates live-production failures through the official Grafana MCP server, correlates bounded Prometheus and Loki evidence, requires trusted human authorization for consequential remediation, verifies recovery from telemetry, preserves an incident audit trail, and can optionally use Gemini only for bounded operator communication above the deterministic safety core.
+StageGuard uses Grafana and the official Grafana MCP to investigate live production incidents, uses Gemini to brief operators, requires revision-bound human approval for consequential actions, and returns to Grafana telemetry to independently verify recovery.
 
-> Grafana gives the agent trustworthy operational evidence; StageGuard turns that evidence into bounded decisions and actions; Grafana then proves whether recovery actually happened.
+**Observe → Diagnose → Approve → Act → Verify**
+
+> Grafana is used twice: first to understand what failed, then to prove whether recovery actually happened. An action response is never treated as recovery.
+
+![StageGuard architecture](docs/stageguard-architecture.svg)
+
+## 60-second architecture
+
+```text
+Live Production Simulator
+        ↓
+Prometheus / Loki
+        ↓
+Grafana
+        ↓
+Official Grafana MCP (read-only)
+        ↓
+StageGuard evidence-grounded investigation
+        ↓
+Gemini operator briefing (advisory)
+        ↓
+Exact human approval
+        ↓
+Bounded remediation adapter
+        ↓
+Grafana telemetry verification
+```
+
+## Run the demo
+
+On a Docker-capable machine:
+
+```bash
+python scripts/demo_release.py --open
+```
+
+The deterministic `broadcast-alpha` scenario starts healthy, injects packet loss on `uplink-b`, produces frame drops on `cam-3`, proves the official Grafana MCP read path, and leaves the operator at: **Investigate → Brief → Approve exact revision → Execute → Verify**.
+
+See [DEMO.md](DEMO.md) for the recording sequence and [OPERATOR_CONSOLE.md](OPERATOR_CONSOLE.md) for the cockpit controls.
 
 ## Current executable vertical slice
 
