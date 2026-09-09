@@ -46,7 +46,12 @@ Optional Gemini advisory briefings remain explicit:
 
 ```text
 STAGEGUARD_ENABLE_GEMINI=true
+GOOGLE_CLOUD_PROJECT=<project-id>
+GOOGLE_CLOUD_LOCATION=global
+STAGEGUARD_GEMINI_MODEL=gemini-2.5-flash
 ```
+
+`scripts/deploy_cloud_run.sh` always forwards `GOOGLE_CLOUD_PROJECT=${PROJECT_ID}` because the Vertex adapter requires that value explicitly. `GOOGLE_CLOUD_LOCATION` and `STAGEGUARD_GEMINI_MODEL` are optional operator overrides; the deploy helper defaults them to `global` and `gemini-2.5-flash`, matching the runtime adapter. The helper rejects commas/whitespace in those two values before composing Cloud Run's comma-delimited environment list.
 
 No corresponding `STAGEGUARD_ENABLE_REMEDIATION` variable exists in the standard Cloud Run entrypoint.
 
@@ -60,7 +65,9 @@ Set `STAGEGUARD_IAP_AUDIENCE` to the exact audience emitted by the IAP configura
 
 The Cloud Run artifact fixes `--audit-backend cloud-logging`. `GoogleCloudLoggingAuditSink` writes one bounded structured entry per lifecycle event and rejects credential-, secret-, token-, endpoint-, prompt-, PromQL-, LogQL-, and raw-log-shaped fields. Existing small remediation metadata remains supported for alternate explicitly write-enabled deployments.
 
-Cloud Logging should use the Cloud Run service account through Application Default Credentials. Grant only the minimum logging writer permission needed. For stronger retention controls, route the dedicated `stageguard-audit` log to an organization-approved retained/locked destination. StageGuard does not claim ordinary Cloud Logging storage is immutable.
+StageGuard also constructs a narrow `GoogleCloudAuditReader` in production so restart/reconciliation logic can read the dedicated `stageguard-audit` entries for one incident. The runtime service account therefore needs both the ability to create log entries and to list the StageGuard audit entries it must reconcile. The underlying permissions are `logging.logEntries.create` and `logging.logEntries.list`. Google documents `roles/logging.logWriter` for write access and `roles/logging.viewer` as a predefined role containing ordinary log-entry read access; a custom role can be narrower if your organization requires it. Do not grant private-log access unless StageGuard is intentionally moved to a log class that requires it.
+
+Cloud Logging should use the Cloud Run service account through Application Default Credentials. For stronger retention controls, route the dedicated `stageguard-audit` log to an organization-approved retained/locked destination. StageGuard does not claim ordinary Cloud Logging storage is immutable.
 
 ## Deployment helper
 
@@ -81,7 +88,7 @@ LOG_ACTIVATION_SECRET
 GRAFANA_TOKEN_SECRET
 ```
 
-The four file values are mounted from Secret Manager to `/config/...` and `/secrets/grafana-token`; secret contents are not placed directly on the command line. `ENABLE_GEMINI=true` is optional.
+The four file values are mounted from Secret Manager to `/config/...` and `/secrets/grafana-token`; secret contents are not placed directly on the command line. `ENABLE_GEMINI=true` is optional. `GOOGLE_CLOUD_LOCATION` and `STAGEGUARD_GEMINI_MODEL` are optional Gemini overrides.
 
 Example invocation after populating those environment variables:
 
@@ -91,7 +98,14 @@ bash scripts/deploy_cloud_run.sh
 
 The helper uses Google's current direct-IAP Cloud Run flow: `gcloud run deploy ... --no-allow-unauthenticated --iap` and then grants `roles/run.invoker` to the project IAP service agent. Operator access (`roles/iap.httpsResourceAccessor`) remains an explicit administrator decision and is not granted automatically by the script.
 
-Before using the helper, grant the runtime service account only the permissions it actually needs: Secret Manager access for the mounted configuration/token secrets, Cloud Logging write, and Vertex AI access only if Gemini is enabled.
+Before using the helper, grant the runtime service account only the permissions it actually needs:
+
+- `secretmanager.versions.access` on each mounted Secret Manager secret;
+- `logging.logEntries.create` for durable lifecycle writes;
+- `logging.logEntries.list` for restart-safe lifecycle reconciliation;
+- Vertex AI prompt permission only if Gemini is enabled.
+
+The deployment doctor verifies secret access without reading payloads. Logging and Vertex effective-permission checks are the next production-preflight hardening step and should be validated against a disposable project before they become deployment gates.
 
 ## Health and readiness
 
@@ -132,7 +146,9 @@ Cloud Run requires the ingress container to bind to `0.0.0.0` on the injected `P
 - Missing Grafana MCP binary: `/readyz` returns `503`; no Docker fallback occurs in Cloud Run.
 - Expired or drifted metric/Loki activation: `/readyz` returns `503` even if the process remains live.
 - Grafana auth/network/organization failure or inaccessible pinned datasource: `/readyz` returns `503` without exposing the provider error.
-- Missing Gemini credentials: irrelevant unless Gemini was explicitly enabled.
+- Missing `logging.logEntries.create`: durable audit appends fail.
+- Missing `logging.logEntries.list`: restart/reconciliation audit reads fail.
+- Missing Gemini project/credentials/Vertex permission: irrelevant unless Gemini was explicitly enabled; with Gemini enabled the advisory layer cannot initialize or call the model until corrected.
 - Missing remediation credentials: irrelevant because the standard Cloud Run artifact cannot enable remediation through environment configuration.
 
 ## Local validation
@@ -170,4 +186,7 @@ curl -i http://127.0.0.1:8080/readyz
 - Google Cloud Run container contract: https://cloud.google.com/run/docs/container-contract
 - Direct IAP for Cloud Run: https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run
 - IAP signed-header verification: https://cloud.google.com/iap/docs/signed-headers-howto
-- Cloud Logging Python: https://cloud.google.com/logging/docs/write-query-log-entries-python
+- IAM Policy Troubleshooter: https://cloud.google.com/policy-intelligence/docs/troubleshoot-access
+- Cloud Logging entries.write (`logging.logEntries.create`): https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/write
+- Cloud Logging IAM roles/permissions (`logging.logEntries.list`): https://cloud.google.com/iam/docs/roles-permissions/logging
+- Vertex AI generative access control (`aiplatform.endpoints.predict`): https://cloud.google.com/vertex-ai/generative-ai/docs/access-control
