@@ -32,6 +32,15 @@ class SmokePlan:
     execute: bool
 
 
+class SmokeExecutionError(RuntimeError):
+    """Safe operator-facing failure that records whether inference was attempted."""
+
+    def __init__(self, code: str, message: str, *, request_started: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.request_started = request_started
+
+
 def _resolve_plan(args: argparse.Namespace) -> SmokePlan:
     project = (args.project or os.getenv("GOOGLE_CLOUD_PROJECT", "")).strip()
     location = (args.location or os.getenv("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)).strip() or DEFAULT_LOCATION
@@ -54,39 +63,72 @@ def _execute_smoke(plan: SmokePlan) -> dict[str, Any]:
         from google import genai  # type: ignore
         from google.genai import types  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("install google-genai to run the live Gemini acceptance smoke test") from exc
+        raise SmokeExecutionError(
+            "dependency_missing",
+            "install google-genai to run the live Gemini acceptance smoke test",
+            request_started=False,
+        ) from exc
 
-    client = genai.Client(vertexai=True, project=plan.project, location=plan.location)
-    response = client.models.generate_content(
-        model=plan.model,
-        contents=(
-            "Return a JSON object with status set to ok and purpose set to "
-            "stageguard-gemini-acceptance. This is only a connectivity check."
-        ),
-        config=types.GenerateContentConfig(
-            temperature=0,
-            max_output_tokens=48,
-            response_mime_type="application/json",
-            response_schema={
-                "type": "OBJECT",
-                "properties": {
-                    "status": {"type": "STRING", "enum": ["ok"]},
-                    "purpose": {"type": "STRING", "enum": ["stageguard-gemini-acceptance"]},
+    try:
+        client = genai.Client(vertexai=True, project=plan.project, location=plan.location)
+    except Exception as exc:  # noqa: BLE001 - third-party initialization boundary
+        raise SmokeExecutionError(
+            "client_initialization_failed",
+            "Vertex Gemini client initialization failed; verify local ADC and configured project/location",
+            request_started=False,
+        ) from exc
+
+    try:
+        response = client.models.generate_content(
+            model=plan.model,
+            contents=(
+                "Return a JSON object with status set to ok and purpose set to "
+                "stageguard-gemini-acceptance. This is only a connectivity check."
+            ),
+            config=types.GenerateContentConfig(
+                temperature=0,
+                max_output_tokens=48,
+                response_mime_type="application/json",
+                response_schema={
+                    "type": "OBJECT",
+                    "properties": {
+                        "status": {"type": "STRING", "enum": ["ok"]},
+                        "purpose": {"type": "STRING", "enum": ["stageguard-gemini-acceptance"]},
+                    },
+                    "required": ["status", "purpose"],
                 },
-                "required": ["status", "purpose"],
-            },
-        ),
-    )
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - third-party request boundary
+        # Do not echo arbitrary SDK exception text: provider errors can contain identifiers or
+        # transport details that do not belong in CI logs or copied deployment reports.
+        raise SmokeExecutionError(
+            "generate_content_failed",
+            "Gemini generateContent failed; verify ADC, Vertex AI API, model/location, quota, and runtime IAM",
+            request_started=True,
+        ) from exc
 
     text = getattr(response, "text", None)
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Gemini returned no acceptance response")
+        raise SmokeExecutionError(
+            "empty_response",
+            "Gemini returned no acceptance response",
+            request_started=True,
+        )
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("Gemini returned non-JSON acceptance output") from exc
+        raise SmokeExecutionError(
+            "invalid_json",
+            "Gemini returned non-JSON acceptance output",
+            request_started=True,
+        ) from exc
     if payload != {"status": "ok", "purpose": "stageguard-gemini-acceptance"}:
-        raise RuntimeError("Gemini acceptance response did not match the locked smoke schema")
+        raise SmokeExecutionError(
+            "schema_mismatch",
+            "Gemini acceptance response did not match the locked smoke schema",
+            request_started=True,
+        )
 
     return {
         "status": "ok",
@@ -138,18 +180,19 @@ def main(argv: list[str] | None = None) -> int:
     if plan.execute:
         try:
             live = _execute_smoke(plan)
-        except Exception as exc:  # noqa: BLE001 - CLI must fail closed with concise operator output
+        except SmokeExecutionError as exc:
             result = {
                 "status": "failed",
                 "plan": asdict(plan),
-                "request_count": 1,
+                "request_count": 1 if exc.request_started else 0,
                 "state_mutation": False,
-                "error": f"{type(exc).__name__}: {exc}",
+                "error_code": exc.code,
+                "error": str(exc),
             }
             if args.json:
                 print(json.dumps(result, sort_keys=True))
             else:
-                print(f"FAILED: {result['error']}", file=sys.stderr)
+                print(f"FAILED [{exc.code}]: {exc}", file=sys.stderr)
             return 1
         result = {"plan": asdict(plan), **live}
 
