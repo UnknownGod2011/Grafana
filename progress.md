@@ -15,81 +15,120 @@ Core invariants:
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-09 — effective Secret Manager deployment authorization
+## Run log — 2026-09-10 — Cloud Run Vertex runtime contract
 
 ### Inspected at start
 
-Read `progress.md` completely, then inspected `scripts/gcp_deploy_doctor.py` and `runtime/tests/test_gcp_deploy_doctor.py`. The highest-value remaining deployment defect was exactly the previous handoff: the doctor verified that each Secret Manager resource existed, but did not prove that the Cloud Run runtime service account could actually read the mounted secret versions. A deployment could therefore pass preflight and fail at container startup because IAM was incomplete.
+Read `progress.md` completely before choosing work. Inspected the current Google Cloud production boundary in:
+
+- `scripts/gcp_deploy_doctor.py`
+- `scripts/deploy_cloud_run.sh`
+- `runtime/cloudrun_entrypoint.py`
+- `runtime/bootstrap.py`
+- `runtime/gemini_commander.py`
+- `runtime/cloud_audit.py`
+- `runtime/durable_audit_reader.py`
+- `runtime/tests/test_gcp_deploy_doctor.py`
+- `GOOGLE_CLOUD_DEPLOYMENT.md`
+
+The previous best next step requires a disposable authorized Google Cloud project, which is not available in this execution environment. I therefore worked the highest-value unblocked production defect rather than stopping.
+
+### Concrete defect found
+
+`ENABLE_GEMINI=true` was forwarded by the Cloud Run deploy helper, but `GOOGLE_CLOUD_PROJECT` was not. `GoogleGenAICommanderModel.from_vertex_ai_environment()` explicitly refuses to initialize without `GOOGLE_CLOUD_PROJECT`. This meant a Cloud Run deployment could succeed while the optional Gemini commander failed at runtime solely because the deployment helper omitted a required non-secret environment variable.
+
+A second production requirement was clarified while reviewing the audit path: StageGuard uses Cloud Logging for both bounded audit appends and restart/reconciliation reads. The runtime therefore needs `logging.logEntries.create` **and** `logging.logEntries.list`; writer-only IAM guidance was incomplete.
 
 ### Official documentation checked
 
-Current Google Cloud documentation confirms:
+Current Google Cloud documentation was checked before changing the deployment contract:
 
-- the underlying permission required to access a Secret Manager payload is `secretmanager.versions.access`, normally supplied by `roles/secretmanager.secretAccessor`;
-- IAM Policy Troubleshooter checks a principal + full resource name + permission and explains effective access, including inherited allow/deny policy, without accessing the target data;
-- the gcloud command is `gcloud policy-intelligence troubleshoot-policy iam RESOURCE --principal-email=... --permission=...`.
+- IAM Policy Troubleshooter project resource names use `//cloudresourcemanager.googleapis.com/projects/...`.
+- Cloud Logging `entries.write` requires `logging.logEntries.create`.
+- Cloud Logging read/list operations require `logging.logEntries.list` for ordinary log entries.
+- Vertex AI generative prompt requests require `aiplatform.endpoints.predict`.
 
 References:
 
-- https://cloud.google.com/secret-manager/docs/access-secret-version
-- https://cloud.google.com/iam/docs/roles-permissions/secretmanager
 - https://cloud.google.com/policy-intelligence/docs/troubleshoot-access
+- https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/write
+- https://cloud.google.com/iam/docs/roles-permissions/logging
+- https://cloud.google.com/vertex-ai/generative-ai/docs/access-control
 
 ### Exact changes made
 
-Updated `scripts/gcp_deploy_doctor.py`:
+Updated `scripts/deploy_cloud_run.sh`:
 
-- added `policytroubleshooter.googleapis.com` to the required production-preflight APIs;
-- centralized the four mounted secret environment names;
-- added a read-only `_secret_access_check()` for `secretmanager.versions.access`;
-- uses IAM Policy Troubleshooter against each existing mounted secret and the configured runtime service account;
-- checks the effective permission rather than assuming one particular predefined role, so custom/inherited grants can still succeed;
-- treats `CAN_ACCESS` as success and `CANNOT_ACCESS`, unknown state, malformed JSON, or command failure as fail-closed deployment blockers;
-- never invokes `gcloud secrets versions access` and never reads or prints secret payloads;
-- only runs the permission proof after the secret metadata check succeeds;
-- adds targeted remediation guidance for missing runtime secret access;
-- keeps all checks non-mutating.
+- always forwards `GOOGLE_CLOUD_PROJECT=${PROJECT_ID}` to the Cloud Run container;
+- forwards optional `GOOGLE_CLOUD_LOCATION`, defaulting to `global`;
+- forwards optional `STAGEGUARD_GEMINI_MODEL`, defaulting to `gemini-2.5-flash`;
+- validates location/model values are non-empty and contain no commas or whitespace before placing them in `--set-env-vars`;
+- preserves Secret Manager file mounts and the no-production-remediation boundary.
 
-Updated `runtime/tests/test_gcp_deploy_doctor.py`:
+Added `runtime/tests/test_cloud_run_deploy_contract.py`:
 
-- verifies Policy Troubleshooter is a required preflight API;
-- adds credential-free unit coverage for `CAN_ACCESS`;
-- adds fail-closed coverage for denied, unknown, malformed, and command-failure results;
-- verifies the command checks `secretmanager.versions.access` against the Secret Manager full resource name;
-- verifies the access check never invokes a secret-version read command;
-- verifies next-step guidance names both the permission and the usual least-privilege `roles/secretmanager.secretAccessor` role.
+- locks the deploy/runtime contract for `GOOGLE_CLOUD_PROJECT`;
+- locks location/model defaults against `runtime/gemini_commander.py`;
+- checks delimiter-injection guards remain present;
+- verifies the standard deploy helper still exposes no production-remediation environment variables;
+- verifies the Grafana service-account token remains a Secret Manager file mount rather than a plaintext environment variable.
+
+Updated `GOOGLE_CLOUD_DEPLOYMENT.md`:
+
+- documents the explicit Vertex project/location/model environment contract;
+- explains why the deployment helper forwards `GOOGLE_CLOUD_PROJECT`;
+- corrects Cloud Logging IAM guidance to include both lifecycle writes and restart-safe reads;
+- records the underlying logging permissions and the remaining production-preflight hardening work;
+- updates failure behavior and official references.
 
 Commits created this run:
 
-- `f97be6537a09dc9e1e3dc90ab22a24f97101f83f` — effective Secret Manager runtime access verification
-- `9411f6a6f36dd484dcd2f359f276d4badf9ebed4` — credential-free permission-check regression coverage
+- `7f933a93e5b6adf1b7c8ba86dde9b8df2f011bea` — propagate Vertex AI runtime configuration in Cloud Run deploy
+- `ef330cba8554f210e8f1c996af562cc7ef9c0531` — lock Cloud Run Gemini deployment contract
+- `519d3b202ddd6a35efc21e38574c9292e092fd49` — document Vertex runtime environment and Cloud Logging read IAM
 
 ### Tests / checks / results
 
-- Source-level review completed for the doctor/test changes and checked against current official Google Cloud IAM/Secret Manager documentation.
-- This tool runtime does not expose an executable checkout of the connected GitHub repository. A direct public raw-file download attempt was also unavailable from the execution sandbox, so the updated unittest module could not be empirically run here.
-- No PASS claim is made for the newly added tests in this run.
+- Source-level contract review completed across deploy helper, Cloud Run entrypoint, bootstrap, Gemini adapter, Cloud Logging sink, and audit reader.
+- Attempted a fresh shallow checkout to run `runtime.tests.test_cloud_run_deploy_contract` and `runtime.tests.test_gcp_deploy_doctor`; the execution sandbox could not resolve `github.com`, so the checkout failed before Python ran.
+- No PASS claim is made for the newly added test module.
 - No GitHub Actions workflow was added or triggered.
-- No Google Cloud project, IAM policy, API, secret payload, Grafana instance, Gemini endpoint, or remediation endpoint was modified.
+- No Google Cloud resource, IAM policy, API, secret, Grafana instance, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. **Verify the permission, not merely the role name.** `secretmanager.versions.access` is the runtime capability StageGuard needs; predefined, custom, and inherited IAM can all grant it.
-2. **Use Policy Troubleshooter instead of reading a secret to test access.** Production preflight must never disclose payloads merely to prove deployment readiness.
-3. **Fail closed on indeterminate IAM.** Unknown/failed troubleshooting cannot authorize deployment.
-4. **Policy Troubleshooter is now a preflight dependency, not a runtime dependency.** The StageGuard Cloud Run service does not need that API to handle incidents after deployment.
-5. **Do not mutate IAM automatically.** The doctor explains the missing grant but does not add it.
+1. **Fix explicit runtime configuration rather than rely on ambient Cloud Run behavior.** The Gemini adapter requires `GOOGLE_CLOUD_PROJECT`; the deploy helper now guarantees it.
+2. **Keep Gemini location/model configurable but bounded.** Operators can choose a supported location/model without editing the script, while comma/whitespace guards protect the comma-delimited `--set-env-vars` composition.
+3. **Do not grant or mutate IAM automatically.** Documentation now states the real logging permissions; effective-permission gates should be added only after validating the Policy Troubleshooter response contract in a disposable project.
+4. **Keep the standard Cloud Run artifact read-only with respect to remediation.** No remediation endpoint/token/switch was introduced.
 
 ### Current blockers / unknowns
 
-- `runtime/tests/test_gcp_deploy_doctor.py` needs empirical execution on an executable checkout.
-- A real Google Cloud acceptance run is needed to confirm the exact Policy Troubleshooter resource-name behavior and operator permissions in a non-production project.
-- Gemini/Vertex AI production acceptance still requires a real authorized Google Cloud project and model access.
+- The new deploy-contract tests still need empirical execution on an executable checkout.
+- A real Google Cloud acceptance run is still needed to confirm Policy Troubleshooter behavior for all four Secret Manager secrets.
+- Effective runtime checks for `logging.logEntries.create`, `logging.logEntries.list`, and (when Gemini is enabled) `aiplatform.endpoints.predict` are not yet deployment gates.
+- Gemini/Vertex AI production acceptance still requires a real authorized project/model call.
 - Historical broader-suite failures/errors still need systematic triage.
 
 ## Single best next step
 
-**Run the complete Google Cloud deployment doctor against a disposable/non-production StageGuard project, capture the first real Policy Troubleshooter output for all four secrets, and then add a production acceptance test/fixture that locks the observed response contract before attempting the first Cloud Run deployment.**
+**Extend `scripts/gcp_deploy_doctor.py` with fail-closed, read-only IAM Policy Troubleshooter checks for the runtime service account's `logging.logEntries.create` and `logging.logEntries.list` permissions on the target project, add credential-free response-contract tests, and only then consider the conditional Vertex `aiplatform.endpoints.predict` gate after its target resource shape is validated against a real Gemini project.**
+
+## Previous production hardening — effective Secret Manager authorization
+
+The Google Cloud deployment doctor already:
+
+- requires `policytroubleshooter.googleapis.com` for live preflight;
+- verifies each mounted Secret Manager resource exists without reading payloads;
+- checks the runtime service account's effective `secretmanager.versions.access` permission using IAM Policy Troubleshooter;
+- treats `CAN_ACCESS` as success and denied/unknown/malformed/command-failure states as deployment blockers;
+- dynamically requires `aiplatform.googleapis.com` when `ENABLE_GEMINI=true`;
+- keeps offline syntax validation from ever reporting `ready_to_deploy=true`.
+
+Relevant commits retained:
+
+- `f97be6537a09dc9e1e3dc90ab22a24f97101f83f` — effective Secret Manager runtime access verification
+- `9411f6a6f36dd484dcd2f359f276d4badf9ebed4` — credential-free permission-check regression coverage
 
 ## Validation baseline retained
 
@@ -101,7 +140,7 @@ Commits created this run:
 - Incident flow: investigate → diagnose `uplink-b packet loss` → exact revision approval → bounded remediation → telemetry-verified recovered.
 - Gemini: integration implemented but not exercised in the last local capture because credentials were unavailable.
 
-## Recent productization milestones
+## Recent productization milestones retained
 
 ### Google Cloud deployment doctor
 
@@ -111,18 +150,14 @@ Commits created this run:
 
 `scripts/stageguard_doctor.py` validates Python 3.11+, strict telemetry mapping, `GRAFANA_URL`, token-file presence/non-emptiness/permissions without reading token contents, Grafana MCP launcher discovery, and optional activation-file presence. `runtime/preflight.py` remains authoritative for live Grafana/MCP evidence acceptance.
 
-### Judge-facing/product presentation
+### Operator cockpit
 
-The operator cockpit surfaces incident state, root cause, confidence, evidence revision, human approval, Grafana MCP provenance, and the `ACTION ACCEPTED ≠ INCIDENT RESOLVED` recovery-verification sequence. Bounded lifecycle responses expose provider, read-only status, datasource UID, query/recovery counts, and tool latency while excluding raw queries and secrets.
+The cockpit surfaces incident state, root cause, confidence, evidence revision, human approval, Grafana MCP provenance, and the `ACTION ACCEPTED ≠ INCIDENT RESOLVED` recovery-verification sequence. Bounded lifecycle responses expose provider, read-only status, datasource UID, query/recovery counts, and tool latency while excluding raw queries and secrets.
 
 ### Cross-platform persistence
 
-Windows checkpoint/retention persistence was corrected to avoid unavailable `os.fchmod`, invalid fsync behavior on read-only handles, and unsupported directory-fsync assumptions.
+Windows checkpoint/retention persistence avoids unavailable `os.fchmod`, invalid fsync behavior on read-only handles, and unsupported directory-fsync assumptions.
 
-### Release rehearsal telemetry gating
-
-`scripts/demo_release.py` uses actual Prometheus healthy/fault evidence gates rather than timing sleeps, recreates the deterministic stack between takes, proves the official Grafana MCP smoke path, and only signals incident readiness when the telemetry StageGuard consumes is queryable.
-
-### Live rehearsal
+### Live release rehearsal
 
 A Windows Docker Desktop Linux-engine rehearsal passed healthy evidence gates, official Grafana MCP smoke validation, real fault gates, diagnosis, exact revision approval, bounded recovery, and post-action telemetry verification twice consecutively. Grafana Explore showed the packet-loss fault plateau returning to baseline.
