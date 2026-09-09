@@ -20,7 +20,8 @@ from remediation import ActionResult, Approval, RecoverySample, RemediationOutco
 SCHEMA_V1 = "stageguard.incident-checkpoint.v1"
 SCHEMA_V2 = "stageguard.incident-checkpoint.v2"
 SCHEMA_V3 = "stageguard.incident-checkpoint.v3"
-SCHEMA = SCHEMA_V3
+SCHEMA_V4 = "stageguard.incident-checkpoint.v4"
+SCHEMA = SCHEMA_V4
 _MAX_BYTES = 256 * 1024
 _EXECUTION_PHASES = {"none", "approved", "dispatching", "resolved"}
 
@@ -42,15 +43,13 @@ class IncidentCheckpoint:
     approval: Approval | None
     outcome: RemediationOutcome | None
     sequence: int
-    # None means callers are using the ordinary lifecycle API; serialization
-    # derives the precise v2/v3 phase from approval/outcome. ``legacy_unknown``
-    # is internal-only and is produced when restoring an ambiguous v1 checkpoint.
     execution_phase: str | None = None
-    # Schema v3 binds the append-only audit stream to the authenticated lifecycle
-    # checkpoint. Both values must be supplied together. Existing callers that do
-    # not yet provide them remain on schema v2 rather than emitting a fake proof.
     audit_chain_sequence: int | None = None
     audit_chain_head_sha256: str | None = None
+    # Schema v4 adds an authenticated compaction boundary. The anchor is a
+    # previously verified chain checkpoint, never a second/current trust root.
+    audit_anchor_sequence: int | None = None
+    audit_anchor_head_sha256: str | None = None
 
 
 def _derived_execution_phase(checkpoint: IncidentCheckpoint) -> str:
@@ -91,17 +90,36 @@ def _valid_sha256(value: object) -> bool:
     return True
 
 
-def _validate_audit_chain_binding(sequence: object, head_sha256: object) -> None:
+def _validate_chain_point(sequence: object, head_sha256: object, *, label: str) -> None:
     if sequence is None and head_sha256 is None:
         return
     if sequence is None or head_sha256 is None:
-        raise ValueError("checkpoint audit-chain sequence and head must be supplied together")
+        raise ValueError(f"checkpoint {label} sequence and head must be supplied together")
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
-        raise ValueError("invalid checkpoint audit-chain sequence")
+        raise ValueError(f"invalid checkpoint {label} sequence")
     if not _valid_sha256(head_sha256):
-        raise ValueError("invalid checkpoint audit-chain head")
+        raise ValueError(f"invalid checkpoint {label} head")
     if sequence == 0 and head_sha256 != "0" * 64:
-        raise ValueError("empty checkpoint audit chain must use genesis digest")
+        raise ValueError(f"empty checkpoint {label} must use genesis digest")
+
+
+def _validate_audit_binding(checkpoint: IncidentCheckpoint) -> None:
+    _validate_chain_point(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256, label="audit-chain")
+    _validate_chain_point(checkpoint.audit_anchor_sequence, checkpoint.audit_anchor_head_sha256, label="audit-anchor")
+    anchor_present = checkpoint.audit_anchor_sequence is not None or checkpoint.audit_anchor_head_sha256 is not None
+    chain_present = checkpoint.audit_chain_sequence is not None or checkpoint.audit_chain_head_sha256 is not None
+    if anchor_present and not chain_present:
+        raise ValueError("checkpoint audit anchor requires an audit-chain binding")
+    if anchor_present:
+        assert checkpoint.audit_anchor_sequence is not None
+        assert checkpoint.audit_chain_sequence is not None
+        if checkpoint.audit_anchor_sequence > checkpoint.audit_chain_sequence:
+            raise ValueError("checkpoint audit anchor cannot exceed audit-chain head")
+        if (
+            checkpoint.audit_anchor_sequence == checkpoint.audit_chain_sequence
+            and checkpoint.audit_anchor_head_sha256 != checkpoint.audit_chain_head_sha256
+        ):
+            raise ValueError("checkpoint audit anchor conflicts with audit-chain head")
 
 
 def _safe_outcome_dict(outcome: RemediationOutcome | None) -> dict | None:
@@ -139,10 +157,10 @@ def _outcome_from_dict(value: dict | None) -> RemediationOutcome | None:
     return RemediationOutcome(str(value["status"]), action, samples, str(value["summary"]))
 
 
-def _state(checkpoint: IncidentCheckpoint, *, include_audit_chain: bool) -> dict:
+def _state(checkpoint: IncidentCheckpoint, *, include_audit_chain: bool, include_audit_anchor: bool) -> dict:
     phase = _derived_execution_phase(checkpoint)
     _validate_execution_phase(phase, checkpoint.approval, checkpoint.outcome)
-    _validate_audit_chain_binding(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256)
+    _validate_audit_binding(checkpoint)
     state = {
         "incident_id": checkpoint.incident_id,
         "revision": checkpoint.revision,
@@ -155,14 +173,18 @@ def _state(checkpoint: IncidentCheckpoint, *, include_audit_chain: bool) -> dict
     if include_audit_chain:
         state["audit_chain_sequence"] = checkpoint.audit_chain_sequence
         state["audit_chain_head_sha256"] = checkpoint.audit_chain_head_sha256
+    if include_audit_anchor:
+        state["audit_anchor_sequence"] = checkpoint.audit_anchor_sequence
+        state["audit_anchor_head_sha256"] = checkpoint.audit_anchor_head_sha256
     return state
 
 
 def checkpoint_document(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> dict:
     has_audit_binding = checkpoint.audit_chain_sequence is not None or checkpoint.audit_chain_head_sha256 is not None
-    _validate_audit_chain_binding(checkpoint.audit_chain_sequence, checkpoint.audit_chain_head_sha256)
-    schema = SCHEMA_V3 if has_audit_binding else SCHEMA_V2
-    state = _state(checkpoint, include_audit_chain=has_audit_binding)
+    has_anchor = checkpoint.audit_anchor_sequence is not None or checkpoint.audit_anchor_head_sha256 is not None
+    _validate_audit_binding(checkpoint)
+    schema = SCHEMA_V4 if has_anchor else (SCHEMA_V3 if has_audit_binding else SCHEMA_V2)
+    state = _state(checkpoint, include_audit_chain=has_audit_binding, include_audit_anchor=has_anchor)
     canonical = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256(canonical).hexdigest()
     signature = None if signing_key is None else hmac.new(signing_key, canonical, hashlib.sha256).hexdigest()
@@ -170,7 +192,8 @@ def checkpoint_document(checkpoint: IncidentCheckpoint, *, signing_key: bytes | 
 
 
 def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = None, require_signature: bool = False) -> IncidentCheckpoint:
-    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") not in {SCHEMA_V1, SCHEMA_V2, SCHEMA_V3}:
+    schemas = {SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4}
+    if set(document) != {"schema", "state", "sha256", "hmac_sha256"} or document.get("schema") not in schemas:
         raise ValueError("unsupported incident checkpoint document")
     schema = document["schema"]
     state = document.get("state")
@@ -196,7 +219,13 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
     v1_required = {"incident_id", "revision", "report", "approval", "outcome", "sequence"}
     v2_required = v1_required | {"execution_phase"}
     v3_required = v2_required | {"audit_chain_sequence", "audit_chain_head_sha256"}
-    required = v1_required if schema == SCHEMA_V1 else (v2_required if schema == SCHEMA_V2 else v3_required)
+    v4_required = v3_required | {"audit_anchor_sequence", "audit_anchor_head_sha256"}
+    required = {
+        SCHEMA_V1: v1_required,
+        SCHEMA_V2: v2_required,
+        SCHEMA_V3: v3_required,
+        SCHEMA_V4: v4_required,
+    }[schema]
     if set(state) != required:
         raise ValueError("invalid incident checkpoint state")
     incident_id = state["incident_id"]
@@ -214,8 +243,6 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
     outcome = _outcome_from_dict(state["outcome"])
 
     if schema == SCHEMA_V1:
-        # v1 has no pre-side-effect marker. A pending approval is therefore
-        # execution-ambiguous for production adapters after restart.
         phase = "legacy_unknown" if approval is not None and outcome is None else (
             "resolved" if outcome is not None else "none"
         )
@@ -228,13 +255,15 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
 
     audit_chain_sequence = None
     audit_chain_head_sha256 = None
-    if schema == SCHEMA_V3:
+    audit_anchor_sequence = None
+    audit_anchor_head_sha256 = None
+    if schema in {SCHEMA_V3, SCHEMA_V4}:
         audit_chain_sequence = state["audit_chain_sequence"]
         audit_chain_head_sha256 = state["audit_chain_head_sha256"]
-        _validate_audit_chain_binding(audit_chain_sequence, audit_chain_head_sha256)
-        if audit_chain_sequence > sequence:
-            raise ValueError("checkpoint audit chain cannot exceed lifecycle audit sequence")
-    return IncidentCheckpoint(
+    if schema == SCHEMA_V4:
+        audit_anchor_sequence = state["audit_anchor_sequence"]
+        audit_anchor_head_sha256 = state["audit_anchor_head_sha256"]
+    checkpoint = IncidentCheckpoint(
         incident_id,
         revision,
         report,
@@ -244,7 +273,13 @@ def parse_checkpoint_document(document: dict, *, signing_key: bytes | None = Non
         phase,
         audit_chain_sequence,
         audit_chain_head_sha256,
+        audit_anchor_sequence,
+        audit_anchor_head_sha256,
     )
+    _validate_audit_binding(checkpoint)
+    if audit_chain_sequence is not None and audit_chain_sequence > sequence:
+        raise ValueError("checkpoint audit chain cannot exceed lifecycle audit sequence")
+    return checkpoint
 
 
 def _encode(checkpoint: IncidentCheckpoint, *, signing_key: bytes | None = None) -> bytes:
@@ -373,11 +408,7 @@ class GoogleCloudStorageCheckpointStore:
             if expected_generation is None:
                 raise RuntimeError("incident checkpoint generation is unavailable")
             try:
-                blob.upload_from_string(
-                    encoded,
-                    content_type="application/json",
-                    if_generation_match=expected_generation,
-                )
+                blob.upload_from_string(encoded, content_type="application/json", if_generation_match=expected_generation)
                 generation = blob.generation
                 if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
                     raise RuntimeError("invalid checkpoint generation")
