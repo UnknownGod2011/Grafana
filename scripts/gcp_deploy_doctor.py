@@ -31,12 +31,15 @@ REQUIRED_ENV = (
     "GRAFANA_TOKEN_SECRET",
 )
 
-REQUIRED_APIS = (
+BASE_REQUIRED_APIS = (
     "run.googleapis.com",
     "iap.googleapis.com",
     "secretmanager.googleapis.com",
     "logging.googleapis.com",
 )
+
+TRUE_VALUES = {"1", "true", "yes", "on"}
+FALSE_VALUES = {"0", "false", "no", "off", ""}
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,22 @@ def _run_gcloud(args: list[str]) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
+def _gemini_enabled() -> bool | None:
+    value = os.getenv("ENABLE_GEMINI", "false").strip().lower()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    return None
+
+
+def _required_apis() -> tuple[str, ...]:
+    apis = list(BASE_REQUIRED_APIS)
+    if _gemini_enabled() is True:
+        apis.append("aiplatform.googleapis.com")
+    return tuple(apis)
+
+
 def _env_checks() -> list[Check]:
     checks: list[Check] = []
     for name in REQUIRED_ENV:
@@ -70,6 +89,19 @@ def _env_checks() -> list[Check]:
                 "configured" if value else "required deployment variable is not set",
             )
         )
+
+    gemini_enabled = _gemini_enabled()
+    checks.append(
+        Check(
+            "enable_gemini_format",
+            "ok" if gemini_enabled is not None else "failed",
+            (
+                f"Gemini advisory mode {'enabled' if gemini_enabled else 'disabled'}"
+                if gemini_enabled is not None
+                else "ENABLE_GEMINI must be one of true/false, 1/0, yes/no, or on/off"
+            ),
+        )
+    )
 
     project_number = os.getenv("PROJECT_NUMBER", "").strip()
     if project_number:
@@ -159,7 +191,7 @@ def _gcloud_checks() -> list[Check]:
         "--format=value(config.name)",
     ])
     enabled_set = set(enabled.splitlines()) if code == 0 else set()
-    for api in REQUIRED_APIS:
+    for api in _required_apis():
         checks.append(
             Check(
                 f"api:{api}",
@@ -215,12 +247,14 @@ def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
     steps: list[str] = []
     if any(name.startswith("env:") for name in names):
         steps.append("Set every required deployment environment variable documented in GOOGLE_CLOUD_DEPLOYMENT.md.")
+    if "enable_gemini_format" in names:
+        steps.append("Set ENABLE_GEMINI to true or false using the same accepted boolean forms as scripts/deploy_cloud_run.sh.")
     if "gcloud" in names:
         steps.append("Install the Google Cloud CLI and place gcloud on PATH.")
     if "gcloud_auth" in names:
         steps.append("Authenticate gcloud using an authorized operator or workload identity.")
     if any(name.startswith("api:") for name in names):
-        steps.append("Enable only the missing required Google Cloud APIs in the target project.")
+        steps.append("Enable only the missing required Google Cloud APIs in the target project; Vertex AI is required when ENABLE_GEMINI=true.")
     if any(name.startswith("secret:") for name in names):
         steps.append("Create or grant access to the missing Secret Manager secrets; do not place secret values in environment variables.")
     if "container_image" in names:
@@ -247,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
         "ready_to_deploy": not hard_failures and not args.offline,
         "offline_checks_passed": not hard_failures,
         "offline": args.offline,
+        "gemini_enabled": _gemini_enabled(),
+        "required_apis": list(_required_apis()),
         "checks": [asdict(check) for check in checks],
         "next_steps": _next_steps(checks, offline=args.offline),
     }
