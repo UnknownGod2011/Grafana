@@ -330,11 +330,17 @@ class JsonCheckpointStore:
         encoded = _encode(checkpoint)
         fd, tmp_name = tempfile.mkstemp(prefix=".checkpoint-", dir=self.path.parent)
         try:
-            os.fchmod(fd, 0o600)
+            # Windows does not expose os.fchmod. Keep the descriptor lifecycle
+            # valid on every supported platform, then apply the portable chmod
+            # best-effort after the atomic write is complete.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb", closefd=True) as handle:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if not hasattr(os, "fchmod"):
+                os.chmod(tmp_name, 0o600)
             os.replace(tmp_name, self.path)
             os.chmod(self.path, 0o600)
         finally:

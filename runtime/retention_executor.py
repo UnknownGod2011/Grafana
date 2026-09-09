@@ -177,6 +177,11 @@ def prepare_local_retention_plan(
 
 
 def _fsync_directory(path: Path) -> None:
+    # Directory descriptors are not openable with the required semantics on
+    # Windows. File fsyncs and atomic os.replace still provide the portable
+    # durability boundary available to the local demo.
+    if os.name == "nt":
+        return
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -229,7 +234,10 @@ def execute_local_retention(
     retained_records = 0
     retained_bytes = 0
     try:
-        os.fchmod(fd, 0o600)
+        # os.fchmod is POSIX-only. Do not leave the temporary descriptor open
+        # on Windows when applying the same owner-only intent.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         source_digest = hashlib.sha256()
         source_bytes = 0
         with path.open("rb") as source, os.fdopen(fd, "wb", closefd=True) as output:
@@ -258,6 +266,9 @@ def execute_local_retention(
             output.flush()
             os.fsync(output.fileno())
 
+        if not hasattr(os, "fchmod"):
+            os.chmod(tmp_name, 0o600)
+
         if source_bytes != plan.audit_file_bytes or source_digest.hexdigest() != plan.audit_file_sha256:
             raise RuntimeError("audit file changed during retention execution")
         if removed_records != plan.eligible_records or removed_bytes != plan.eligible_bytes:
@@ -265,7 +276,9 @@ def execute_local_retention(
 
         shutil.copyfile(path, backup)
         os.chmod(backup, 0o600)
-        with backup.open("rb") as backup_handle:
+        # Windows rejects fsync on a read-only descriptor; reopening read/write
+        # preserves the durability barrier without changing the backup bytes.
+        with backup.open("r+b") as backup_handle:
             os.fsync(backup_handle.fileno())
         _fsync_directory(parent)
 

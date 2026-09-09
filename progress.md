@@ -65,4 +65,27 @@ The highest-value concrete demo risk was timing-based evidence readiness. `demo_
 
 ## Previous run summary
 
-The previous run added the one-command `scripts/demo_local.py` vertical-slice runner, shortened only the post-remediation dropped-frame recovery query window to 15 seconds, and aligned `DEMO.md` to the real Grafana MCP → diagnose → approve → remediate → telemetry-verify workflow. Concurrent follow-up work added presentation/open-source submission assets without changing that runtime contract.
+The previous run added the one-command `scripts/demo_local.py` vertical-slice runner, shortened only the post-remediation dropped-frame recovery query window to 15 seconds, aligned `DEMO.md` to the real Grafana MCP → diagnose → approve → remediate → telemetry-verify workflow, and completed the signed local runtime checkpoint -> retention coordinator -> compacted audit -> hardened restart/no-remediation-replay acceptance path. Concurrent follow-up work added presentation/open-source submission assets without changing that runtime contract.
+
+## FINAL SUBMISSION STATUS — 2026-09-09
+
+Demo: BLOCKED ON LOCAL DOCKER ENGINE — `docker compose` is installed, but Docker Desktop's Linux engine was unavailable on this laptop; the repository's deterministic demo runner remains the intended judge-machine path.
+
+Grafana MCP: NOT LIVE-VERIFIED HERE — the checked-in runner gates readiness on the official `grafana/mcp-grafana:1.3.0` read-only smoke query.
+
+Gemini: NOT USED — optional and intentionally not faked without working Vertex/ADC credentials.
+
+Video: NOT CREATED — no honest live runtime capture was possible without Docker; do not submit a fabricated demo video.
+
+Devpost: NOT SUBMITTED — Devpost rules were inspected; the current browser session is not authenticated.
+
+Submission: BLOCKED
+
+Any remaining blocker: Start Docker Desktop on a judge-capable machine, run the documented demo twice, record/upload the required public 3-minute video, then authenticate Devpost and submit to the Grafana Labs partner track.
+
+## Post-submission code portability fixes — 2026-09-09
+
+- Fixed Windows checkpoint persistence: `JsonCheckpointStore` and `SignedJsonCheckpointStore` no longer call unavailable `os.fchmod` while holding an open temporary descriptor.
+- Fixed Windows retention persistence: temporary audit output now closes cleanly before cleanup, backup durability uses a writable descriptor, and directory fsync is skipped where Windows cannot open directory descriptors.
+- Verification: checkpoint schema, incident checkpoint, retention planner, and focused incident/Gemini/MCP/remediation tests were rerun; the core focused suite is green with 35/35 passing.
+- Full suite after portability fixes: 352 tests, 12 failures, 17 errors, 19 skipped. Remaining failures are contract/platform-specific outside the demo path; no claim of full-suite green.
