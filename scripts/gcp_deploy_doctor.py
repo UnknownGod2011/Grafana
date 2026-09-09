@@ -36,8 +36,17 @@ BASE_REQUIRED_APIS = (
     "iap.googleapis.com",
     "secretmanager.googleapis.com",
     "logging.googleapis.com",
+    "policytroubleshooter.googleapis.com",
 )
 
+SECRET_ENV_NAMES = (
+    "TELEMETRY_SECRET",
+    "METRIC_ACTIVATION_SECRET",
+    "LOG_ACTIVATION_SECRET",
+    "GRAFANA_TOKEN_SECRET",
+)
+
+SECRET_ACCESS_PERMISSION = "secretmanager.versions.access"
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off", ""}
 
@@ -150,6 +159,61 @@ def _env_checks() -> list[Check]:
     return checks
 
 
+def _secret_access_check(project_number: str, service_account: str, secret: str, env_name: str) -> Check:
+    """Use Policy Troubleshooter to verify payload-read permission without reading payloads.
+
+    Policy Troubleshooter evaluates effective IAM access, including inherited allow and
+    deny policy. We intentionally check the underlying permission rather than assuming
+    that one specific predefined role is the only way to grant access.
+    """
+    full_resource_name = f"//secretmanager.googleapis.com/projects/{project_number}/secrets/{secret}"
+    code, stdout, _ = _run_gcloud(
+        [
+            "policy-intelligence",
+            "troubleshoot-policy",
+            "iam",
+            full_resource_name,
+            f"--principal-email={service_account}",
+            f"--permission={SECRET_ACCESS_PERMISSION}",
+            "--format=json",
+        ]
+    )
+    if code != 0 or not stdout:
+        return Check(
+            f"secret_access:{env_name}",
+            "failed",
+            "effective runtime access could not be verified with IAM Policy Troubleshooter",
+        )
+
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError:
+        return Check(
+            f"secret_access:{env_name}",
+            "failed",
+            "IAM Policy Troubleshooter returned an unreadable response",
+        )
+
+    state = result.get("overallAccessState")
+    if state == "CAN_ACCESS":
+        return Check(
+            f"secret_access:{env_name}",
+            "ok",
+            f"runtime service account has effective {SECRET_ACCESS_PERMISSION}; payload not read",
+        )
+    if state == "CANNOT_ACCESS":
+        return Check(
+            f"secret_access:{env_name}",
+            "failed",
+            f"runtime service account lacks effective {SECRET_ACCESS_PERMISSION}",
+        )
+    return Check(
+        f"secret_access:{env_name}",
+        "failed",
+        "IAM Policy Troubleshooter could not determine effective runtime secret access",
+    )
+
+
 def _gcloud_checks() -> list[Check]:
     if not shutil.which("gcloud"):
         return [Check("gcloud", "missing", "Google Cloud CLI is not installed or not on PATH")]
@@ -205,23 +269,28 @@ def _gcloud_checks() -> list[Check]:
         code, _, _ = _run_gcloud(["iam", "service-accounts", "describe", sa, f"--project={project_id}"])
         checks.append(Check("runtime_service_account", "ok" if code == 0 else "failed", "service account exists" if code == 0 else "service account not found or not accessible"))
 
-    for env_name in (
-        "TELEMETRY_SECRET",
-        "METRIC_ACTIVATION_SECRET",
-        "LOG_ACTIVATION_SECRET",
-        "GRAFANA_TOKEN_SECRET",
-    ):
+    existing_secrets: list[tuple[str, str]] = []
+    for env_name in SECRET_ENV_NAMES:
         secret = os.getenv(env_name, "").strip()
         if not secret:
             continue
         code, _, _ = _run_gcloud(["secrets", "describe", secret, f"--project={project_id}"])
+        secret_exists = code == 0
         checks.append(
             Check(
                 f"secret:{env_name}",
-                "ok" if code == 0 else "failed",
-                "secret exists; payload not read" if code == 0 else "secret not found or not accessible",
+                "ok" if secret_exists else "failed",
+                "secret exists; payload not read" if secret_exists else "secret not found or not accessible",
             )
         )
+        if secret_exists:
+            existing_secrets.append((env_name, secret))
+
+    # Never attempt an access proof if the principal or project identity is malformed/missing.
+    # Each proof is read-only: Policy Troubleshooter evaluates IAM; no secret version is accessed.
+    if sa and project_number.isdigit():
+        for env_name, secret in existing_secrets:
+            checks.append(_secret_access_check(project_number, sa, secret, env_name))
 
     image = os.getenv("IMAGE_URL", "").strip()
     if image and ".pkg.dev/" in image:
@@ -254,9 +323,11 @@ def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
     if "gcloud_auth" in names:
         steps.append("Authenticate gcloud using an authorized operator or workload identity.")
     if any(name.startswith("api:") for name in names):
-        steps.append("Enable only the missing required Google Cloud APIs in the target project; Vertex AI is required when ENABLE_GEMINI=true.")
+        steps.append("Enable only the missing required Google Cloud APIs in the target project; Vertex AI is required when ENABLE_GEMINI=true and Policy Troubleshooter is required for read-only secret-access verification.")
     if any(name.startswith("secret:") for name in names):
-        steps.append("Create or grant access to the missing Secret Manager secrets; do not place secret values in environment variables.")
+        steps.append("Create or grant metadata visibility to the missing Secret Manager secrets; do not place secret values in environment variables.")
+    if any(name.startswith("secret_access:") for name in names):
+        steps.append("Grant the runtime service account secretmanager.versions.access on each mounted secret (normally roles/secretmanager.secretAccessor at the secret or an appropriate parent), then rerun the doctor.")
     if "container_image" in names:
         steps.append("Build and push the StageGuard API image to Artifact Registry, then set IMAGE_URL to that image.")
     if "runtime_service_account" in names:
