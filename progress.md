@@ -16,61 +16,70 @@ Core safety invariants:
 - The authenticated checkpoint audit-chain head is lifecycle authority; losing-writer residue cannot manufacture lifecycle state.
 - Audit anchors are authenticated compaction boundaries, not independent trust roots; promotion becomes authoritative only after checkpoint persistence succeeds.
 - Branched-lineage verification and candidate reads are bounded and fail closed on state/candidate explosion or silent truncation.
+- Audit retention planning is read-only and may never propose a boundary beyond the authenticated non-genesis anchor.
 - `/readyz` fails closed for checkpoint conflict, execution uncertainty, audit-integrity failure, or configured integrity-policy violation.
 
-## Run log — 2026-09-09 — fake-cloud authenticated restart acceptance
+## Run log — 2026-09-09 — non-destructive authenticated audit-retention planner
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/bootstrap.py`, `runtime/incident_checkpoint.py`, `runtime/cloud_audit.py`, `runtime/durable_audit_reader.py`, `runtime/audit_anchor.py`, `runtime/api.py`, `runtime/incident_service.py`, and the existing bootstrap execution-safety regressions. Confirmed the previous handoff accurately identified the strongest remaining credential-free gap: constructor wiring was covered, but the real StageGuard GCS/Cloud Logging adapters had not yet been exercised together through a completed schema-v4 lifecycle and restart containing a losing writer branch.
+Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/incident_checkpoint.py`, `runtime/audit_anchor.py`, `runtime/durable_audit_reader.py`, `runtime/anchored_incident_service.py`, `runtime/incident_service.py`, and the recent schema-v4/fake-cloud tests. Confirmed the previous handoff accurately identified the strongest remaining safe gap: StageGuard had authenticated compaction boundaries but no operator-safe tool for calculating what is eligible for retention removal.
 
 ### Exact changes made
 
-1. Added `runtime/tests/test_fake_cloud_restart_acceptance.py`.
-   - Uses the real `GoogleCloudStorageCheckpointStore`, `GoogleCloudLoggingAuditSink`, `GoogleCloudAuditReader`, `build_runtime`, and `AnchoredExecutionSafeIncidentService` production composition.
-   - Supplies only in-memory fake bucket/blob and Cloud Logging logger primitives at the external provider boundary; no Google client library call, credential, network request, or live resource is required.
-   - The fake GCS object model implements generation-aware `exists`, `reload`, conditional download, and conditional upload behavior, including HTTP-412-like precondition failures, so the real checkpoint adapter still performs HMAC serialization/verification and generation bookkeeping.
-   - The fake Cloud Logging logger stores the real bounded `stageguard.audit.v1` documents produced by `GoogleCloudLoggingAuditSink` and implements the sequence/incident range contract consumed by the real branch-aware reader.
-2. Added a full production-bootstrap lifecycle/restart acceptance path.
-   - Drives investigation -> explicit approval -> successful remediation -> Grafana-style recovery verification through `build_runtime` with `audit_backend="cloud-logging"`, `checkpoint_backend="gcs"`, `require_verified`, and a bounded anchor cadence.
-   - Verifies the original remediation adapter executes exactly once and the lifecycle reaches authenticated audit-integrity state.
-   - Requires a real non-genesis anchor with an authenticated post-anchor suffix.
-   - Injects a competing same-sequence Cloud Logging record only into that authenticated suffix, simulating append-before-CAS residue from a losing writer without modifying the signed checkpoint.
-   - Reconstructs fresh production adapters on restart through `build_runtime`, using the same fake durable GCS object and Cloud Logging log identity.
-   - Asserts the authenticated winning lineage restores `recovered`, `audit_integrity=verified`, synchronized checkpoint state, clear execution reconciliation, and the hardened `require_verified` policy.
-   - Asserts the readiness-integrity policy is satisfied only because the restored state is exactly `verified`.
-   - Proves restart invokes the replacement remediation adapter zero times and the previously consumed approval still cannot be executed again.
-3. Kept repository/CI impact bounded.
-   - Prepared the new regression and this progress handoff as one Git tree/commit/ref update.
+1. Added `runtime/retention_planner.py`.
+   - Introduces immutable `AuditRetentionPlan` output with incident/backend identity, safe/refused status, refusal reason, authenticated boundary/head, current chain sequence, eligible record/byte counts, scanned totals, and enumeration completeness.
+   - `plan_authenticated_boundary(...)` refuses anything except `audit_integrity_state="verified"`, rejects checkpoint conflict, unbound checkpoints, missing anchors, genesis anchors, anchors beyond the authenticated head, and impossible chain/lifecycle ordering.
+   - The only safe boundary emitted is `audit_anchor_sequence`; no function can advance it based on observed log contents.
+2. Added exact local JSONL inventory.
+   - `plan_jsonl_retention(...)` scans read-only, counts only records for the target incident at or before the authenticated anchor, reports exact line bytes eligible for removal, preserves same-sequence loser residue in the count, and never rewrites/truncates/unlinks the source.
+   - Scans are bounded by configurable byte and record ceilings and fail closed on malformed JSON/events, invalid sequences, filesystem errors, or bound exhaustion.
+3. Added Cloud Logging advisory inventory.
+   - `plan_cloud_logging_retention(...)` calls only the branch-aware candidate reader through the authenticated anchor and never requests records above it.
+   - Because Cloud Logging lookback/retention can make enumeration incomplete, the plan explicitly reports `enumeration_complete=false` and does not invent a byte count.
+   - Provider/read errors become refusal plans rather than partial deletion authority.
+4. Added a strict JSONL CLI.
+   - Requires an HMAC-signed checkpoint document and a signing key of at least 32 bytes supplied through an environment variable.
+   - Emits one machine-readable JSON plan and exits non-zero for a refused plan.
+   - Performs no deletion and exposes no secret material in output.
+5. Added `runtime/tests/test_retention_planner.py`.
+   - Covers refusal of unverified, conflicted, unbound, and genesis-anchor state.
+   - Proves exact JSONL record/byte accounting and byte-for-byte non-modification of the source.
+   - Proves post-anchor records are never counted.
+   - Proves Cloud Logging inventory requests `after_sequence=0` and `through_sequence=<authenticated anchor>` only, remains explicitly incomplete, and is not called at all when trust prerequisites fail.
+6. Kept repository/CI impact bounded.
+   - Prepared source, tests, and this handoff as one Git tree/commit/ref update.
    - Did not manually trigger or rerun GitHub Actions.
 
 ### Tests / checks / results
 
+- The new planner and test source both passed Python syntax compilation in isolated validation.
 - Repository inspection and Git object preparation succeeded through the connected GitHub integration.
-- The new regression is deliberately credential-free and exercises real StageGuard adapter logic above the provider SDK boundary.
-- This automation environment still does not expose a complete executable checkout/import path, so no green Python test-suite claim is made for this run.
+- A complete repository test suite still cannot be executed in this automation environment, so no green-suite claim is made.
 - No GitHub Actions workflow was manually triggered or rerun.
 - No live Grafana, Gemini, GCS, Cloud Logging, Cloud Run, IAP, Secret Manager, remediation endpoint, or operator resource was touched.
+- The retention implementation is deliberately non-destructive; it does not delete local files or provider log entries.
 
 ### Decisions made
 
-1. **Use real StageGuard cloud adapters over fake provider primitives, not fake StageGuard adapters.** This gives materially stronger coverage of checkpoint HMAC encoding/decoding, GCS generation semantics, structured audit serialization, Cloud Logging range filtering, anchor-aware lineage selection, and production bootstrap composition while remaining offline.
-2. **Inject the loser branch after a non-genesis anchor.** That specifically exercises the bounded authenticated suffix path rather than falling back to full-history verification.
-3. **Test the dangerous replay boundary.** The restart acceptance criterion includes a completed/consumed approval and asserts zero remediation calls during restart and on an attempted replay.
-4. **Keep external cloud acceptance separate.** IAM policy, actual GCS generation preconditions, Cloud Logging query/retention behavior, and Cloud Run/IAP still require deliberate live-environment validation and should not be touched by an unattended development run.
+1. **Separate deletion authority from inventory.** The planner can identify an authenticated boundary and observed/exact candidates, but it never performs retention mutation.
+2. **Treat runtime `verified` plus non-conflicted schema-v4 anchor state as mandatory.** Merely seeing an anchor-shaped value is insufficient.
+3. **Make JSONL exact but Cloud Logging advisory.** Local bytes can be counted deterministically; provider retention/lookback means Cloud Logging enumeration must not claim completeness without a separate exhaustive provider contract.
+4. **Refuse genesis anchors.** Sequence zero is cryptographically valid but has no compactable history and should not produce a misleading “safe” plan.
+5. **Bound inventory work.** Retention planning itself must not become an unbounded memory/IO path.
 
 ### Current blockers / unknowns
 
-- The new fake-cloud regression has not executed in a complete checkout during this run.
-- Real Google Cloud acceptance for GCS generation-CAS, Cloud Logging query consistency/retention, Cloud Run/IAP browser flow, and Secret Manager wiring remains external-resource work.
-- Live Grafana MCP acceptance against a real Grafana Cloud or self-hosted instance remains external-resource work.
-- Automatic local or cloud audit compaction/retention is not implemented; authenticated anchors make a correctly chosen prefix safe to remove but StageGuard still does not perform destructive retention itself.
-- A production remediation provider integration still requires an operator-owned endpoint and credentials for real acceptance.
+- The new planner tests have not run inside a complete repository checkout during this run.
+- There is intentionally no destructive retention executor yet; any future executor must require an explicit operator action and revalidate the authenticated checkpoint immediately before mutation.
+- Cloud Logging does not yet have a provider-specific exhaustive/delete adapter; current inventory is advisory by design.
+- Real Google Cloud acceptance for GCS generation-CAS, Cloud Logging consistency/retention, Cloud Run/IAP, and Secret Manager remains external-resource work.
+- Live Grafana MCP acceptance and a real production remediation provider still require operator-owned credentials/resources.
 
 ## Single best next step
 
-**Implement a non-destructive audit-retention planner/CLI that reads the authenticated schema-v4 checkpoint and reports the exact safe compaction boundary, candidate records/bytes eligible for removal, and refusal reasons without deleting anything. Add credential-free JSONL and Cloud Logging tests proving it never proposes deletion beyond the authenticated anchor, refuses unverified/unbound/conflicted state, and emits an operator-auditable plan that can later be connected to explicit retention tooling.**
+**Add an explicit two-phase retention execution contract for local JSONL only: generate a signed/hashed plan artifact, then require the operator to present that exact plan plus a freshly revalidated checkpoint before atomically rewriting the file. Keep deletion disabled by default, preserve all post-anchor and other-incident records, refuse stale plans/checkpoint drift, create a recoverable backup, and add crash/failure tests. Do not add Cloud Logging deletion until an equally strong provider-specific safety contract exists.**
 
 ## Previous run summary
 
-The previous run added credential-free constructor tests proving the production GCS + Cloud Logging bootstrap selects one shared audit log identity, an observable GCS checkpoint store, the anchored execution-safe runtime, bounded anchor cadence, and hardened `require_verified` policy.
+The previous run added a credential-free fake-cloud end-to-end restart acceptance path using the real StageGuard GCS and Cloud Logging adapters over in-memory provider primitives, proving authenticated winner restore and zero remediation replay.
