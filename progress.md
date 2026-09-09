@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable checkpointing with optimistic concurrency, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, and the anchor-aware + execution-safe service as the default bootstrap composition.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable checkpointing with optimistic concurrency, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, anchor-aware + execution-safe default bootstrap composition, non-destructive retention planning, and a local-only two-phase authenticated retention executor.
 
 Core safety invariants:
 
@@ -16,70 +16,72 @@ Core safety invariants:
 - The authenticated checkpoint audit-chain head is lifecycle authority; losing-writer residue cannot manufacture lifecycle state.
 - Audit anchors are authenticated compaction boundaries, not independent trust roots; promotion becomes authoritative only after checkpoint persistence succeeds.
 - Branched-lineage verification and candidate reads are bounded and fail closed on state/candidate explosion or silent truncation.
-- Audit retention planning is read-only and may never propose a boundary beyond the authenticated non-genesis anchor.
+- Audit retention may never advance beyond the authenticated non-genesis anchor.
+- Local destructive retention is two-phase: a signed plan binds the exact checkpoint state and exact audit-file digest, and execution revalidates both before mutation.
+- Local retention always creates a recoverable owner-only backup before atomic replacement and preserves other incidents plus all post-anchor records.
+- Cloud Logging deletion remains intentionally disabled until a provider-specific exhaustive safety contract exists.
 - `/readyz` fails closed for checkpoint conflict, execution uncertainty, audit-integrity failure, or configured integrity-policy violation.
 
-## Run log — 2026-09-09 — non-destructive authenticated audit-retention planner
+## Run log — 2026-09-09 — two-phase authenticated local retention executor
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/incident_checkpoint.py`, `runtime/audit_anchor.py`, `runtime/durable_audit_reader.py`, `runtime/anchored_incident_service.py`, `runtime/incident_service.py`, and the recent schema-v4/fake-cloud tests. Confirmed the previous handoff accurately identified the strongest remaining safe gap: StageGuard had authenticated compaction boundaries but no operator-safe tool for calculating what is eligible for retention removal.
+Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/retention_planner.py`, `runtime/incident_checkpoint.py`, `runtime/incident_service.py`, and `runtime/tests/test_retention_planner.py`. Confirmed the previous handoff accurately identified the strongest safe unblocked gap: StageGuard could calculate an authenticated JSONL compaction boundary but had no explicit execution contract that bound operator intent to an exact checkpoint and exact source file before mutation.
 
 ### Exact changes made
 
-1. Added `runtime/retention_planner.py`.
-   - Introduces immutable `AuditRetentionPlan` output with incident/backend identity, safe/refused status, refusal reason, authenticated boundary/head, current chain sequence, eligible record/byte counts, scanned totals, and enumeration completeness.
-   - `plan_authenticated_boundary(...)` refuses anything except `audit_integrity_state="verified"`, rejects checkpoint conflict, unbound checkpoints, missing anchors, genesis anchors, anchors beyond the authenticated head, and impossible chain/lifecycle ordering.
-   - The only safe boundary emitted is `audit_anchor_sequence`; no function can advance it based on observed log contents.
-2. Added exact local JSONL inventory.
-   - `plan_jsonl_retention(...)` scans read-only, counts only records for the target incident at or before the authenticated anchor, reports exact line bytes eligible for removal, preserves same-sequence loser residue in the count, and never rewrites/truncates/unlinks the source.
-   - Scans are bounded by configurable byte and record ceilings and fail closed on malformed JSON/events, invalid sequences, filesystem errors, or bound exhaustion.
-3. Added Cloud Logging advisory inventory.
-   - `plan_cloud_logging_retention(...)` calls only the branch-aware candidate reader through the authenticated anchor and never requests records above it.
-   - Because Cloud Logging lookback/retention can make enumeration incomplete, the plan explicitly reports `enumeration_complete=false` and does not invent a byte count.
-   - Provider/read errors become refusal plans rather than partial deletion authority.
-4. Added a strict JSONL CLI.
-   - Requires an HMAC-signed checkpoint document and a signing key of at least 32 bytes supplied through an environment variable.
-   - Emits one machine-readable JSON plan and exits non-zero for a refused plan.
-   - Performs no deletion and exposes no secret material in output.
-5. Added `runtime/tests/test_retention_planner.py`.
-   - Covers refusal of unverified, conflicted, unbound, and genesis-anchor state.
-   - Proves exact JSONL record/byte accounting and byte-for-byte non-modification of the source.
-   - Proves post-anchor records are never counted.
-   - Proves Cloud Logging inventory requests `after_sequence=0` and `through_sequence=<authenticated anchor>` only, remains explicitly incomplete, and is not called at all when trust prerequisites fail.
+1. Added `runtime/retention_executor.py`.
+   - Introduces schema `stageguard.audit-retention-plan.v1` and immutable `LocalRetentionPlan` / `RetentionExecutionResult` records.
+   - `prepare_local_retention_plan(...)` delegates boundary calculation to the existing read-only planner, requires verified/non-conflicted authenticated anchor state, hashes the exact checkpoint state, hashes the exact JSONL source, records exact eligible/scanned counts and bytes, and emits a SHA-256 + HMAC authenticated plan artifact.
+   - Preparation checks file device/inode/size/mtime before and after inventory/hash work and refuses preparation if the file changed mid-plan.
+2. Added fresh revalidation before destructive execution.
+   - `execute_local_retention(...)` verifies plan schema, SHA-256, HMAC, incident identity, checkpoint-state digest, authenticated anchor sequence/head, audit file digest, and byte length.
+   - The rewrite reparses every source record, preserves blank lines, other incidents, and every target-incident record after the authenticated boundary.
+   - The rewrite recomputes the complete source digest while streaming and refuses if the candidate set or source bytes differ from the signed plan.
+3. Added recoverability and atomic local replacement.
+   - The executor writes to an owner-only temporary file in the source directory, fsyncs it, creates an owner-only full backup beside the audit file, fsyncs the backup and directory, then atomically replaces the JSONL path and fsyncs the directory again.
+   - A custom backup path must remain beside the audit file and may not already exist or alias the source.
+   - Failures before replacement leave the original audit file intact; failures after backup creation retain the recoverable backup.
+4. Added an explicit CLI contract.
+   - `prepare` writes a new owner-only signed plan artifact and refuses overwrite via `O_EXCL`.
+   - `execute` requires that exact plan artifact plus a freshly loaded HMAC-authenticated checkpoint.
+   - Signing material is read from an environment variable rather than argv; the only accepted prepare integrity state is `verified`.
+   - No Cloud Logging deletion command was added.
+5. Added `runtime/tests/test_retention_executor.py`.
+   - Covers full two-phase success, exact preservation of post-anchor/other-incident records, exact recoverable backup contents, checkpoint drift refusal, audit-file drift refusal, plan tampering rejection, simulated atomic-replace failure with original preservation and backup recovery, and unverified-plan refusal.
 6. Kept repository/CI impact bounded.
-   - Prepared source, tests, and this handoff as one Git tree/commit/ref update.
+   - Prepared implementation, tests, and this handoff in one Git tree/commit/ref update.
    - Did not manually trigger or rerun GitHub Actions.
 
 ### Tests / checks / results
 
-- The new planner and test source both passed Python syntax compilation in isolated validation.
+- `runtime/retention_executor.py` and `runtime/tests/test_retention_executor.py` passed isolated Python syntax compilation before commit preparation.
 - Repository inspection and Git object preparation succeeded through the connected GitHub integration.
 - A complete repository test suite still cannot be executed in this automation environment, so no green-suite claim is made.
 - No GitHub Actions workflow was manually triggered or rerun.
 - No live Grafana, Gemini, GCS, Cloud Logging, Cloud Run, IAP, Secret Manager, remediation endpoint, or operator resource was touched.
-- The retention implementation is deliberately non-destructive; it does not delete local files or provider log entries.
+- Cloud Logging retention remains read-only/advisory; this run added destructive capability only for explicit local JSONL execution.
 
 ### Decisions made
 
-1. **Separate deletion authority from inventory.** The planner can identify an authenticated boundary and observed/exact candidates, but it never performs retention mutation.
-2. **Treat runtime `verified` plus non-conflicted schema-v4 anchor state as mandatory.** Merely seeing an anchor-shaped value is insufficient.
-3. **Make JSONL exact but Cloud Logging advisory.** Local bytes can be counted deterministically; provider retention/lookback means Cloud Logging enumeration must not claim completeness without a separate exhaustive provider contract.
-4. **Refuse genesis anchors.** Sequence zero is cryptographically valid but has no compactable history and should not produce a misleading “safe” plan.
-5. **Bound inventory work.** Retention planning itself must not become an unbounded memory/IO path.
+1. **Bind operator intent to both checkpoint and source bytes.** A valid old plan cannot be reused after lifecycle movement or audit append/mutation.
+2. **Require exact-plan execution rather than recalculating at execution time.** The presented HMAC plan is the operator-authorized candidate set; execution may only confirm it or refuse it.
+3. **Back up before replace.** Local compaction is allowed to be destructive only after a byte-for-byte recovery copy has been durably written.
+4. **Preserve unrelated and post-anchor evidence exactly.** Compaction targets only records for the signed incident at sequences `1..authenticated_anchor`.
+5. **Keep provider deletion out of scope.** Cloud Logging inventory remains intentionally incomplete, so it is not eligible for this executor.
+6. **Fail closed on drift and malformed input.** Checkpoint drift, file drift, plan tampering, malformed JSON/events, candidate-count mismatch, and backup conflicts all abort before replacing the source.
 
 ### Current blockers / unknowns
 
-- The new planner tests have not run inside a complete repository checkout during this run.
-- There is intentionally no destructive retention executor yet; any future executor must require an explicit operator action and revalidate the authenticated checkpoint immediately before mutation.
-- Cloud Logging does not yet have a provider-specific exhaustive/delete adapter; current inventory is advisory by design.
+- The new executor regression suite has not run inside a complete repository checkout during this run.
+- The local JSONL path still assumes an operator executes retention while StageGuard writers are quiescent. Exact source hashing detects observed drift before replacement, but there is no cross-process cooperative writer lock yet; adding one would close the remaining tiny append-vs-replace race for local development.
 - Real Google Cloud acceptance for GCS generation-CAS, Cloud Logging consistency/retention, Cloud Run/IAP, and Secret Manager remains external-resource work.
 - Live Grafana MCP acceptance and a real production remediation provider still require operator-owned credentials/resources.
 
 ## Single best next step
 
-**Add an explicit two-phase retention execution contract for local JSONL only: generate a signed/hashed plan artifact, then require the operator to present that exact plan plus a freshly revalidated checkpoint before atomically rewriting the file. Keep deletion disabled by default, preserve all post-anchor and other-incident records, refuse stale plans/checkpoint drift, create a recoverable backup, and add crash/failure tests. Do not add Cloud Logging deletion until an equally strong provider-specific safety contract exists.**
+**Close the remaining local compaction race by adding a small cross-process cooperative audit-file lock shared by `JsonlAuditLog.append`, JSONL candidate readers, retention planning, and retention execution. The executor should hold an exclusive lock from fresh source validation through backup + atomic replace, writers should take the same lock around append+fsync, and tests should prove an append cannot be lost or interleave with compaction. Keep the mechanism local-only and avoid changing Cloud Logging semantics.**
 
 ## Previous run summary
 
-The previous run added a credential-free fake-cloud end-to-end restart acceptance path using the real StageGuard GCS and Cloud Logging adapters over in-memory provider primitives, proving authenticated winner restore and zero remediation replay.
+The previous run added the non-destructive authenticated audit-retention planner for exact local JSONL inventory and advisory Cloud Logging inventory, with strict refusal of unverified, conflicted, unbound, or genesis-anchor state.
