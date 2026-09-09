@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable optimistic-concurrency checkpointing, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, anchor-aware + execution-safe default bootstrap composition, non-destructive retention planning, a two-phase authenticated local retention executor, cooperative local audit-file coordination, and cross-process lock acceptance coverage.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable optimistic-concurrency checkpointing, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, anchor-aware + execution-safe default bootstrap composition, non-destructive retention planning, a two-phase authenticated local retention executor, cooperative local audit-file coordination, cross-process lock acceptance coverage, and subprocess acceptance of the supported retention coordinator CLI.
 
 Core safety invariants:
 
@@ -24,56 +24,52 @@ Core safety invariants:
 - Cloud Logging deletion remains intentionally disabled until a provider-specific exhaustive safety contract exists.
 - `/readyz` fails closed for checkpoint conflict, execution uncertainty, audit-integrity failure, or configured integrity-policy violation.
 
-## Run log — 2026-09-09 — cross-process retention-lock acceptance and operator contract
+## Run log — 2026-09-09 — retention coordinator CLI subprocess acceptance
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, recent commits, `runtime/audit_file_lock.py`, `runtime/tests/test_audit_file_lock.py`, `runtime/retention_coordinator.py`, and `README.md`. Confirmed the previous handoff accurately identified two remaining local-retention gaps: existing regressions proved thread coordination but not independent-process exclusion, and the safe coordinated CLI was not yet documented as the sole supported operator path.
+Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/retention_coordinator.py`, `runtime/retention_planner.py`, `runtime/incident_checkpoint.py`, and the existing retention/locking regressions. Confirmed the highest-value unblocked gap was at the actual documented operator boundary: lower-level executor and lock behavior had coverage, but the supported coordinator CLI itself had not been exercised end-to-end through independent subprocesses.
 
 ### Exact changes made
 
-1. Added `runtime/tests/test_audit_file_lock_subprocess.py`.
-   - Uses Python's `spawn` multiprocessing context so the lock holder and writer are genuinely independent child processes on both POSIX and Windows rather than fork-inheriting parent state.
-   - One child acquires StageGuard's sidecar audit lock and signals readiness; a second child constructs `AnchoredJsonlAuditLog` and attempts a real append.
-   - The regression asserts the writer starts but cannot complete while the first process holds the lock, then completes after release with exit code 0 and a readable persisted audit event.
-   - Cleanup terminates lingering children on assertion failure to avoid hanging the suite.
-2. Added `AUDIT_RETENTION.md`.
-   - Documents the authenticated two-phase local retention safety contract, plan/checkpoint/source binding, backup + atomic replacement behavior, concurrency boundary, fail-closed conditions, and recovery guidance.
-   - Declares `runtime/retention_coordinator.py` as the only supported operator-facing destructive-retention entrypoint.
-   - Explicitly states that `runtime/retention_executor.py` is a lower-level implementation module whose direct invocation bypasses cooperative coordination and is therefore not an operator CLI contract.
-   - Documents environment-only HMAC key handling and concrete `prepare` / `execute` commands without exposing secrets.
-   - Keeps Cloud Logging deletion disabled/read-only and calls out non-cooperating external JSONL writers as outside the lock contract.
+1. Added `runtime/tests/test_retention_coordinator_cli.py`.
+   - Builds a real StageGuard incident checkpoint via `IncidentService`, upgrades it to a schema-v4 authenticated anchor, and writes an HMAC-signed checkpoint document using the production checkpoint serializer.
+   - Invokes `runtime/retention_coordinator.py prepare` in a subprocess with the signing key supplied only through `STAGEGUARD_CHECKPOINT_HMAC_KEY`.
+   - Invokes the documented `execute` phase in a second subprocess against the exact generated signed plan.
+   - Verifies the authenticated incident prefix is removed, all post-anchor records and other-incident records are preserved byte-for-byte, and the explicit recovery backup contains the complete original audit file with owner-only permissions.
+   - Adds a fail-closed subprocess case where the audit file changes after plan preparation; execution must return non-zero, report source drift, leave the drifted source untouched, and create no backup.
+2. Kept implementation surface small.
+   - No production retention code changed because the operator contract already existed; this run adds executable acceptance at that boundary rather than duplicating logic.
+   - No Cloud Logging deletion or broader destructive capability was introduced.
 3. Kept repository/CI impact bounded.
-   - Prepared the test, operator documentation, and progress handoff as one Git tree/commit/ref update.
+   - Prepared the new regression and this progress handoff in one Git tree/commit/ref update.
    - Did not manually trigger or rerun GitHub Actions.
 
 ### Tests / checks / results
 
-- The new subprocess regression source passed isolated Python syntax compilation before Git object preparation.
-- The test deliberately uses `multiprocessing.get_context("spawn")`, providing a Windows-compatible branch while also avoiding POSIX fork semantics that could make the acceptance less representative of independent processes.
-- Repository-side full test execution is still unavailable in this automation environment, so no green-suite claim is made.
+- The new test source passed isolated Python syntax compilation before commit preparation.
+- The acceptance is credential-free and uses only temporary local files, a deterministic fake remediation adapter, and subprocess invocation of the actual coordinator script.
+- The full repository/runtime suite still cannot be executed inside this automation environment, so no green-suite claim is made.
 - No live Grafana, Gemini, GCS, Cloud Logging, Cloud Run, IAP, Secret Manager, remediation endpoint, or operator resource was touched.
-- No Cloud Logging destructive capability was added.
 
 ### Decisions made
 
-1. **Use `spawn` for the acceptance test.** It exercises independent interpreter processes consistently across platforms and avoids accidentally proving only fork-inherited behavior.
-2. **Test the real anchored writer, not only the lock helper.** The writer child executes `AnchoredJsonlAuditLog.append()`, so the regression covers the production-like local append integration.
-3. **Keep retention coordination single-sourced.** Documentation points operators to the coordinator rather than adding another wrapper or duplicating executor logic.
-4. **Do not broaden destructive scope.** This run improves proof and operability of local JSONL retention only; Cloud Logging remains read-only/advisory.
-5. **Treat non-cooperating writers as unsupported during compaction.** StageGuard can serialize its own components, but cannot safely promise coordination with arbitrary processes that ignore the sidecar lock.
+1. **Test the documented CLI rather than another internal helper.** The goal is to prove the exact operator path named in `AUDIT_RETENTION.md` composes checkpoint authentication, signed planning, coordination, compaction, and recovery backup correctly.
+2. **Keep the signing key environment-only.** The subprocess regression mirrors the intended secret-handling contract and never places key material in argv.
+3. **Include a stale-plan/source-drift negative path.** A destructive operator workflow needs explicit proof that a signed plan cannot be replayed after the source changes.
+4. **Avoid unrelated production edits.** Existing coordinator/executor behavior was structurally sufficient; adding acceptance coverage delivered more value than refactoring stable code.
 
 ### Current blockers / unknowns
 
-- The new subprocess acceptance and existing runtime suite have not run inside a complete checkout during this run.
-- Windows `msvcrt.locking` behavior is covered by the cross-platform spawn test design but still needs execution on an actual Windows runner/host for empirical confirmation.
+- The new CLI acceptance and existing runtime suite have not run inside a complete checkout during this run.
+- Windows `msvcrt.locking` behavior still needs empirical execution on an actual Windows host/runner despite spawn-based cross-platform test design.
 - Real Google Cloud acceptance for GCS generation-CAS, Cloud Logging consistency/retention, Cloud Run/IAP, and Secret Manager remains external-resource work.
 - Live Grafana MCP acceptance and a real production remediation provider still require operator-owned credentials/resources.
 
 ## Single best next step
 
-**Run the full runtime suite in a complete checkout on Linux and Windows, fix any integration defects from the new subprocess regression, then add a credential-free retention/restart acceptance that executes the documented coordinator CLI as a subprocess end-to-end: prepare signed plan → execute compaction → restart through normal `build_runtime` → prove `audit_integrity=verified`, readiness remains hardened, and no consumed remediation approval is replayed.**
+**Extend the CLI acceptance into a full credential-free restart proof: create a real anchored/execution-safe runtime state with a consumed approval, run the documented coordinator prepare/execute subprocesses, restart through normal `build_runtime`, and assert `audit_integrity=verified`, hardened readiness, clear reconciliation, and zero remediation replay. Then run the focused and full runtime suites in a complete Linux/Windows checkout and fix any integration defects found.**
 
 ## Previous run summary
 
-The previous run added cooperative sidecar locking shared by `AnchoredJsonlAuditLog` readers/writers and the retention coordinator, closing the in-process append-vs-compaction validation/replacement race for cooperating StageGuard components.
+The previous run added spawn-based cross-process lock acceptance and `AUDIT_RETENTION.md`, establishing `runtime/retention_coordinator.py` as the sole supported operator-facing destructive local retention path.
