@@ -8,6 +8,12 @@ stampede Grafana. A previously successful probe may be reported as ``stale`` for
 only a bounded grace window after a transient refresh failure; activation failure
 is never masked by that grace.
 
+Local trust checks are deliberately evaluated before any network work. If either
+activation record is missing or invalid, the corresponding readiness evaluation
+cannot succeed, so StageGuard reports external MCP checks as ``blocked`` without
+spawning/connecting an MCP client. This prevents a misconfigured or expired local
+trust state from creating avoidable load against Grafana.
+
 The module also exposes a small Prometheus text surface containing only fixed
 StageGuard readiness metrics. It never emits datasource identifiers, endpoints,
 queries, credentials, activation hashes, exception messages, or raw evidence.
@@ -75,9 +81,10 @@ def _verify_mcp_datasource_access(client: object, datasource_uid: str) -> None:
 class EvidencePlaneReadinessProbe:
     """Verify that StageGuard can safely receive incident traffic.
 
-    Local activation verification always runs. External MCP probes use a bounded
-    cache and single-flight lock. ``stale`` is readiness-eligible only while a
-    prior successful external probe remains inside ``stale_grace_seconds``.
+    Local activation verification always runs. External MCP probes run only when
+    all required local activation checks pass, then use a bounded cache and
+    single-flight lock. ``stale`` is readiness-eligible only while a prior
+    successful external probe remains inside ``stale_grace_seconds``.
     """
 
     def __init__(
@@ -202,26 +209,33 @@ class EvidencePlaneReadinessProbe:
                 except Exception:
                     checks["loki_activation"] = "failed"
 
-            now = self._monotonic()
-            checks["prometheus_mcp"] = self._external_status(
-                "prometheus", self._metrics, self._metrics.datasource_uid, now
-            )
-            if self._logs is None:
-                checks["loki_mcp"] = "missing"
-            else:
-                checks["loki_mcp"] = self._external_status(
-                    "loki", self._logs, self._logs.datasource_uid, now
-                )
-
             activation_ready = (
                 checks.get("metric_activation") == "ok"
                 and checks.get("loki_activation") == "ok"
             )
+
+            # Local activation/pin validation is a prerequisite for any external
+            # evidence-plane work. If it cannot pass, probing Grafana cannot make
+            # this process traffic-eligible and only adds avoidable network/MCP load.
+            if not activation_ready:
+                checks["prometheus_mcp"] = "blocked"
+                checks["loki_mcp"] = "missing" if self._logs is None else "blocked"
+                self._last_ready = False
+                return ReadinessResult(ready=False, checks=checks)
+
+            now = self._monotonic()
+            checks["prometheus_mcp"] = self._external_status(
+                "prometheus", self._metrics, self._metrics.datasource_uid, now
+            )
+            checks["loki_mcp"] = self._external_status(
+                "loki", self._logs, self._logs.datasource_uid, now
+            )
+
             external_ready = all(
                 checks.get(name) in {"ok", "stale"}
                 for name in ("prometheus_mcp", "loki_mcp")
             )
-            self._last_ready = activation_ready and external_ready
+            self._last_ready = external_ready
             return ReadinessResult(ready=self._last_ready, checks=checks)
 
     def prometheus_metrics(self) -> str:
