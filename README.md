@@ -92,6 +92,14 @@ The deterministic fixture models three camera feeds and two uplinks. Its seeded 
 
 Real productions can map their existing Prometheus metric and label names in `runtime/telemetry.example.json`; datasource IDs and raw PromQL/LogQL are intentionally not accepted in that mapping.
 
+Before the live MCP preflight, run the dependency-free onboarding doctor:
+
+```bash
+python scripts/stageguard_doctor.py runtime/telemetry.example.json
+```
+
+It checks Python, the telemetry mapping, `GRAFANA_URL`, the least-privilege token-file path, and whether the configured official Grafana MCP launcher is available. It never reads or prints token contents, executes PromQL/LogQL, or mutates local/remote state. `--json` provides a machine-readable result for setup automation.
+
 With least-privilege Grafana MCP credentials configured:
 
 ```bash
@@ -161,6 +169,7 @@ Useful endpoints: simulator metrics `http://localhost:9108/metrics`, Prometheus 
 
 ## Repository structure
 
+- `scripts/stageguard_doctor.py` — credential-safe local onboarding prerequisite checks
 - `runtime/telemetry.py` — validated semantic metric mapping + query builders
 - `runtime/onboarding.py` — strict profile loader + eight-slot metric preflight
 - `runtime/activation.py` / `runtime/log_activation.py` — expiring metric/Loki activation pins
@@ -178,39 +187,3 @@ Useful endpoints: simulator metrics `http://localhost:9108/metrics`, Prometheus 
 - `runtime/remediation.py` — approval and Grafana-based recovery verification
 - `runtime/api.py` — authenticated API and platform health surfaces
 - `runtime/tests/` — credential-free regression coverage
-- `INCIDENT_CHECKPOINTS.md` — restart-state trust boundary and deployment
-- `OPERATOR_CONSOLE.md` — cockpit trust boundary and usage
-- `GOOGLE_CLOUD_DEPLOYMENT.md` — IAP/Cloud Logging deployment boundary
-- `ARCHITECTURE.md` — detailed architecture/trust boundaries
-- `progress.md` — run-by-run implementation handoff
-
-## Tests
-
-```bash
-PYTHONPATH=runtime python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/*.py runtime/tests/*.py
-```
-
-The complete Docker → Grafana → official MCP path requires a Docker-capable host and valid local Grafana credentials. Google integrations are loaded only when selected.
-
-## Near-term roadmap
-
-1. exercise local checkpoint crash/restart tests and the GCS generation-precondition adapter in a runnable checkout, then perform a real Cloud Run + private-bucket acceptance;
-2. add checkpoint freshness/telemetry-profile fingerprinting and operational checkpoint health metrics if empirical restart testing shows they improve failure diagnosis;
-3. execute the full metric+Loki preflight/activation/investigation path against the pinned official MCP binary on a Docker-capable host and capture real tool/latency traces;
-4. package a provider-controlled remediation deployment example preserving the existing allowlist/idempotency contract.
-
-## Official references
-
-- Grafana MCP introduction: https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
-- Official Grafana MCP repository: https://github.com/grafana/mcp-grafana
-- Google IAP identity: https://cloud.google.com/iap/docs/identity-howto
-- IAP for Cloud Run: https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run
-- Google Cloud Logging Python: https://cloud.google.com/logging/docs/write-query-log-entries-python
-- Google Cloud Storage generation preconditions: https://cloud.google.com/storage/docs/request-preconditions
-- Google Cloud Storage Python conditional requests: https://cloud.google.com/python/docs/reference/storage/latest/generation_metageneration
-- Google Gen AI SDK structured output: https://ai.google.dev/gemini-api/docs/structured-output
-
-## Project status
-
-StageGuard is under active development. Its safety core now pins Prometheus and Loki evidence planes, keeps Gemini and approval revision-bound, supports verified IAP identity, provides a same-origin operator cockpit, reconstructs bounded durable audit history, can restore integrity-checked incident lifecycle state, leaves production writes disabled by default, and requires Grafana telemetry—not action acknowledgement—to prove recovery.
