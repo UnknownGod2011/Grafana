@@ -4,7 +4,7 @@
 
 StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The core vertical slice is implemented: deterministic broadcast telemetry, Prometheus/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, explicit human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, and a same-origin operator cockpit.
 
-The repository is in **demo freeze / release-critical integration mode**. Do not add architecture or security features unless they directly unblock the end-to-end operator demonstration.
+The repository has moved beyond hackathon/demo-only work into **personal open-source productization mode**. Preserve the proven demo path, but prioritize concrete improvements that make real Grafana Cloud/self-hosted onboarding, production operation, deployment, testing, and maintainability better.
 
 Core safety invariants:
 
@@ -15,7 +15,58 @@ Core safety invariants:
 - Local demo credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated local/GCS checkpointing, audit-chain/anchor verification, execution reconciliation, and no-replay protections remain implemented and covered by focused regressions.
 
-## Run log — 2026-09-09 — release rehearsal telemetry gating
+## Run log — 2026-09-09 — production onboarding doctor
+
+### Inspected at start
+
+Read `progress.md` completely before choosing work. Inspected current `main`, the judge-facing release pass, `README.md`, `runtime/onboarding.py`, and `runtime/preflight.py`. Confirmed that StageGuard already had a strict live preflight for metrics + Loki, but first-time real users still had to infer basic local prerequisites such as Python version, telemetry-config validity, Grafana URL, token-file location, and the official Grafana MCP launcher before that preflight could succeed.
+
+### Exact changes made
+
+1. Added `scripts/stageguard_doctor.py` as a dependency-free, credential-safe onboarding prerequisite checker.
+   - Validates Python 3.11+.
+   - Loads the existing strict versioned telemetry mapping through `load_telemetry_profile()` rather than duplicating config parsing.
+   - Validates `GRAFANA_URL` structure without making a network request.
+   - Validates that `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE` exists and is non-empty **without reading or printing its contents**.
+   - Warns on POSIX token-file permissions broader than `0600`.
+   - Checks whether the configured `STAGEGUARD_MCP_COMMAND` launcher is locally available; supports both direct MCP binaries and Docker/Podman launchers.
+   - Reports optional activation-file presence without making it a prerequisite for the preflight itself.
+   - Emits concise actionable next steps and supports `--json` for setup automation.
+   - Performs no PromQL/LogQL, no remote Grafana calls, no secret reads, and no mutations.
+2. Updated `README.md` production onboarding to make the doctor the first command before the existing live `runtime/preflight.py` activation step.
+3. Updated repository-structure documentation to include the new onboarding doctor.
+
+### Tests / checks / results
+
+- The doctor intentionally reuses the production telemetry loader, so config validation remains single-sourced.
+- The implementation uses only Python standard-library modules plus existing repository code.
+- This automation environment does not expose a checked-out runtime for executing repository Python commands, so the new CLI was not executed here; no runtime PASS claim is made.
+- No live Grafana, Google Cloud, Gemini, remediation endpoint, token, Devpost, or other external resource was touched.
+- No GitHub Actions workflow was added or manually triggered.
+
+### Decisions made
+
+1. **Separate prerequisite diagnosis from live evidence preflight.** Users should be told exactly which local prerequisite is missing before StageGuard attempts MCP queries.
+2. **Never inspect token contents in the doctor.** File existence/size/permissions are enough for local setup diagnostics; the live MCP preflight remains responsible for proving the credential actually works.
+3. **Reuse existing contracts.** The doctor imports StageGuard's strict telemetry loader instead of creating a second schema or accepting arbitrary datasource/query configuration.
+4. **Keep live validation authoritative.** A green doctor means only “ready to run preflight,” not “production ready.” `runtime/preflight.py` still has to prove the actual Grafana MCP metric/Loki evidence paths and write expiring activation records.
+
+### Current blockers / unknowns
+
+- The new doctor still needs execution on Linux/macOS and Windows checkouts to empirically confirm path/permission presentation.
+- Live official Grafana MCP acceptance still requires a reachable Grafana instance and least-privilege service-account token.
+- Real Google Cloud deployment acceptance remains credential/resource work.
+- The previously reported broader full-suite failures/errors remain to be triaged as productization work; they were not reclassified or hidden in this run.
+
+## Single best next step
+
+**Add credential-free tests for `scripts/stageguard_doctor.py` covering valid config, missing/invalid Grafana URL, missing/non-empty token files, MCP executable discovery, POSIX permission warning, JSON output, and exit codes; then run that focused suite on both Windows and Linux when a checkout/runner is available.**
+
+## Previous run summary
+
+The previous work completed the judge-facing cockpit/provenance pass, Windows checkpoint/retention portability fixes, and release rehearsal telemetry gating. Those proven paths remain intact while the project now shifts toward real-user onboarding and production operation.
+
+## Historical run — 2026-09-09 — release rehearsal telemetry gating
 
 ### Inspected at start
 
@@ -59,15 +110,7 @@ The highest-value concrete demo risk was timing-based evidence readiness. `demo_
 - The complete Python runtime suite has not run in this automation environment.
 - Real Google Cloud/Grafana Cloud acceptance remains credential/resource work and is not required for the deterministic local operator path.
 
-## Single best next step
-
-**Run `python scripts/demo_release.py --open` on a Docker-capable checkout and complete one full take: verified healthy baseline → verified fault evidence → Investigate → optional Gemini briefing → exact revision approval → Execute → telemetry `recovered`. Fix only the first concrete blocker encountered. Once it passes twice consecutively, freeze code and record the demo.**
-
-## Previous run summary
-
-The previous run added the one-command `scripts/demo_local.py` vertical-slice runner, shortened only the post-remediation dropped-frame recovery query window to 15 seconds, aligned `DEMO.md` to the real Grafana MCP → diagnose → approve → remediate → telemetry-verify workflow, and completed the signed local runtime checkpoint -> retention coordinator -> compacted audit -> hardened restart/no-remediation-replay acceptance path. Concurrent follow-up work added presentation/open-source submission assets without changing that runtime contract.
-
-## FINAL SUBMISSION STATUS — 2026-09-09
+## Historical final submission status — 2026-09-09
 
 Demo: BLOCKED ON LOCAL DOCKER ENGINE — `docker compose` is installed, but Docker Desktop's Linux engine was unavailable on this laptop; the repository's deterministic demo runner remains the intended judge-machine path.
 
