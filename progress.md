@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable optimistic-concurrency checkpointing, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, anchor-aware + execution-safe default bootstrap composition, non-destructive retention planning, a two-phase authenticated local retention executor, and cooperative local audit-file coordination around writers/readers and retention.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The executable path includes configurable Prometheus/Loki/Grafana MCP evidence, deterministic diagnosis, revision-bound Gemini briefing, approval-gated remediation, Grafana recovery verification, durable optimistic-concurrency checkpointing, provider reconciliation, Cloud Run/IAP deployment, operator readiness/metrics, a same-origin recovery cockpit, execution-safe dispatch barriers, tamper-evident audit chaining, authenticated winning-lineage selection, schema-v4 authenticated audit anchors, bounded-suffix restore, anchor-aware + execution-safe default bootstrap composition, non-destructive retention planning, a two-phase authenticated local retention executor, cooperative local audit-file coordination, and cross-process lock acceptance coverage.
 
 Core safety invariants:
 
@@ -20,67 +20,60 @@ Core safety invariants:
 - Local destructive retention is two-phase: a signed plan binds exact checkpoint state and exact audit-file bytes, then execution revalidates both before mutation.
 - Local retention always creates a recoverable owner-only backup before atomic replacement and preserves other incidents plus all post-anchor records.
 - Default local anchored JSONL appends and reads share the same cooperative sidecar lock used by coordinated retention, preventing an append from being lost in the validation-to-replace window.
+- The supported operator-facing destructive-retention entrypoint is `runtime/retention_coordinator.py`; direct use of the lower-level executor is not part of the supported operational contract.
 - Cloud Logging deletion remains intentionally disabled until a provider-specific exhaustive safety contract exists.
 - `/readyz` fails closed for checkpoint conflict, execution uncertainty, audit-integrity failure, or configured integrity-policy violation.
 
-## Run log — 2026-09-09 — cooperative local audit/retention coordination
+## Run log — 2026-09-09 — cross-process retention-lock acceptance and operator contract
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/incident_service.py`, `runtime/anchored_incident_service.py`, `runtime/retention_planner.py`, and `runtime/retention_executor.py`. Confirmed the previous handoff accurately identified the remaining local destructive-retention race: the executor revalidated the source digest before replacement, but an `append()` could still occur after that validation and before `os.replace`, allowing a successful concurrent audit append to be lost.
+Read `progress.md` completely before choosing work. Inspected current `main`, recent commits, `runtime/audit_file_lock.py`, `runtime/tests/test_audit_file_lock.py`, `runtime/retention_coordinator.py`, and `README.md`. Confirmed the previous handoff accurately identified two remaining local-retention gaps: existing regressions proved thread coordination but not independent-process exclusion, and the safe coordinated CLI was not yet documented as the sole supported operator path.
 
 ### Exact changes made
 
-1. Added `runtime/audit_file_lock.py`.
-   - Introduces one sidecar lock per local audit path (`.<audit-name>.stageguard.lock`).
-   - Uses an in-process `threading.RLock` plus an OS-level exclusive lock: `fcntl.flock` on POSIX and one-byte `msvcrt.locking` on Windows.
-   - Sidecar files are created with restrictive owner permissions where supported.
-   - The mechanism is explicitly local-file only; no Cloud Logging semantics were changed.
-2. Integrated locking into the default anchored local JSONL backend.
-   - `AnchoredJsonlAuditLog.append()` now holds the cooperative lock through append + fsync.
-   - `read()` and anchor-bounded `read_candidates()` take the same lock, so local readers cannot interleave with a retention replacement.
-   - The stable base `JsonlAuditLog` remains unchanged; the normal StageGuard bootstrap already selects `AnchoredJsonlAuditLog` for the local anchored path.
-3. Added `runtime/retention_coordinator.py` as the safe operator-facing local retention entrypoint.
-   - `coordinated_prepare_local_retention_plan(...)` holds the audit lock across the existing complete inventory + source hashing preparation flow.
-   - `coordinated_execute_local_retention(...)` parses/authenticates the exact signed plan, derives its audit path, then holds the same lock while the existing executor performs fresh checkpoint validation, source re-hashing, candidate rewrite, backup/fsync, atomic replace, and output hashing.
-   - Existing HMAC/checkpoint/file-digest/candidate-count protections are preserved rather than reimplemented.
-   - Includes a CLI with the same environment-only signing-key discipline and explicit `prepare` / `execute` phases. Cloud Logging deletion is not exposed.
-4. Added `runtime/tests/test_audit_file_lock.py`.
-   - Proves an anchored JSONL append blocks while the audit lock is held and completes afterward without loss.
-   - Proves anchored candidate reads coordinate on the same lock.
-   - Proves the coordinated execute wrapper holds the lock around the entire underlying executor call and blocks a concurrent append until execution leaves the critical section.
-   - Proves plan preparation similarly excludes concurrent writers for the full preparation call.
-5. Kept repository/CI impact bounded.
-   - Apart from the initial lock-file commit, integrated source/tests/progress as one Git tree/commit/ref update.
+1. Added `runtime/tests/test_audit_file_lock_subprocess.py`.
+   - Uses Python's `spawn` multiprocessing context so the lock holder and writer are genuinely independent child processes on both POSIX and Windows rather than fork-inheriting parent state.
+   - One child acquires StageGuard's sidecar audit lock and signals readiness; a second child constructs `AnchoredJsonlAuditLog` and attempts a real append.
+   - The regression asserts the writer starts but cannot complete while the first process holds the lock, then completes after release with exit code 0 and a readable persisted audit event.
+   - Cleanup terminates lingering children on assertion failure to avoid hanging the suite.
+2. Added `AUDIT_RETENTION.md`.
+   - Documents the authenticated two-phase local retention safety contract, plan/checkpoint/source binding, backup + atomic replacement behavior, concurrency boundary, fail-closed conditions, and recovery guidance.
+   - Declares `runtime/retention_coordinator.py` as the only supported operator-facing destructive-retention entrypoint.
+   - Explicitly states that `runtime/retention_executor.py` is a lower-level implementation module whose direct invocation bypasses cooperative coordination and is therefore not an operator CLI contract.
+   - Documents environment-only HMAC key handling and concrete `prepare` / `execute` commands without exposing secrets.
+   - Keeps Cloud Logging deletion disabled/read-only and calls out non-cooperating external JSONL writers as outside the lock contract.
+3. Kept repository/CI impact bounded.
+   - Prepared the test, operator documentation, and progress handoff as one Git tree/commit/ref update.
    - Did not manually trigger or rerun GitHub Actions.
 
 ### Tests / checks / results
 
-- New locking and coordination code was reviewed for import/syntax consistency against the existing runtime modules before commit preparation.
-- Focused regression coverage was added for the writer/read/retention coordination contract.
-- A complete repository checkout/test runner is still unavailable in this automation environment, so no green-suite claim is made.
+- The new subprocess regression source passed isolated Python syntax compilation before Git object preparation.
+- The test deliberately uses `multiprocessing.get_context("spawn")`, providing a Windows-compatible branch while also avoiding POSIX fork semantics that could make the acceptance less representative of independent processes.
+- Repository-side full test execution is still unavailable in this automation environment, so no green-suite claim is made.
 - No live Grafana, Gemini, GCS, Cloud Logging, Cloud Run, IAP, Secret Manager, remediation endpoint, or operator resource was touched.
-- Cloud Logging retention remains read-only/advisory.
+- No Cloud Logging destructive capability was added.
 
 ### Decisions made
 
-1. **Coordinate the concrete default local backend instead of rewriting the stable incident-service core.** Bootstrap already uses `AnchoredJsonlAuditLog`, so the production-like local path gains locking without broad unrelated changes.
-2. **Use one lock identity for readers, writers, and destructive retention.** A successful append can no longer occur inside the signed-plan execution validation-to-replace window.
-3. **Wrap the proven executor rather than duplicate it.** The coordinator supplies serialization only; HMAC authentication, checkpoint drift checks, source digests, exact candidate checks, backup/fsync, and atomic replacement remain single-sourced in `retention_executor.py`.
-4. **Keep locking local-only.** Provider-backed audit stores need provider-specific consistency contracts, not a filesystem lock abstraction.
-5. **Prefer fail-closed serialization over lock timeouts.** Local retention is an explicit operator action; silently proceeding because a lock timed out would be less safe than waiting for the cooperating writer/reader critical section to finish.
+1. **Use `spawn` for the acceptance test.** It exercises independent interpreter processes consistently across platforms and avoids accidentally proving only fork-inherited behavior.
+2. **Test the real anchored writer, not only the lock helper.** The writer child executes `AnchoredJsonlAuditLog.append()`, so the regression covers the production-like local append integration.
+3. **Keep retention coordination single-sourced.** Documentation points operators to the coordinator rather than adding another wrapper or duplicating executor logic.
+4. **Do not broaden destructive scope.** This run improves proof and operability of local JSONL retention only; Cloud Logging remains read-only/advisory.
+5. **Treat non-cooperating writers as unsupported during compaction.** StageGuard can serialize its own components, but cannot safely promise coordination with arbitrary processes that ignore the sidecar lock.
 
 ### Current blockers / unknowns
 
-- The new lock regressions have not run inside a complete repository checkout during this run.
-- The cooperative lock protects StageGuard components that use the shared lock. External processes that directly write the JSONL file without using StageGuard's lock remain outside the contract; source-digest checks still detect many such changes, but external non-cooperating writers must be considered unsupported during compaction.
+- The new subprocess acceptance and existing runtime suite have not run inside a complete checkout during this run.
+- Windows `msvcrt.locking` behavior is covered by the cross-platform spawn test design but still needs execution on an actual Windows runner/host for empirical confirmation.
 - Real Google Cloud acceptance for GCS generation-CAS, Cloud Logging consistency/retention, Cloud Run/IAP, and Secret Manager remains external-resource work.
 - Live Grafana MCP acceptance and a real production remediation provider still require operator-owned credentials/resources.
 
 ## Single best next step
 
-**Make the coordinated retention path the only documented/local CLI path and add a real subprocess acceptance test (POSIX plus a Windows-compatible branch) that holds the sidecar lock in one process while a second process attempts `AnchoredJsonlAuditLog.append()`, proving cross-process exclusion rather than only thread-level exclusion. Then run the full runtime suite in a complete checkout and fix any integration defects before expanding retention functionality.**
+**Run the full runtime suite in a complete checkout on Linux and Windows, fix any integration defects from the new subprocess regression, then add a credential-free retention/restart acceptance that executes the documented coordinator CLI as a subprocess end-to-end: prepare signed plan → execute compaction → restart through normal `build_runtime` → prove `audit_integrity=verified`, readiness remains hardened, and no consumed remediation approval is replayed.**
 
 ## Previous run summary
 
-The previous run added `runtime/retention_executor.py`, providing signed two-phase local JSONL retention plans, fresh checkpoint/source revalidation, exact candidate-set checking, owner-only recoverable backup, fsync, and atomic replacement while leaving Cloud Logging deletion disabled.
+The previous run added cooperative sidecar locking shared by `AnchoredJsonlAuditLog` readers/writers and the retention coordinator, closing the in-process append-vs-compaction validation/replacement race for cooperating StageGuard components.
