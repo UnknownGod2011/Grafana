@@ -205,5 +205,88 @@ class GcpDeployDoctorSecretAccessTests(unittest.TestCase):
         self.assertTrue(any("roles/secretmanager.secretAccessor" in step for step in steps))
 
 
+class GcpDeployDoctorLoggingAccessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.doctor = _load_doctor_module()
+
+    def _check_with_response(self, permission: str, returncode: int, payload: str):
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
+            check = self.doctor._logging_access_check(
+                "123456789012",
+                "stageguard@stageguard-test.iam.gserviceaccount.com",
+                permission,
+            )
+        return check, run
+
+    def test_logging_permissions_are_exact_runtime_contract(self) -> None:
+        self.assertEqual(
+            self.doctor.LOGGING_RUNTIME_PERMISSIONS,
+            ("logging.logEntries.create", "logging.logEntries.list"),
+        )
+
+    def test_logging_create_uses_project_resource_and_policy_troubleshooter(self) -> None:
+        check, run = self._check_with_response(
+            "logging.logEntries.create",
+            0,
+            json.dumps({"overallAccessState": "CAN_ACCESS"}),
+        )
+        self.assertEqual(check.status, "ok")
+        args = run.call_args.args[0]
+        self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
+        self.assertIn("//cloudresourcemanager.googleapis.com/projects/123456789012", args)
+        self.assertIn("--principal-email=stageguard@stageguard-test.iam.gserviceaccount.com", args)
+        self.assertIn("--permission=logging.logEntries.create", args)
+
+    def test_logging_list_allowed_passes(self) -> None:
+        check, _ = self._check_with_response(
+            "logging.logEntries.list",
+            0,
+            json.dumps({"overallAccessState": "CAN_ACCESS"}),
+        )
+        self.assertEqual(check.status, "ok")
+        self.assertIn("logging.logEntries.list", check.detail)
+
+    def test_logging_permission_denied_fails_closed(self) -> None:
+        check, _ = self._check_with_response(
+            "logging.logEntries.list",
+            0,
+            json.dumps({"overallAccessState": "CANNOT_ACCESS"}),
+        )
+        self.assertEqual(check.status, "failed")
+        self.assertIn("lacks effective logging.logEntries.list", check.detail)
+
+    def test_logging_permission_unknown_fails_closed(self) -> None:
+        check, _ = self._check_with_response(
+            "logging.logEntries.create",
+            0,
+            json.dumps({"overallAccessState": "UNKNOWN"}),
+        )
+        self.assertEqual(check.status, "failed")
+        self.assertIn("could not determine", check.detail)
+
+    def test_logging_permission_command_failure_fails_closed(self) -> None:
+        check, _ = self._check_with_response("logging.logEntries.create", 1, "")
+        self.assertEqual(check.status, "failed")
+        self.assertIn("could not be verified", check.detail)
+
+    def test_logging_permission_invalid_json_fails_closed(self) -> None:
+        check, _ = self._check_with_response("logging.logEntries.list", 0, "not-json")
+        self.assertEqual(check.status, "failed")
+        self.assertIn("unreadable response", check.detail)
+
+    def test_next_steps_explain_both_logging_permissions(self) -> None:
+        checks = [
+            self.doctor.Check(
+                "logging_access:list",
+                "failed",
+                "runtime service account lacks effective logging.logEntries.list on the target project",
+            )
+        ]
+        steps = self.doctor._next_steps(checks, offline=False)
+        self.assertTrue(any("logging.logEntries.create" in step for step in steps))
+        self.assertTrue(any("logging.logEntries.list" in step for step in steps))
+
+
 if __name__ == "__main__":
     unittest.main()
