@@ -15,7 +15,64 @@ Core invariants:
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-09 — Google Cloud deployment preflight
+## Run log — 2026-09-09 — Gemini deployment prerequisite alignment
+
+### Inspected at start
+
+Read `progress.md` completely, then inspected `scripts/gcp_deploy_doctor.py`, `scripts/deploy_cloud_run.sh`, and `runtime/tests/test_gcp_deploy_doctor.py`. The highest-value defect found was a mismatch between the deployment helper and its doctor: `deploy_cloud_run.sh` accepts and acts on `ENABLE_GEMINI`, but the doctor neither validated that value nor required Vertex AI when Gemini was enabled. That meant a configuration could be reported as deployment-ready even though the actual Gemini-enabled runtime path would fail.
+
+### Exact changes made
+
+Updated `scripts/gcp_deploy_doctor.py` so that it now:
+
+- parses `ENABLE_GEMINI` using the same accepted true/false aliases as `scripts/deploy_cloud_run.sh`;
+- fails preflight on invalid values instead of allowing deployment to discover the error later;
+- reports the resolved Gemini state in JSON output;
+- computes required Google Cloud APIs dynamically;
+- requires `aiplatform.googleapis.com` when `ENABLE_GEMINI=true`;
+- keeps Vertex AI optional when Gemini is disabled;
+- gives a targeted remediation step when Gemini configuration or required APIs are missing.
+
+Updated `runtime/tests/test_gcp_deploy_doctor.py` with credential-free coverage for:
+
+- Gemini disabled by default in the deployment fixture;
+- Vertex AI omitted from required APIs when Gemini is disabled;
+- Vertex AI included when Gemini is enabled;
+- boolean aliases matching the deployment helper (`1/0`, `true/false`, `yes/no`, `on/off`, case-insensitive);
+- invalid Gemini values causing an offline preflight failure before deployment.
+
+Commits created by the file updates:
+
+- `8394d2997546d7fd67c82e2a7d0ae7d66973ff0c` — Gemini-aware deployment doctor
+- `c9812da0f8206882c4195ac3207d77c679e0b29c` — Gemini deployment-doctor regression coverage
+
+### Tests / checks / results
+
+- Performed source-level consistency review between the updated doctor and `deploy_cloud_run.sh`.
+- Attempted a fresh public GitHub checkout to execute `python -m unittest runtime.tests.test_gcp_deploy_doctor -v`; the execution environment could not resolve `github.com`, so the checkout failed before any tests ran.
+- No PASS claim is made for the updated test module in this run.
+- No GitHub Actions workflow was added or triggered.
+- No Google Cloud project, IAM policy, API, secret payload, Grafana instance, Gemini endpoint, or remediation endpoint was changed.
+
+### Decisions made
+
+1. **The deploy doctor must model the deployment helper exactly.** Optional flags that alter runtime prerequisites cannot remain invisible to preflight.
+2. **Gemini remains optional, but enabling it must be fail-closed.** StageGuard may deploy without Gemini; if Gemini is explicitly enabled, Vertex AI availability becomes a required deployment condition.
+3. **Keep preflight non-mutating.** Missing Vertex AI is reported; the doctor never enables the API itself.
+4. **Do not broaden scope into IAM mutation.** Runtime service-account role verification remains a separate follow-up because inherited/project-level IAM requires more careful read-only evaluation than a simple secret metadata check.
+
+### Current blockers / unknowns
+
+- The expanded `runtime/tests/test_gcp_deploy_doctor.py` needs empirical execution on an executable checkout.
+- The doctor still checks Secret Manager resource existence, not whether the Cloud Run runtime service account has effective `secretAccessor` permission through project- or secret-level IAM.
+- Gemini/Vertex AI production acceptance still requires a real authorized Google Cloud project and model access.
+- The historical broader test-suite failures/errors still need systematic triage.
+
+## Single best next step
+
+**Add a read-only effective-permission check for the Cloud Run runtime service account against the four mounted Secret Manager secrets (covering project-level and secret-level `roles/secretmanager.secretAccessor` grants without reading secret payloads), with mocked regression tests before allowing `ready_to_deploy=true`.**
+
+## Previous run — 2026-09-09 — Google Cloud deployment preflight
 
 ### Inspected at start
 
@@ -89,10 +146,6 @@ Added `runtime/tests/test_gcp_deploy_doctor.py` with credential-free subprocess 
 - Live Google Cloud deployment acceptance still requires an authorized project, service account, four Secret Manager secrets, an Artifact Registry image, and IAP configuration.
 - Gemini/Vertex AI production acceptance still requires real Google Cloud credentials and enabled model access.
 - The historically observed broader test-suite failures/errors still need systematic triage after deployment-path validation.
-
-## Single best next step
-
-**Run `python -m unittest runtime.tests.test_gcp_deploy_doctor -v` on the next executable checkout, then exercise `python scripts/gcp_deploy_doctor.py --json` against a real non-production Google Cloud project and fix the first genuine deployment-path defect it exposes before attempting Cloud Run deployment.**
 
 ## Validation baseline retained
 
