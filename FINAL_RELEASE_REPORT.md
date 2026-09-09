@@ -10,6 +10,7 @@ PASS locally. Docker Desktop's Linux engine was restarted non-destructively, and
 - Python compilation: **pass** (`python -m compileall -q runtime scripts`).
 - Full available suite: **352 tests — 328 passed, 9 failed, 15 errors, 19 skipped**. Remaining failures are outside the judge-facing vertical slice and include production/reconciliation contract cases plus one telemetry escaping assertion; no full-suite green claim is made.
 - Windows portability fixes: checkpoint schema, incident checkpoint, retention planner, and retention executor tests pass; the retention permission assertion is platform-aware because Windows exposes ACLs rather than POSIX mode bits.
+- Onboarding doctor: **8 passed, 1 skipped** under `py -3.12`; the Windows launcher-path parsing defect was fixed.
 - Docker/release gate: healthy baseline and fault evidence predicates passed; `docker compose config` passed.
 
 ## GRAFANA MCP:
@@ -43,7 +44,7 @@ The optional Vertex/Gemini commander is revision-bound and advisory-only. It rec
 
 ## DEVPOST:
 
-**BLOCKED.** The repository is public, has an Apache-2.0 license, and is pushed to GitHub. The browser session was not authenticated, and no public video URL or hosted project URL has been entered.
+**SUBMITTED per user report; not independently verified in this session.** The repository is public, has an Apache-2.0 license, and is pushed to GitHub. The available browser session was not authenticated, so the final Devpost URL/status was not observable here. The finished video still needs to be attached to the submitted entry if it is not already attached.
 
 ## Judge proof matrix
 
@@ -59,6 +60,5 @@ The optional Vertex/Gemini commander is revision-bound and advisory-only. It rec
 
 ## ONLY BLOCKERS
 
-- Docker-capable rehearsal and recording machine is required for live MCP/demo proof.
-- Authenticated YouTube/Vimeo and Devpost sessions are required to upload and submit.
+- Final video hosting/attachment and Devpost status were not observable from the available browser session.
 - Vertex/ADC credentials are required only if a genuine Gemini section is added.

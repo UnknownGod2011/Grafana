@@ -113,6 +113,7 @@ Windows checkpoint/retention persistence was corrected to avoid unavailable `os.
 - Grafana Explore was captured showing the real Prometheus packet-loss history (18% fault plateau returning to 0.3%).
 - Rendered `submission/StageGuard-demo.mp4`: 1920x1080, 126 seconds, captioned/no narration, built only from the real cockpit and Grafana captures. The video has no audio because no reliable local TTS credential was available.
 - Gemini remains **NOT USED** in the capture: this PC has no gcloud/ADC or Gemini environment configuration, so no model call is claimed or faked.
+- Onboarding doctor: **8 tests passed, 1 expected platform-specific permission test skipped** under `py -3.12`; Windows absolute launcher paths are now parsed correctly.
 
 ## FINAL SUBMISSION STATUS — updated 2026-09-09
 
@@ -124,8 +125,8 @@ Gemini: NOT USED — optional integration is implemented but no local credential
 
 Video: `submission/StageGuard-demo.mp4` — 1920x1080, 126 seconds, validated with ffprobe.
 
-Devpost: NOT SUBMITTED — the available browser session is not authenticated for Devpost, so no upload or submission URL exists.
+Devpost: SUBMITTED per user report — the available browser session was not authenticated, so the final URL/status was not independently verified.
 
-Submission: BLOCKED
+Submission: SUBMITTED per user report; video attachment/host URL still needs confirmation.
 
-Any remaining blocker: Upload the finished video to an accepted public/unlisted host and complete the authenticated Devpost submission.
+Any remaining blocker: Publish/attach the finished MP4 and retain the final video URL if it is not already attached to the submitted Devpost entry.

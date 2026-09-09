@@ -96,7 +96,12 @@ def _check_token_file(value: str | None) -> Check:
 def _check_mcp_command(value: str | None) -> Check:
     command = value or "mcp-grafana"
     try:
-        argv = shlex.split(command)
+        # POSIX shlex treats Windows drive/path backslashes as escape
+        # characters. Preserve native Windows launcher paths while retaining
+        # normal shell splitting on POSIX.
+        argv = shlex.split(command, posix=os.name != "nt")
+        if os.name == "nt":
+            argv = [item.strip('"') for item in argv]
     except ValueError as exc:
         return Check("grafana_mcp", "failed", f"invalid STAGEGUARD_MCP_COMMAND: {exc}")
     if not argv:
