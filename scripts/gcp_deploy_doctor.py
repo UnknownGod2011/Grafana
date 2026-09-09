@@ -47,6 +47,10 @@ SECRET_ENV_NAMES = (
 )
 
 SECRET_ACCESS_PERMISSION = "secretmanager.versions.access"
+LOGGING_RUNTIME_PERMISSIONS = (
+    "logging.logEntries.create",
+    "logging.logEntries.list",
+)
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off", ""}
 
@@ -159,14 +163,16 @@ def _env_checks() -> list[Check]:
     return checks
 
 
-def _secret_access_check(project_number: str, service_account: str, secret: str, env_name: str) -> Check:
-    """Use Policy Troubleshooter to verify payload-read permission without reading payloads.
-
-    Policy Troubleshooter evaluates effective IAM access, including inherited allow and
-    deny policy. We intentionally check the underlying permission rather than assuming
-    that one specific predefined role is the only way to grant access.
-    """
-    full_resource_name = f"//secretmanager.googleapis.com/projects/{project_number}/secrets/{secret}"
+def _troubleshoot_permission(
+    full_resource_name: str,
+    service_account: str,
+    permission: str,
+    check_name: str,
+    success_detail: str,
+    denied_detail: str,
+    unknown_detail: str,
+) -> Check:
+    """Evaluate one effective IAM permission with Policy Troubleshooter, fail closed."""
     code, stdout, _ = _run_gcloud(
         [
             "policy-intelligence",
@@ -174,43 +180,52 @@ def _secret_access_check(project_number: str, service_account: str, secret: str,
             "iam",
             full_resource_name,
             f"--principal-email={service_account}",
-            f"--permission={SECRET_ACCESS_PERMISSION}",
+            f"--permission={permission}",
             "--format=json",
         ]
     )
     if code != 0 or not stdout:
-        return Check(
-            f"secret_access:{env_name}",
-            "failed",
-            "effective runtime access could not be verified with IAM Policy Troubleshooter",
-        )
+        return Check(check_name, "failed", "effective runtime access could not be verified with IAM Policy Troubleshooter")
 
     try:
         result = json.loads(stdout)
     except json.JSONDecodeError:
-        return Check(
-            f"secret_access:{env_name}",
-            "failed",
-            "IAM Policy Troubleshooter returned an unreadable response",
-        )
+        return Check(check_name, "failed", "IAM Policy Troubleshooter returned an unreadable response")
 
     state = result.get("overallAccessState")
     if state == "CAN_ACCESS":
-        return Check(
-            f"secret_access:{env_name}",
-            "ok",
-            f"runtime service account has effective {SECRET_ACCESS_PERMISSION}; payload not read",
-        )
+        return Check(check_name, "ok", success_detail)
     if state == "CANNOT_ACCESS":
-        return Check(
-            f"secret_access:{env_name}",
-            "failed",
-            f"runtime service account lacks effective {SECRET_ACCESS_PERMISSION}",
-        )
-    return Check(
+        return Check(check_name, "failed", denied_detail)
+    return Check(check_name, "failed", unknown_detail)
+
+
+def _secret_access_check(project_number: str, service_account: str, secret: str, env_name: str) -> Check:
+    """Verify payload-read permission without reading a secret version."""
+    full_resource_name = f"//secretmanager.googleapis.com/projects/{project_number}/secrets/{secret}"
+    return _troubleshoot_permission(
+        full_resource_name,
+        service_account,
+        SECRET_ACCESS_PERMISSION,
         f"secret_access:{env_name}",
-        "failed",
+        f"runtime service account has effective {SECRET_ACCESS_PERMISSION}; payload not read",
+        f"runtime service account lacks effective {SECRET_ACCESS_PERMISSION}",
         "IAM Policy Troubleshooter could not determine effective runtime secret access",
+    )
+
+
+def _logging_access_check(project_number: str, service_account: str, permission: str) -> Check:
+    """Verify StageGuard's Cloud Logging write/read permission on the target project."""
+    full_resource_name = f"//cloudresourcemanager.googleapis.com/projects/{project_number}"
+    suffix = permission.rsplit(".", 1)[-1]
+    return _troubleshoot_permission(
+        full_resource_name,
+        service_account,
+        permission,
+        f"logging_access:{suffix}",
+        f"runtime service account has effective {permission} on the target project",
+        f"runtime service account lacks effective {permission} on the target project",
+        f"IAM Policy Troubleshooter could not determine effective {permission} access",
     )
 
 
@@ -265,9 +280,11 @@ def _gcloud_checks() -> list[Check]:
         )
 
     sa = os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip()
+    service_account_exists = False
     if sa:
         code, _, _ = _run_gcloud(["iam", "service-accounts", "describe", sa, f"--project={project_id}"])
-        checks.append(Check("runtime_service_account", "ok" if code == 0 else "failed", "service account exists" if code == 0 else "service account not found or not accessible"))
+        service_account_exists = code == 0
+        checks.append(Check("runtime_service_account", "ok" if service_account_exists else "failed", "service account exists" if service_account_exists else "service account not found or not accessible"))
 
     existing_secrets: list[tuple[str, str]] = []
     for env_name in SECRET_ENV_NAMES:
@@ -287,10 +304,12 @@ def _gcloud_checks() -> list[Check]:
             existing_secrets.append((env_name, secret))
 
     # Never attempt an access proof if the principal or project identity is malformed/missing.
-    # Each proof is read-only: Policy Troubleshooter evaluates IAM; no secret version is accessed.
-    if sa and project_number.isdigit():
+    # Each proof is read-only: Policy Troubleshooter evaluates IAM and does not exercise the permission.
+    if service_account_exists and project_number.isdigit():
         for env_name, secret in existing_secrets:
             checks.append(_secret_access_check(project_number, sa, secret, env_name))
+        for permission in LOGGING_RUNTIME_PERMISSIONS:
+            checks.append(_logging_access_check(project_number, sa, permission))
 
     image = os.getenv("IMAGE_URL", "").strip()
     if image and ".pkg.dev/" in image:
@@ -299,7 +318,7 @@ def _gcloud_checks() -> list[Check]:
             Check(
                 "container_image",
                 "ok" if code == 0 else "failed",
-                "container image exists" if code == 0 else "container image not found or not accessible",
+                "container image exists" if code == 0 else "failed",
             )
         )
 
@@ -323,11 +342,13 @@ def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
     if "gcloud_auth" in names:
         steps.append("Authenticate gcloud using an authorized operator or workload identity.")
     if any(name.startswith("api:") for name in names):
-        steps.append("Enable only the missing required Google Cloud APIs in the target project; Vertex AI is required when ENABLE_GEMINI=true and Policy Troubleshooter is required for read-only secret-access verification.")
+        steps.append("Enable only the missing required Google Cloud APIs in the target project; Vertex AI is required when ENABLE_GEMINI=true and Policy Troubleshooter is required for read-only IAM verification.")
     if any(name.startswith("secret:") for name in names):
         steps.append("Create or grant metadata visibility to the missing Secret Manager secrets; do not place secret values in environment variables.")
     if any(name.startswith("secret_access:") for name in names):
         steps.append("Grant the runtime service account secretmanager.versions.access on each mounted secret (normally roles/secretmanager.secretAccessor at the secret or an appropriate parent), then rerun the doctor.")
+    if any(name.startswith("logging_access:") for name in names):
+        steps.append("Grant the runtime service account the minimum Cloud Logging permissions needed by StageGuard: logging.logEntries.create for audit writes and logging.logEntries.list for restart/reconciliation reads, then rerun the doctor.")
     if "container_image" in names:
         steps.append("Build and push the StageGuard API image to Artifact Registry, then set IMAGE_URL to that image.")
     if "runtime_service_account" in names:
