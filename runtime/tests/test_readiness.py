@@ -132,15 +132,22 @@ class ReadinessProbeTests(unittest.TestCase):
 
     @patch("readiness.verify_log_activation_record")
     @patch("readiness.verify_activation_record")
-    def test_local_activation_failure_is_never_masked_by_cached_external_success(self, verify_metric, _verify_log):
-        probe, _, _, clock = self.probe()
+    def test_local_activation_failure_short_circuits_cached_external_success(self, verify_metric, _verify_log):
+        probe, metric, logs, clock = self.probe()
         self.assertTrue(probe.check().ready)
+        self.assertEqual(1, metric.connect_calls)
+        self.assertEqual(1, logs.connect_calls)
+
         verify_metric.side_effect = ValueError("expired")
         clock.value = 5
         result = probe.check()
+
         self.assertFalse(result.ready)
         self.assertEqual("failed", result.checks["metric_activation"])
-        self.assertEqual("ok", result.checks["prometheus_mcp"])
+        self.assertEqual("blocked", result.checks["prometheus_mcp"])
+        self.assertEqual("blocked", result.checks["loki_mcp"])
+        self.assertEqual(1, metric.connect_calls)
+        self.assertEqual(1, logs.connect_calls)
 
     @patch("readiness.verify_log_activation_record")
     @patch("readiness.verify_activation_record")
@@ -167,6 +174,7 @@ class ReadinessProbeTests(unittest.TestCase):
         result = probe.check().to_dict()
         self.assertFalse(result["ready"])
         self.assertEqual("failed", result["checks"]["metric_activation"])
+        self.assertEqual("blocked", result["checks"]["prometheus_mcp"])
         self.assertNotIn("expired", str(result))
         self.assertNotIn("secret", str(result))
 
@@ -177,6 +185,7 @@ class ReadinessProbeTests(unittest.TestCase):
         result = probe.check().to_dict()
         self.assertFalse(result["ready"])
         self.assertEqual("failed", result["checks"]["loki_activation"])
+        self.assertEqual("blocked", result["checks"]["loki_mcp"])
         self.assertNotIn("private", str(result))
 
     @patch("readiness.verify_log_activation_record")
@@ -195,11 +204,13 @@ class ReadinessProbeTests(unittest.TestCase):
 
     @patch("readiness.verify_activation_record")
     def test_missing_loki_activation_is_not_ready(self, _verify_metric):
-        probe, _, _, _ = self.probe(log_activation=None)
+        probe, metric, _, _ = self.probe(log_activation=None)
         result = probe.check()
         self.assertFalse(result.ready)
         self.assertEqual("missing", result.checks["loki_activation"])
+        self.assertEqual("blocked", result.checks["prometheus_mcp"])
         self.assertEqual("missing", result.checks["loki_mcp"])
+        self.assertEqual(0, metric.connect_calls)
 
     @patch("readiness.verify_log_activation_record")
     @patch("readiness.verify_activation_record")
