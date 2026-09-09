@@ -4,84 +4,90 @@
 
 StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence and observability plane. The core vertical slice is implemented: deterministic broadcast telemetry, Prometheus/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, explicit human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, and a same-origin operator cockpit.
 
-The repository is in **demo freeze / release-critical integration mode**. Do not add architecture or security features unless they directly unblock the end-to-end operator demonstration.
+The repository is in productization mode. Preserve the proven incident flow while prioritizing real Grafana Cloud/self-hosted onboarding, production deployment, testability, maintainability, and operational safety.
 
-Core safety invariants:
+Core invariants:
 
-- Grafana is the evidence plane; infrastructure write credentials remain isolated from Grafana/MCP access.
+- Grafana is the evidence plane; infrastructure write credentials stay isolated from Grafana/MCP access.
 - Gemini is optional/advisory and cannot mutate approval, remediation, or recovery state.
 - Human approval is single-use and bound to the exact evidence revision.
-- Remediation success is never inferred from the action response; fresh Grafana telemetry must prove recovery.
-- Local demo credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
-- Authenticated local/GCS checkpointing, audit-chain/anchor verification, execution reconciliation, and no-replay protections remain implemented and covered by focused regressions.
+- Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
+- Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
+- Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-09 — release rehearsal telemetry gating
+## Run log — 2026-09-09 — onboarding doctor regression coverage
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `scripts/demo_local.py`, `runtime/bootstrap.py`, the deterministic simulator, Prometheus scrape configuration, Grafana MCP smoke path, and investigation/recovery telemetry contracts. A concurrent commit also added open-source/submission presentation assets; those files were preserved rather than overwritten.
-
-The highest-value concrete demo risk was timing-based evidence readiness. `demo_local.py` used fixed 5–6 second sleeps after reset/fault injection. That assumes Prometheus has already scraped enough samples for the exact StageGuard diagnosis queries. On a cold Docker start, slower host, or repeated take, this could allow the operator to click Investigate before `rate(video_frames_dropped_total[2m])` is queryable and cause an avoidable abstain.
+Read `progress.md` completely and inspected current `main` plus `scripts/stageguard_doctor.py`. The previous run's explicit next step was credential-free CLI coverage for the onboarding doctor, which remained the highest-value unblocked work.
 
 ### Exact changes made
 
-1. Added `scripts/demo_release.py` as a release-critical rehearsal wrapper around the existing demo runner.
-   - Recreates the local compose stack before a take so stale Prometheus history from previous rehearsals cannot contaminate the recording.
-   - Reuses `demo_local.up(...)`, preserving the existing simulator/Grafana/token/MCP/API startup path rather than forking product orchestration.
-   - Queries the local Prometheus HTTP API with the Python standard library only.
-   - Waits for the actual healthy evidence predicates before the take: `uplink-b` packet loss below 1% and Camera 3 dropped-frame rate below 1/s.
-   - Injects the existing deterministic fault only after the operator is ready.
-   - Waits until the actual incident predicates are queryable before telling the operator to investigate: `uplink-b` packet loss above 5% and Camera 3 dropped-frame rate above 1/s.
-   - Emits `INCIDENT EVIDENCE READY — CLICK INVESTIGATE NOW` only after both evidence gates pass.
-   - Fails closed on malformed Prometheus responses, multiple series, non-numeric values, empty evidence beyond the bounded timeout, or unavailable local services.
-   - Supports the same optional `--gemini` and `--open` switches as the normal local demo.
-2. Preserved all concurrent repository work and avoided force-updating `main` after detecting the branch had advanced.
-3. No production/cloud/remediation behavior was broadened and no GitHub Actions workflow was added or manually rerun.
+Added `runtime/tests/test_stageguard_doctor.py` with subprocess-level tests for the actual CLI contract rather than only unit-testing helper functions.
+
+Coverage now includes:
+
+- valid telemetry mapping + Grafana URL + non-empty token file + discoverable MCP executable => exit `0` and `ready_for_preflight=true`;
+- missing Grafana URL => required failure and exit `2`;
+- malformed/non-absolute Grafana URL => required failure and exit `2`;
+- missing token-file configuration => required failure and exit `2`;
+- empty token file => required failure and exit `2`;
+- missing MCP executable => required failure and exit `2`;
+- POSIX token permissions broader than `0600` => warning without blocking preflight readiness;
+- absent optional metric/Loki activation files => reported as missing but non-blocking;
+- JSON output shape, named check states, next-step guidance, and machine-readable readiness semantics.
+
+The tests use temporary placeholder token files only. They do not contact Grafana, invoke MCP, read real credentials, mutate cloud resources, or require paid services.
 
 ### Tests / checks / results
 
-- The new release gate is dependency-free beyond the already-required local Docker/StageGuard stack and uses deterministic local endpoints only.
-- Its Prometheus parser accepts only a successful single-series vector result, treats an empty vector as not-ready, and fails closed on every other shape.
-- This automation environment still cannot run the repository's Docker compose stack, so the new release rehearsal has not been empirically executed here and no green end-to-end claim is made.
-- No live Grafana Cloud, Gemini, Google Cloud, IAP, Secret Manager, Devpost, or production remediation resource was touched in this run.
+- Test file committed to `main` as part of this run.
+- This automation environment does not expose an executable checkout of the repository, so the new Python test module could not be run here. No runtime PASS claim is made.
+- The tests intentionally run the doctor as a subprocess to validate its public CLI behavior and exit codes across platforms.
+- No GitHub Actions workflow was added or manually triggered.
+- No live Grafana, Google Cloud, Gemini, remediation endpoint, or secret was touched.
 
 ### Decisions made
 
-1. **Replace arbitrary sleeps with exact evidence gates.** This makes demo reliability depend on the telemetry StageGuard actually consumes rather than host speed.
-2. **Use a recreated compose stack for release rehearsals.** The checked-in demo compose configuration has no persistent data volumes, so recreation cheaply removes stale Prometheus samples between takes.
-3. **Keep `demo_local.py` authoritative.** The release wrapper composes the existing runner rather than duplicating startup logic.
-4. **Stay in demo freeze.** The next work must be driven by a concrete failure from the real rehearsal, not another speculative feature.
+1. **Test the public CLI contract.** Subprocess coverage catches import/bootstrap, argument parsing, environment handling, JSON serialization, and exit-code regressions that helper-only tests could miss.
+2. **Keep tests credential-free.** A fake non-empty token file is sufficient because the doctor is deliberately responsible only for local prerequisites; `runtime/preflight.py` remains authoritative for live Grafana/MCP credential validation.
+3. **Treat activation artifacts as optional at doctor time.** They are generated by live preflight, so their absence must not block readiness to begin preflight.
+4. **Keep POSIX permission warnings non-fatal.** Broad permissions should be surfaced clearly without making the cross-platform onboarding doctor unusable on systems with different permission models.
 
 ### Current blockers / unknowns
 
-- Docker Desktop/Linux engine must be running on the development machine for the real rehearsal.
-- The pinned `grafana/mcp-grafana:1.3.0` image still needs empirical execution through the existing official MCP smoke gate on that machine.
-- The complete Python runtime suite has not run in this automation environment.
-- Real Google Cloud/Grafana Cloud acceptance remains credential/resource work and is not required for the deterministic local operator path.
+- The new doctor test suite still needs empirical execution on a checked-out Linux/macOS and Windows environment.
+- Live official Grafana MCP acceptance requires a reachable Grafana instance and least-privilege service-account token.
+- Real Google Cloud deployment acceptance remains credential/resource work.
+- The previously observed broader suite failures/errors still need systematic triage; they are not hidden or reclassified here.
 
 ## Single best next step
 
-**Run `python scripts/demo_release.py --open` on a Docker-capable checkout and complete one full take: verified healthy baseline → verified fault evidence → Investigate → optional Gemini briefing → exact revision approval → Execute → telemetry `recovered`. Fix only the first concrete blocker encountered. Once it passes twice consecutively, freeze code and record the demo.**
+**Triage the existing full-suite failures into product defects versus environment/optional-integration failures, then fix the highest-impact genuine defect without weakening safety contracts. Before that triage, run `python -m unittest runtime.tests.test_stageguard_doctor -v` on the next executable checkout to validate the new doctor contract.**
 
-## Previous run summary
+## Recent productization history
 
-The previous run added the one-command `scripts/demo_local.py` vertical-slice runner, shortened only the post-remediation dropped-frame recovery query window to 15 seconds, aligned `DEMO.md` to the real Grafana MCP → diagnose → approve → remediate → telemetry-verify workflow, and completed the signed local runtime checkpoint -> retention coordinator -> compacted audit -> hardened restart/no-remediation-replay acceptance path. Concurrent follow-up work added presentation/open-source submission assets without changing that runtime contract.
+### Production onboarding doctor
 
-## FINAL SUBMISSION STATUS — 2026-09-09
+Added `scripts/stageguard_doctor.py`, a dependency-free prerequisite checker that validates Python 3.11+, the strict telemetry mapping, `GRAFANA_URL`, token-file presence/non-emptiness/permissions without reading token contents, configured Grafana MCP launcher discovery, and optional activation-file presence. `README.md` now routes real users through the doctor before `runtime/preflight.py`.
 
-Demo: BLOCKED ON LOCAL DOCKER ENGINE — `docker compose` is installed, but Docker Desktop's Linux engine was unavailable on this laptop; the repository's deterministic demo runner remains the intended judge-machine path.
+### Judge-facing/product presentation pass retained
 
-Grafana MCP: NOT LIVE-VERIFIED HERE — the checked-in runner gates readiness on the official `grafana/mcp-grafana:1.3.0` read-only smoke query.
+The operator cockpit surfaces incident state, root cause, confidence, evidence revision, human approval, Grafana MCP provenance, and the `ACTION ACCEPTED ≠ INCIDENT RESOLVED` recovery-verification sequence. Bounded lifecycle responses expose provider, read-only status, datasource UID, query/recovery counts, and tool latency while excluding raw queries and secrets.
 
-Gemini: NOT USED — optional and intentionally not faked without working Vertex/ADC credentials.
+### Cross-platform persistence fixes retained
 
-Video: NOT CREATED — no honest live runtime capture was possible without Docker; do not submit a fabricated demo video.
+Windows checkpoint/retention persistence was corrected to avoid unavailable `os.fchmod`, invalid fsync behavior on read-only handles, and unsupported directory-fsync assumptions. The focused incident/Gemini/MCP/remediation path remained green in the last executable local validation.
 
-Devpost: NOT SUBMITTED — Devpost rules were inspected; the current browser session is not authenticated.
+### Release rehearsal telemetry gating retained
 
-Submission: BLOCKED
+`scripts/demo_release.py` replaces timing sleeps with exact Prometheus healthy/fault evidence gates, recreates the local deterministic compose stack between takes, and only signals investigation readiness once the telemetry StageGuard actually consumes is queryable.
 
-Any remaining blocker: Start Docker Desktop on a judge-capable machine, run the documented demo twice, record/upload the required public 3-minute video, then authenticate Devpost and submit to the Grafana Labs partner track.
+## Last known validation baseline
+
+- Focused judge/core/API/UI suite from the executable local run: 81/81 passed.
+- Full suite from that run: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
+- The current Windows Docker rehearsal upgraded the release status below with live Docker, Prometheus, Grafana, MCP, cockpit, and media evidence.
 
 ## Post-submission code portability fixes — 2026-09-09
 
