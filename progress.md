@@ -18,56 +18,55 @@ Core safety invariants:
 - Branched-lineage verification and candidate reads are bounded and fail closed on state/candidate explosion or silent truncation.
 - `/readyz` fails closed for checkpoint conflict, execution uncertainty, audit-integrity failure, or configured integrity-policy violation.
 
-## Run log — 2026-09-09 — default-bootstrap compaction/replay acceptance
+## Run log — 2026-09-09 — credential-free production constructor wiring
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/bootstrap.py`, `runtime/tests/test_bootstrap_execution_safety.py`, `runtime/tests/test_anchored_execution_safety.py`, `runtime/incident_service.py`, and `runtime/remediation.py`. Confirmed the prior handoff accurately identified the remaining gap: anchor compaction had direct service-level coverage, and bootstrap selected the anchor-aware execution-safe composition, but there was no end-to-end acceptance test proving the normal `build_runtime` path can create a real completed lifecycle, physically lose the authenticated pre-anchor JSONL prefix, restart verified, and avoid replaying a consumed remediation.
+Read `progress.md` completely before choosing work. Inspected current `main`, `runtime/bootstrap.py`, `runtime/cloudrun_entrypoint.py`, `runtime/incident_checkpoint.py`, `runtime/tests/test_bootstrap_execution_safety.py`, and `runtime/tests/test_cloudrun_entrypoint.py`. Confirmed the previous handoff accurately identified the remaining gap: local/default bootstrap had compaction and no-replay acceptance coverage, but the GCS + Cloud Logging production constructor wiring was not explicitly verified without credentials.
 
 ### Exact changes made
 
-1. Extended `runtime/tests/test_bootstrap_execution_safety.py` with a credential-free default-bootstrap acceptance test.
-   - Uses the actual `build_runtime` constructor with `checkpoint_backend="json"`, real local JSONL audit storage, and `audit_anchor_interval=1`.
-   - Drives a diagnosed incident through explicit approval and successful recovery verification.
-   - Uses a counting remediation adapter and asserts the original runtime invokes it exactly once.
-   - Reads the authenticated anchor sequence, physically deletes every audit record at or before that anchor, and preserves only any later suffix records.
-   - Restarts through `build_runtime` using the same checkpoint/audit files and a fresh counting remediation adapter.
-   - Asserts restart reports `audit_integrity=verified`, checkpoint state `synchronized`, execution reconciliation `clear`, and restores the completed approval/outcome.
-   - Asserts restart itself performs zero remediation calls.
-   - Attempts `execute_approved()` again and asserts the single-use approval remains consumed, with the replacement remediation adapter still at zero calls.
-2. Strengthened the test fakes without changing production code.
-   - `FakeMetrics` can now serve a deterministic sequence while retaining the previous constant-value default for existing bootstrap tests.
-   - Added `CountingRemediation` and a compact diagnosed-plus-healthy-recovery fixture.
+1. Added a credential-free GCS + Cloud Logging constructor test to `runtime/tests/test_bootstrap_execution_safety.py`.
+   - Patches only the external Google constructors and server/service construction boundary; no Google client library call or network resource is required.
+   - Proves `GoogleCloudStorageCheckpointStore.from_environment` receives the configured bucket, HMAC material, project, and object name through environment-backed bootstrap configuration.
+   - Proves the Cloud Logging audit sink and audit reader receive the exact same project and log identity, preventing a split evidence/audit stream caused by divergent bootstrap names.
+   - Proves the GCS store is wrapped in `ObservableCheckpointStore` before being passed into the runtime service.
+   - Proves bootstrap selects `AnchoredExecutionSafeIncidentService`, passes the configured bounded audit-anchor interval, and applies `require_verified` to the service.
+   - Proves the same service instance is handed to the HTTP server constructor.
+2. Strengthened `runtime/tests/test_cloudrun_entrypoint.py`.
+   - The no-GCS Cloud Run path now explicitly asserts `allow_unbound_legacy` rather than merely checking the checkpoint backend.
+   - The durable GCS Cloud Run path now explicitly asserts `require_verified`, making the production hardening contract executable in tests.
+   - Existing checks that bucket/HMAC secret values are not placed in argv remain intact.
 3. Kept repository/CI impact bounded.
-   - Prepared the test and this handoff as one Git tree/commit/ref update rather than multiple file commits.
-   - Did not trigger or rerun GitHub Actions.
+   - Prepared both test edits and this handoff as one Git tree/commit/ref update.
+   - Did not manually trigger or rerun GitHub Actions.
 
 ### Tests / checks / results
 
-- Repository reads and Git object preparation succeeded through the connected GitHub integration.
-- The new acceptance path is deterministic and credential-free, but this automation environment still does not expose a complete executable checkout/import path, so no green Python test-suite claim is made for this run.
+- Repository inspection and Git object preparation succeeded through the connected GitHub integration.
+- The added tests are credential-free and isolate external constructors with `unittest.mock`; however, this automation environment still does not expose a complete executable checkout/import path, so no green Python suite claim is made for this run.
 - No GitHub Actions workflow was manually triggered or rerun.
 - No live Grafana, Gemini, GCS, IAP, Cloud Logging, Secret Manager, remediation endpoint, or operator resource was touched.
 
 ### Decisions made
 
-1. **Test a consumed approval rather than only an investigated checkpoint.** This exercises the more dangerous replay boundary: a remediation that already executed before compaction must remain consumed after restart and must not contact the adapter again.
-2. **Compact using the authenticated anchor sequence, not an arbitrary line count.** The acceptance test now mirrors the actual safety contract operators/retention tooling must respect.
-3. **Keep physical compaction external for now.** StageGuard can safely verify compacted prefixes, but automatic destructive retention remains intentionally separate from integrity verification until retention policy, backup behavior, and operator recovery semantics are specified.
-4. **Do not spend CI/storage to validate one automation increment.** The project has a history of Actions storage/noise concerns, so no manual workflow execution was introduced.
+1. **Verify concrete constructor arguments instead of mocking the entire bootstrap helper.** This catches project/log-name drift and bucket/object wiring errors while still remaining credential-free.
+2. **Assert the observable wrapper explicitly.** Production durability is not only about using GCS; checkpoint health must remain visible through StageGuard's bounded Prometheus telemetry surface.
+3. **Keep Cloud Run policy tests separate from bootstrap constructor tests.** `cloudrun_entrypoint.py` owns immutable production hardening, while `bootstrap.py` owns adapter construction; testing both boundaries prevents one layer from silently weakening the other.
+4. **Do not execute live cloud validation in an unattended development increment.** Real IAM, GCS generation-CAS, Cloud Logging retention/query behavior, and IAP still require deliberate external-resource acceptance.
 
 ### Current blockers / unknowns
 
-- The expanded bootstrap regression has not executed in a complete checkout during this run.
-- A constructor-only fake test for the GCS + Cloud Logging production composition is still missing.
+- The expanded Python regressions have not executed in a complete checkout during this run.
 - A real GCS + Cloud Logging schema-v4 restart has not been exercised against Google Cloud credentials/resources.
+- The production path still lacks a credential-free end-to-end fake-cloud restart test that persists an authenticated checkpoint and reconstructs a branched Cloud Logging suffix through the normal bootstrap composition.
 - Real Cloud Run/IAP browser acceptance, live Grafana MCP acceptance, production GCS generation/IAM validation, and a real remediation provider remain external-resource validation tasks.
 - Automatic local JSONL compaction/retention is not implemented; anchors only make a correctly chosen authenticated prefix safe to remove.
 
 ## Single best next step
 
-**Add a constructor-only GCS + Cloud Logging bootstrap test using fakes/patching around `GoogleCloudStorageCheckpointStore.from_environment`, `GoogleCloudLoggingAuditSink.from_environment`, and `GoogleCloudAuditReader.from_environment`. Prove the production constructor selects one shared Cloud Logging identity, an observable GCS checkpoint store, `AnchoredExecutionSafeIncidentService`, hardened `require_verified` policy when invoked through the Cloud Run composition, and the configured anchor interval without requiring any Google credentials or touching live resources.**
+**Add a credential-free fake-cloud restart acceptance test that uses the normal production bootstrap composition with an in-memory GCS checkpoint implementation and an in-memory Cloud Logging sink/reader pair sharing one log identity. Drive a completed lifecycle to schema v4, restart through `build_runtime`, and prove `audit_integrity=verified`, hardened readiness, anchor-aware suffix selection, and zero remediation replay even when the fake log contains a losing same-sequence writer branch.**
 
 ## Previous run summary
 
-The previous run activated `AnchoredExecutionSafeIncidentService` and `AnchoredJsonlAuditLog` in the default bootstrap, added bounded `--audit-anchor-interval` configuration, and preserved the existing Cloud Run security composition.
+The previous run added a default-bootstrap compaction/no-remediation-replay acceptance test using real local JSON checkpoint and JSONL audit state.

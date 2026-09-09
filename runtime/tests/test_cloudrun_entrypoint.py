@@ -22,6 +22,7 @@ class CloudRunEntrypointTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--host") + 1], "0.0.0.0")
         self.assertEqual(argv[argv.index("--port") + 1], "8080")
         self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "none")
+        self.assertEqual(argv[argv.index("--audit-integrity-policy") + 1], "allow_unbound_legacy")
         self.assertNotIn("--enable-production-remediation", argv)
 
     def test_checkpoint_bucket_requires_hmac_secret_and_enables_gcs(self) -> None:
@@ -34,6 +35,7 @@ class CloudRunEntrypointTests(unittest.TestCase):
         argv = build_bootstrap_argv(env)
         self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "gcs")
         self.assertEqual(argv[argv.index("--checkpoint-object") + 1], "prod/current.json")
+        self.assertEqual(argv[argv.index("--audit-integrity-policy") + 1], "require_verified")
         self.assertNotIn("stageguard-state-prod", argv)
         self.assertNotIn("k" * 32, argv)
 

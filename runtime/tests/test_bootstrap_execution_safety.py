@@ -1,13 +1,16 @@
 from pathlib import Path
 import json
+import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from anchored_execution_safety import AnchoredExecutionSafeIncidentService
 from anchored_incident_service import AnchoredJsonlAuditLog
 from audit_anchor import DEFAULT_ANCHOR_INTERVAL, MAX_VERIFICATION_SUFFIX_EVENTS
 from bootstrap import build_runtime
 from execution_safety import ExecutionSafeIncidentService
+from incident_checkpoint import ObservableCheckpointStore
 from remediation import ActionResult
 
 
@@ -86,6 +89,63 @@ class BootstrapExecutionSafetyTests(unittest.TestCase):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
                 with self.assertRaisesRegex(ValueError, "audit anchor interval"):
                     self._bundle(Path(tmp), audit_anchor_interval=value)
+
+    def test_gcs_cloud_logging_constructor_wiring_is_credential_free_and_hardened(self):
+        example = Path(__file__).parents[1] / "telemetry.example.json"
+        checkpoint_inner = MagicMock(name="gcs-checkpoint-inner")
+        audit_sink = MagicMock(name="cloud-audit-sink")
+        audit_reader = MagicMock(name="cloud-audit-reader")
+        service = MagicMock(name="anchored-execution-safe-service")
+        server = MagicMock(name="server")
+
+        env = {
+            "STAGEGUARD_CHECKPOINT_BUCKET": "stageguard-state-prod",
+            "STAGEGUARD_CHECKPOINT_HMAC_KEY": "s" * 32,
+            "GOOGLE_CLOUD_PROJECT": "media-prod",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("bootstrap.GoogleCloudStorageCheckpointStore.from_environment", return_value=checkpoint_inner) as gcs_ctor, \
+             patch("bootstrap.GoogleCloudLoggingAuditSink.from_environment", return_value=audit_sink) as sink_ctor, \
+             patch("bootstrap.GoogleCloudAuditReader.from_environment", return_value=audit_reader) as reader_ctor, \
+             patch("bootstrap.AnchoredExecutionSafeIncidentService", return_value=service) as service_ctor, \
+             patch("bootstrap.make_server", return_value=server) as server_ctor:
+            bundle = build_runtime(
+                telemetry_config=example,
+                activation_path=None,
+                audit_path="unused.jsonl",
+                host="127.0.0.1",
+                port=0,
+                audit_backend="cloud-logging",
+                cloud_log_name="stageguard-prod-audit",
+                checkpoint_backend="gcs",
+                checkpoint_object="prod/current.json",
+                audit_integrity_policy="require_verified",
+                audit_anchor_interval=17,
+                metrics_factory=FakeMetrics,
+            )
+
+        self.assertIs(bundle.service, service)
+        gcs_ctor.assert_called_once_with(
+            bucket_name="stageguard-state-prod",
+            signing_key="s" * 32,
+            project="media-prod",
+            object_name="prod/current.json",
+        )
+        sink_ctor.assert_called_once_with(project="media-prod", log_name="stageguard-prod-audit")
+        reader_ctor.assert_called_once_with(project="media-prod", log_name="stageguard-prod-audit")
+
+        args, kwargs = service_ctor.call_args
+        self.assertIs(args[2], audit_sink)
+        self.assertIs(kwargs["audit_reader"], audit_reader)
+        checkpoint_store = kwargs["checkpoint_store"]
+        self.assertIsInstance(checkpoint_store, ObservableCheckpointStore)
+        self.assertIs(checkpoint_store._inner, checkpoint_inner)
+        self.assertEqual(17, kwargs["audit_anchor_interval"])
+        self.assertEqual("require_verified", service._audit_integrity_policy)
+        server_ctor.assert_called_once()
+        self.assertIs(server_ctor.call_args.args[0], service)
+        self.assertEqual("127.0.0.1", server_ctor.call_args.args[1])
+        self.assertEqual(0, server_ctor.call_args.args[2])
 
     def test_default_build_runtime_restarts_verified_after_physical_anchor_compaction_without_remediation_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
