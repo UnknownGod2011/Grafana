@@ -3,7 +3,9 @@ services:
     build:
       context: ./runtime
     environment:
-      STAGEGUARD_SCENARIO: faulted
+      # Start the recording stack healthy. The release rehearsal injects the
+      # uplink-b fault explicitly after the baseline has been verified.
+      STAGEGUARD_SCENARIO: healthy
     ports:
       - "9108:9108"
     healthcheck:

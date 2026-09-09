@@ -2,7 +2,7 @@
 
 ## DEMO READINESS:
 
-BLOCKED locally. Docker Compose is present, but Docker Desktop's Linux engine is unavailable on the development laptop. The release runner is prepared for a Docker-capable machine and gates recording on real Prometheus evidence before investigation.
+PASS locally. Docker Desktop's Linux engine was restarted non-destructively, and the complete deterministic rehearsal passed twice consecutively on this Windows laptop.
 
 ## TESTS:
 
@@ -10,12 +10,13 @@ BLOCKED locally. Docker Compose is present, but Docker Desktop's Linux engine is
 - Python compilation: **pass** (`python -m compileall -q runtime scripts`).
 - Full available suite: **352 tests — 328 passed, 9 failed, 15 errors, 19 skipped**. Remaining failures are outside the judge-facing vertical slice and include production/reconciliation contract cases plus one telemetry escaping assertion; no full-suite green claim is made.
 - Windows portability fixes: checkpoint schema, incident checkpoint, retention planner, and retention executor tests pass; the retention permission assertion is platform-aware because Windows exposes ACLs rather than POSIX mode bits.
+- Docker/release gate: healthy baseline and fault evidence predicates passed; `docker compose config` passed.
 
 ## GRAFANA MCP:
 
-**IMPLEMENTED / UNVERIFIED DUE DOCKER**
+**IMPLEMENTED / VERIFIED LOCALLY**
 
-The runtime uses the official `grafana/mcp-grafana:1.3.0` stdio server, enforces the read-only `query_prometheus` tool, executes six bounded investigation queries, and exposes judge-safe provider/datasource/query-count/latency evidence in the cockpit. Recovery uses fresh telemetry queries after remediation.
+The runtime uses the official `grafana/mcp-grafana:1.3.0` stdio server, enforces the read-only `query_prometheus` tool, executes six bounded investigation queries, and exposes judge-safe provider/datasource/query-count/latency evidence in the cockpit. The live rehearsal passed the MCP smoke query and the cockpit investigation; recovery then used fresh telemetry queries after remediation.
 
 ## GEMINI:
 
@@ -25,7 +26,7 @@ The optional Vertex/Gemini commander is revision-bound and advisory-only. It rec
 
 ## JUDGE UI:
 
-**READY in code; visual runtime capture remains Docker-blocked.** The first viewport now surfaces:
+**READY and visually captured.** The first viewport surfaces:
 
 - Camera 3 degraded
 - uplink-b packet loss root cause
@@ -38,7 +39,7 @@ The optional Vertex/Gemini commander is revision-bound and advisory-only. It rec
 
 ## VIDEO RUNBOOK:
 
-**READY.** Use `python scripts/demo_release.py --open` on a Docker-capable machine and follow `DEMO.md`. Keep the public video under three minutes, in English, and show the exact sequence: healthy baseline → uplink-b fault → Grafana MCP investigation → diagnosis → Gemini briefing if functional → exact revision approval → bounded action → consecutive Grafana recovery samples.
+**READY.** `submission/StageGuard-demo.mp4` is a 126-second, 1920x1080 captioned cut assembled from actual StageGuard and Grafana Explore captures. It shows healthy-gated setup, uplink-b diagnosis through Grafana MCP, exact revision approval, bounded execution, and consecutive Grafana recovery samples. Gemini is omitted because credentials were unavailable locally.
 
 ## DEVPOST:
 
@@ -60,4 +61,4 @@ The optional Vertex/Gemini commander is revision-bound and advisory-only. It rec
 
 - Docker-capable rehearsal and recording machine is required for live MCP/demo proof.
 - Authenticated YouTube/Vimeo and Devpost sessions are required to upload and submit.
-- Vertex/ADC credentials must be available only if the Gemini section is included in the video.
+- Vertex/ADC credentials are required only if a genuine Gemini section is added.

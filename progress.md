@@ -97,3 +97,29 @@ Any remaining blocker: Start Docker Desktop on a judge-capable machine, run the 
 - Added bounded `evidence_source` metadata to lifecycle responses: Grafana MCP provider, read-only access, Prometheus datasource UID, investigation query count, recovery sample count, and last tool latency. Raw queries and secrets remain excluded.
 - Focused judge/core/API/UI suite: 81/81 passed. Full suite: 352 tests, 9 failures, 15 errors, 19 skipped.
 - Created `FINAL_RELEASE_REPORT.md` with the current readiness status and criterion-to-proof matrix. Architecture is frozen after this pass.
+
+## Final live rehearsal and media — 2026-09-09
+
+- Restarted Docker Desktop's Linux engine non-destructively on the Windows laptop; no images, volumes, or project data were reset.
+- The first release rehearsal exposed a real baseline issue: the compose simulator started faulted, so Prometheus retained a short pre-reset counter window and the healthy drop-rate gate correctly failed closed. Changed only `docker-compose.yml` so the stack starts healthy; the release runner still injects the fault explicitly.
+- `python scripts/demo_release.py --open` then passed the real healthy gates (`uplink-b` packet loss `0.3`, cam-3 drop rate `0.0`), the real official MCP smoke query, and the real fault gates (`18.0` packet loss, cam-3 drop rate `1.014`).
+- Completed the full cockpit flow twice consecutively: investigate through Grafana MCP, diagnose `uplink-b packet loss`, display evidence revision, approve the exact revision, execute bounded recovery, and reach `recovered` only after five telemetry samples with two consecutive healthy samples.
+- Grafana Explore was captured showing the real Prometheus packet-loss history (18% fault plateau returning to 0.3%).
+- Rendered `submission/StageGuard-demo.mp4`: 1920x1080, 126 seconds, captioned/no narration, built only from the real cockpit and Grafana captures. The video has no audio because no reliable local TTS credential was available.
+- Gemini remains **NOT USED** in the capture: this PC has no gcloud/ADC or Gemini environment configuration, so no model call is claimed or faked.
+
+## FINAL SUBMISSION STATUS — updated 2026-09-09
+
+Demo: PASS — two consecutive local Docker rehearsals reached recovered.
+
+Grafana MCP: PASS — official `grafana/mcp-grafana:1.3.0` read-only smoke query and StageGuard investigation were verified locally.
+
+Gemini: NOT USED — optional integration is implemented but no local credentials were available.
+
+Video: `submission/StageGuard-demo.mp4` — 1920x1080, 126 seconds, validated with ffprobe.
+
+Devpost: NOT SUBMITTED — the available browser session is not authenticated for Devpost, so no upload or submission URL exists.
+
+Submission: BLOCKED
+
+Any remaining blocker: Upload the finished video to an accepted public/unlisted host and complete the authenticated Devpost submission.
