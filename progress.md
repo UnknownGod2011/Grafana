@@ -15,105 +15,86 @@ Core invariants remain unchanged:
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-10 — opt-in Vertex/Gemini acceptance smoke
+## Run log — 2026-09-10 — readiness local-trust short circuit
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected the current production-deployment path, especially:
+Read `progress.md` completely before choosing work, then inspected the current repository tree and the production readiness path, especially:
 
-- `scripts/gcp_deploy_doctor.py`
-- `runtime/tests/test_gcp_deploy_doctor.py`
-- `runtime/gemini_commander.py`
-- `README.md`
-- the prior Secret Manager, Cloud Logging, and conditional Vertex `aiplatform.endpoints.predict` Policy Troubleshooter gates
+- `runtime/readiness.py`
+- `runtime/tests/test_readiness.py`
+- the retained Google Cloud/Gemini acceptance work from the previous run
 
-The previous run's live GCP verification step is still blocked by the absence of an authorized disposable Google Cloud environment in this runtime, so this run completed the next useful unblocked engineering step instead of stopping.
-
-### Official documentation checked
-
-Current Google documentation was rechecked before implementing the smoke path:
-
-- the Google Gen AI SDK exposes `client.models.generate_content(...)`;
-- Vertex AI usage is configured with a Google Cloud project and location;
-- `gemini-2.5-flash` remains a valid documented generation model in the SDK documentation/examples;
-- Application Default Credentials are the expected local authentication path for Vertex AI client use.
-
-References:
-
-- https://googleapis.github.io/python-genai/
-- https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/googlegenaisdk-textgen-with-multi-img
+The live Google Cloud acceptance step remains blocked because this runtime has no authorized disposable GCP environment, so this run worked on the highest-value unblocked production-safety issue instead.
 
 ### Exact changes made
 
-Added `scripts/gemini_acceptance_smoke.py`:
+Updated `runtime/readiness.py` so local activation/pin trust is now a hard prerequisite for any external Grafana MCP readiness probe:
 
-- defaults to configuration-only validation and sends zero model requests;
-- requires an explicit `--execute` flag before any live Gemini request is possible;
-- resolves the same production environment contract used by StageGuard (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `STAGEGUARD_GEMINI_MODEL`);
-- validates project/location/model identifiers before SDK initialization;
-- performs exactly one bounded `generate_content` call when explicitly executed;
-- sends only a synthetic connectivity prompt, with no incident, Grafana, PromQL, LogQL, secret, approval, remediation, or recovery data;
-- requests a tiny locked JSON schema with `temperature=0` and `max_output_tokens=48`;
-- validates the response exactly as `{status: ok, purpose: stageguard-gemini-acceptance}`;
-- reports `state_mutation=false` and never changes StageGuard state or any Google Cloud resource;
-- distinguishes pre-request failures from actual request attempts;
-- suppresses arbitrary provider exception text so SDK/transport details are not copied into CI logs or deployment reports.
+- metric and Loki activation records are still validated on every readiness request;
+- if either activation is missing or invalid, readiness immediately fails closed;
+- Prometheus/Loki MCP status is reported as `blocked` (or `missing` for an absent Loki client) rather than opening a new external connection;
+- no MCP process/connect call or Grafana `get_datasource` request is attempted when local trust cannot make the process traffic-eligible;
+- cached external success can no longer visually mask a newly failed activation state;
+- external probe attempt counters remain unchanged for locally blocked checks;
+- existing bounded TTL, stale-grace, failure-backoff, provider-error suppression, and single-flight behavior remain unchanged when local trust is valid.
 
-Added `runtime/tests/test_gemini_acceptance_smoke.py`:
+Added `runtime/tests/test_readiness_local_short_circuit.py` covering:
 
-- proves default mode is validation-only;
-- covers missing/malformed project, location, and model identifiers;
-- proves `_execute_smoke` is not called without `--execute`;
-- proves the explicit execute path calls the executor once;
-- covers safe pre-request and request-started failure accounting;
-- locks the state-isolation/no-Grafana-secret contract.
+- invalid metric activation blocks both external evidence-plane probes;
+- invalid Loki activation blocks both external probes;
+- missing Loki dependency does not cause a Prometheus-only probe that cannot make readiness succeed;
+- valid local trust still probes both Grafana evidence planes;
+- blocked checks do not increment external-probe attempt metrics.
 
-Added `docs/gemini-acceptance.md`:
-
-- documents the safe sequence: config validation -> live `gcp_deploy_doctor.py --json` -> one opt-in acceptance request;
-- explicitly states that the smoke proves only Vertex/Gemini connectivity/authorization and does not prove diagnosis, approval, remediation, or recovery correctness.
+Updated `runtime/tests/test_readiness.py` to align the existing cached-success regression test with the stricter contract and to assert that failed/missing local trust returns `blocked` without additional MCP connects.
 
 Commits created this run:
 
-- `fa11165de9021b7e6b1c47c313fe62267dfd3615` — initial opt-in Gemini acceptance smoke
-- `f40f342b684239f0708f5c11909ee24210d756ad` — acceptance smoke regression tests
-- `dccc6f0a892a6e2eb6087e6f1f8835486be55519` — acceptance documentation
-- `44b57c1a34e0fa275cb8fb6d92aeb61f25ce4618` — safe failure reporting and request-attempt accounting
-- `2a20e054617a419644978b68428ac67e0b371b89` — aligned safe-failure regression coverage
+- `41cbdce8798e39c6b69f32153cca3f7c6b6d1faa` — short-circuit MCP readiness when local trust fails
+- `d4823f8e1b9c1a1f52832835e5d5d1060dcf2843` — readiness local-trust short-circuit tests
+- `30e858a2ce6ce42265a21285e17bd398b31d934b` — align existing readiness regression contract
 
 ### Tests / checks / results
 
-- Source-level inspection of the committed smoke command and tests completed through the GitHub connector.
-- Attempted a fresh executable checkout with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution container still cannot resolve `github.com`, so the committed unittest module could not be executed locally.
-- No PASS claim is made for the new tests.
-- No GitHub Actions workflow was created, triggered, or rerun.
-- No Google Cloud resource, IAM policy, API, secret, Grafana instance, Gemini endpoint, or remediation endpoint was modified.
-- The live `--execute` smoke was intentionally not attempted because this runtime has no authorized disposable Google Cloud environment.
+Attempted a clean executable verification with:
+
+`PYTHONPATH=runtime python -m unittest runtime.tests.test_readiness runtime.tests.test_readiness_local_short_circuit -v`
+
+A fresh checkout could not be created because the execution container still cannot resolve `github.com`, so the committed test modules could not be executed locally. No PASS claim is made for these new changes.
+
+Source-level verification through the GitHub connector confirmed the committed readiness logic and the aligned test expectations.
+
+No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud resource, IAM policy, secret, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. **Live inference must be explicit.** Merely running the smoke command cannot incur a Gemini request.
-2. **Keep acceptance state-isolated.** The smoke verifies SDK/auth/model connectivity with synthetic data rather than passing a real incident through Gemini.
-3. **Bound cost and output.** One request, deterministic temperature, tiny schema, and a small output-token limit are sufficient for acceptance.
-4. **Do not leak provider errors.** Arbitrary SDK exception strings are replaced with bounded operator-safe failure codes/messages.
-5. **Do not confuse connectivity with correctness.** Passing the smoke cannot mark StageGuard production-ready by itself; deterministic policy and Grafana verification remain separate gates.
+1. **Local trust precedes network readiness.** If activation/pin validation cannot pass, external Grafana access cannot make the process safe to receive traffic.
+2. **Blocked is distinct from failed.** `blocked` means the external check was intentionally not attempted because a prerequisite failed; `failed` remains reserved for attempted external checks that did not succeed.
+3. **Do not spend external capacity on impossible readiness.** This reduces unnecessary MCP process churn and Grafana API load during expired, missing, or drifted activation states.
+4. **Preserve fail-closed semantics over cached optics.** A previously healthy Grafana probe is not surfaced as current `ok` once local trust has failed.
 
 ### Current blockers / unknowns
 
-- The new `runtime.tests.test_gemini_acceptance_smoke` module still needs empirical execution from a checkout with working GitHub/DNS access.
-- The existing live `gcp_deploy_doctor.py --json` Vertex Policy Troubleshooter check still needs confirmation in a disposable authorized Google Cloud project.
-- The new `gemini_acceptance_smoke.py --execute --json` path still needs one real authorized Vertex AI run after the doctor passes.
-- Historical broader-suite failures/errors still need systematic triage.
+- The new readiness tests still need empirical execution from a checkout with working GitHub/DNS access.
+- `runtime.tests.test_gemini_acceptance_smoke` still needs empirical execution.
+- `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
+- `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real authorized Vertex AI acceptance run after the doctor passes.
+- Historical full-suite failures/errors still need systematic triage.
 
 ## Single best next step
 
-**On a disposable authorized Google Cloud project, run `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json`; if and only if the doctor reports ready, run `python scripts/gemini_acceptance_smoke.py --execute --json` once and record the exact non-secret result. If credentials are still unavailable, the next unblocked engineering task is to triage the historical full-suite failures into real product defects versus optional/environmental integration failures.**
+**When an executable checkout is available, run the focused readiness tests first, then run the full unittest suite and classify every remaining failure/error into product defect vs optional/environmental integration. Fix the highest-severity real product defect before adding more deployment features.**
 
 ## Retained production hardening
 
 ### Google Cloud deployment doctor
 
 `scripts/gcp_deploy_doctor.py` validates required deployment configuration, active `gcloud` identity, project consistency, required APIs, runtime service-account existence, Secret Manager resources without payload reads, effective secret access, effective Cloud Logging read/write permissions, conditional effective Vertex prediction permission, and Artifact Registry image availability. Offline validation can never report `ready_to_deploy=true`.
+
+### Gemini acceptance smoke
+
+`scripts/gemini_acceptance_smoke.py` defaults to configuration-only validation. A live Vertex request requires explicit `--execute`, uses only synthetic connectivity data, performs one bounded request, validates a locked response schema, reports `state_mutation=false`, and does not pass Grafana evidence, approval, remediation, or recovery state to the model.
 
 ### Cloud Run / Vertex runtime contract
 
