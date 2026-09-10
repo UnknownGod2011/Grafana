@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -143,6 +144,35 @@ def _audit_integrity_policy_satisfied(service: IncidentService, state: str | Non
     return True
 
 
+def _remediation_execution_observability(service: IncidentService) -> dict[str, float | bool]:
+    """Return a sanitized fixed-shape watchdog view; malformed data fails closed."""
+    getter = getattr(service, "remediation_execution_observability", None)
+    if not callable(getter):
+        return {"active": False, "age_seconds": 0.0, "max_seconds": 0.0, "deadline_exceeded": False}
+    try:
+        raw = getter()
+        active = raw.get("active")
+        age = raw.get("age_seconds")
+        maximum = raw.get("max_seconds")
+        exceeded = raw.get("deadline_exceeded")
+        if not isinstance(active, bool) or not isinstance(exceeded, bool):
+            raise ValueError("invalid boolean watchdog state")
+        if isinstance(age, bool) or isinstance(maximum, bool):
+            raise ValueError("invalid numeric watchdog state")
+        age_value = float(age)
+        max_value = float(maximum)
+        if not math.isfinite(age_value) or age_value < 0 or not math.isfinite(max_value) or max_value <= 0:
+            raise ValueError("invalid watchdog bounds")
+        return {
+            "active": active,
+            "age_seconds": age_value,
+            "max_seconds": max_value,
+            "deadline_exceeded": exceeded,
+        }
+    except Exception:
+        return {"active": False, "age_seconds": 0.0, "max_seconds": 0.0, "deadline_exceeded": True}
+
+
 def _evidence_source_view(service: IncidentService, snapshot=None) -> dict[str, object]:
     """Expose judge-safe proof of the evidence path without exposing queries or secrets."""
     metrics = getattr(service, "_metrics", None)
@@ -203,6 +233,7 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
         "audit_integrity_policy": _audit_integrity_policy(service),
         "execution_reconciliation_state": _execution_reconciliation_state(service),
         "execution_reconciliation_reason": _execution_reconciliation_reason(service),
+        "remediation_execution": _remediation_execution_observability(service),
     }
 
 
@@ -213,12 +244,14 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     audit_integrity = _audit_integrity_state(service)
     audit_policy = _audit_integrity_policy(service)
     audit_policy_satisfied = _audit_integrity_policy_satisfied(service, audit_integrity)
+    execution = _remediation_execution_observability(service)
     readiness["checks"]["checkpoint"] = checkpoint_state
     readiness["checks"]["audit_integrity"] = audit_integrity
     readiness["checks"]["audit_integrity_policy"] = audit_policy
     readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
+    readiness["checks"]["remediation_execution_deadline"] = "exceeded" if execution["deadline_exceeded"] else "ok"
     readiness["checks"]["remediation_reconciliation_reason"] = _execution_reconciliation_reason(service)
-    if checkpoint_state in {"conflicted", "execution_uncertain"} or not audit_policy_satisfied:
+    if checkpoint_state in {"conflicted", "execution_uncertain"} or not audit_policy_satisfied or execution["deadline_exceeded"]:
         readiness["ready"] = False
     return readiness
 
@@ -233,6 +266,7 @@ def _service_metrics(service: IncidentService) -> str:
     conflict_blocked = 1 if checkpoint_state == "conflicted" else 0
     execution_uncertain = 1 if checkpoint_state == "execution_uncertain" else 0
     execution_phase = _execution_checkpoint_phase(service)
+    execution = _remediation_execution_observability(service)
     reconciliation_reason = _execution_reconciliation_reason(service)
     audit_integrity = _audit_integrity_state(service)
     audit_policy = _audit_integrity_policy(service)
@@ -244,6 +278,18 @@ def _service_metrics(service: IncidentService) -> str:
         "# HELP stageguard_remediation_execution_uncertain Whether remediation provider execution is ambiguous and lifecycle work is blocked.\n"
         "# TYPE stageguard_remediation_execution_uncertain gauge\n"
         f"stageguard_remediation_execution_uncertain {execution_uncertain}\n"
+        "# HELP stageguard_remediation_execution_active Whether an approved remediation/recovery operation is currently active.\n"
+        "# TYPE stageguard_remediation_execution_active gauge\n"
+        f"stageguard_remediation_execution_active {1 if execution['active'] else 0}\n"
+        "# HELP stageguard_remediation_execution_age_seconds Monotonic age in seconds of the active remediation/recovery operation.\n"
+        "# TYPE stageguard_remediation_execution_age_seconds gauge\n"
+        f"stageguard_remediation_execution_age_seconds {execution['age_seconds']}\n"
+        "# HELP stageguard_remediation_execution_max_seconds Configured maximum remediation/recovery execution window in seconds.\n"
+        "# TYPE stageguard_remediation_execution_max_seconds gauge\n"
+        f"stageguard_remediation_execution_max_seconds {execution['max_seconds']}\n"
+        "# HELP stageguard_remediation_execution_deadline_exceeded Whether the active remediation/recovery operation exceeded its configured window.\n"
+        "# TYPE stageguard_remediation_execution_deadline_exceeded gauge\n"
+        f"stageguard_remediation_execution_deadline_exceeded {1 if execution['deadline_exceeded'] else 0}\n"
         "# HELP stageguard_remediation_execution_phase Current provider-detail-free durable remediation execution phase.\n"
         "# TYPE stageguard_remediation_execution_phase gauge\n"
     )
@@ -373,6 +419,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "audit_integrity": "failed",
                         "audit_integrity_policy": "require_verified",
                         "remediation_execution_phase": "unknown",
+                        "remediation_execution_deadline": "failed",
                         "remediation_reconciliation_reason": "phase_unavailable",
                     },
                 }
