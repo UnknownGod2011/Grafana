@@ -14,6 +14,12 @@ PROMETHEUS = ROOT / "runtime" / "prometheus.yml"
 RUNTIME_DOCKERFILE = ROOT / "runtime" / "Dockerfile"
 
 
+FRESHNESS_EXPR = (
+    "max(time() - timestamp(stageguard_remediation_execution_deadline_exceeded)) "
+    "or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)"
+)
+
+
 class GrafanaRuntimeObservabilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -40,6 +46,7 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
             "stageguard_remediation_execution_max_seconds - stageguard_remediation_execution_age_seconds",
             expressions,
         )
+        self.assertIn(FRESHNESS_EXPR, expressions)
 
     def test_dashboard_uses_the_provisioned_read_only_prometheus_source(self) -> None:
         for panel in self.dashboard["panels"]:
@@ -49,6 +56,14 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
         self.assertIn("disableDeletion: true", self.provider)
         self.assertIn("updateIntervalSeconds: 30", self.provider)
         self.assertIn("path: /var/lib/grafana/dashboards", self.provider)
+
+    def test_freshness_panel_is_distinct_from_deadline_state(self) -> None:
+        panels = {panel["id"]: panel for panel in self.dashboard["panels"]}
+        self.assertIn(5, panels)
+        panel = panels[5]
+        self.assertEqual(panel["title"], "Watchdog telemetry freshness")
+        self.assertEqual(panel["targets"][0]["expr"], FRESHNESS_EXPR)
+        self.assertIn("45 seconds", panel["description"])
 
     def test_compose_mounts_dashboard_and_provisioning_trees_read_only(self) -> None:
         self.assertIn(
@@ -81,10 +96,25 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
         self.assertIn("for: 10s", self.alerting)
         self.assertIn("severity: critical", self.alerting)
 
-    def test_alert_does_not_conflate_missing_data_with_deadline_exceeded(self) -> None:
-        self.assertIn("noDataState: NoData", self.alerting)
-        self.assertIn("execErrState: Error", self.alerting)
-        self.assertNotIn("noDataState: Alerting", self.alerting)
+    def test_deadline_alert_does_not_conflate_missing_data_with_deadline_exceeded(self) -> None:
+        deadline_rule = self.alerting.split("- uid: stageguard-runtime-telemetry-stale", 1)[0]
+        self.assertIn("noDataState: NoData", deadline_rule)
+        self.assertIn("execErrState: Error", deadline_rule)
+        self.assertNotIn("noDataState: Alerting", deadline_rule)
+
+    def test_stale_telemetry_has_a_separate_bounded_alert(self) -> None:
+        self.assertIn("uid: stageguard-runtime-telemetry-stale", self.alerting)
+        self.assertIn(f"expr: {FRESHNESS_EXPR}", self.alerting)
+        self.assertIn("params: [45]", self.alerting)
+        self.assertIn("panelId: 5", self.alerting)
+        self.assertIn("for: 30s", self.alerting)
+        self.assertIn("severity: warning", self.alerting)
+        self.assertIn("do not infer remediation safety from an old zero value", self.alerting)
+
+    def test_stale_telemetry_expression_fails_safe_when_series_is_absent(self) -> None:
+        self.assertIn("timestamp(stageguard_remediation_execution_deadline_exceeded)", FRESHNESS_EXPR)
+        self.assertIn("absent(stageguard_remediation_execution_deadline_exceeded)", FRESHNESS_EXPR)
+        self.assertIn("vector(1000000000)", FRESHNESS_EXPR)
 
     def test_provisioning_does_not_embed_notification_destinations_or_secrets(self) -> None:
         lowered = self.alerting.lower()
