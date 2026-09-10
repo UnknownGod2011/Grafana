@@ -14,6 +14,21 @@ services:
       timeout: 3s
       retries: 10
 
+  # Credential-free, metrics-only fixture for rehearsing the StageGuard runtime
+  # watchdog dashboard/alert. It is not a remediation provider and exposes no
+  # incident mutation surface. Host publishing is loopback-only.
+  watchdog-fixture:
+    build:
+      context: ./runtime
+    command: ["python", "/app/watchdog_metrics_fixture.py"]
+    ports:
+      - "127.0.0.1:9111:9111"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9111/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   prometheus:
     image: prom/prometheus:latest
     command:
@@ -25,6 +40,8 @@ services:
       - "9090:9090"
     depends_on:
       simulator:
+        condition: service_healthy
+      watchdog-fixture:
         condition: service_healthy
 
   grafana:
