@@ -15,6 +15,14 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 
+from gcp_identifiers import (
+    image_project,
+    valid_artifact_registry_image,
+    valid_project_id,
+    valid_region,
+    valid_service_name,
+)
+
 
 REQUIRED_ENV = (
     "PROJECT_ID",
@@ -156,6 +164,32 @@ def _env_checks() -> list[Check]:
         value = os.getenv(name, "").strip()
         checks.append(Check(f"env:{name}", "ok" if value else "missing", "configured" if value else "required deployment variable is not set"))
 
+    project_id = os.getenv("PROJECT_ID", "").strip()
+    if project_id:
+        ok = valid_project_id(project_id)
+        checks.append(Check("project_id_format", "ok" if ok else "failed", "valid Google Cloud project ID" if ok else "PROJECT_ID must be 6-30 lowercase letters, digits, or hyphens, start with a letter, and not end with a hyphen"))
+
+    region = os.getenv("REGION", "").strip()
+    if region:
+        ok = valid_region(region)
+        checks.append(Check("region_format", "ok" if ok else "failed", f"bounded Google Cloud region/location identifier: {region}" if ok else "REGION must be a bounded lowercase Google Cloud region/location identifier"))
+
+    service_name = os.getenv("SERVICE_NAME", "").strip()
+    if service_name:
+        ok = valid_service_name(service_name)
+        checks.append(Check("service_name_format", "ok" if ok else "failed", "valid Cloud Run service name" if ok else "SERVICE_NAME must be 1-49 lowercase letters, digits, or hyphens, start with a letter, and not end with a hyphen"))
+
+    image_url = os.getenv("IMAGE_URL", "").strip()
+    if image_url:
+        safe = _safe_cli_mapping_value(image_url)
+        checks.append(Check("image_url_cli_safety", "ok" if safe else "failed", "image reference is safe for deployment command serialization" if safe else "IMAGE_URL must not contain commas, whitespace, or control characters"))
+        if safe:
+            ok = valid_artifact_registry_image(image_url)
+            checks.append(Check("image_url_format", "ok" if ok else "failed", "tagged or sha256-pinned Artifact Registry image reference" if ok else "IMAGE_URL must be a tagged or sha256-pinned Artifact Registry Docker image URI"))
+            if ok and project_id:
+                same_project = image_project(image_url) == project_id
+                checks.append(Check("image_project_match", "ok" if same_project else "failed", "container image project matches PROJECT_ID" if same_project else "IMAGE_URL project must match PROJECT_ID"))
+
     gemini_enabled = _gemini_enabled()
     checks.append(Check(
         "enable_gemini_format",
@@ -203,15 +237,6 @@ def _env_checks() -> list[Check]:
     checkpoint_object = _checkpoint_object()
     object_ok = _valid_checkpoint_object(checkpoint_object)
     checks.append(Check("checkpoint_object_format", "ok" if object_ok else "failed", f"bounded checkpoint object: {checkpoint_object}" if object_ok else "CHECKPOINT_OBJECT is not a valid bounded object path"))
-
-    image_url = os.getenv("IMAGE_URL", "").strip()
-    if image_url:
-        safe = _safe_cli_mapping_value(image_url)
-        checks.append(Check("image_url_cli_safety", "ok" if safe else "failed", "image reference is safe for deployment command serialization" if safe else "IMAGE_URL must not contain commas, whitespace, or control characters"))
-        if safe:
-            leaf = image_url.rsplit("/", 1)[-1]
-            ok = ".pkg.dev/" in image_url and (":" in leaf or "@sha256:" in image_url)
-            checks.append(Check("image_url_format", "ok" if ok else "warning", "Artifact Registry image reference" if ok else "IMAGE_URL does not look like a pinned/tagged Artifact Registry image", required=False))
     return checks
 
 
@@ -316,7 +341,7 @@ def _gcloud_checks() -> list[Check]:
         checks.append(_vertex_predict_access_check(project_id, service_account, _gemini_location(), _gemini_model()))
 
     image_url = os.getenv("IMAGE_URL", "").strip()
-    if image_url and ".pkg.dev/" in image_url:
+    if valid_artifact_registry_image(image_url):
         code, _, _ = _run_gcloud(["artifacts", "docker", "images", "describe", image_url, f"--project={project_id}", "--format=value(image_summary.digest)"])
         checks.append(Check("image_exists", "ok" if code == 0 else "failed", "container image exists" if code == 0 else "container image not found or not accessible"))
     return checks
@@ -327,6 +352,8 @@ def _next_steps(checks: list[Check], offline: bool) -> list[str]:
     steps: list[str] = []
     if any(name.startswith("env:") for name in failed):
         steps.append("Set every required deployment environment variable; use Secret Manager secret names, never secret payloads.")
+    if any(name in failed for name in ("project_id_format", "region_format", "service_name_format", "image_url_format", "image_project_match")):
+        steps.append("Fix PROJECT_ID, REGION, SERVICE_NAME, and IMAGE_URL so they satisfy the shared StageGuard Google Cloud identifier contract; Artifact Registry images must be explicitly tagged or sha256-pinned and belong to PROJECT_ID.")
     if "enable_gemini_format" in failed:
         steps.append("Set ENABLE_GEMINI to true/false (aliases 1/0, yes/no, on/off are accepted).")
     if any(name.startswith("secret_id_format:") for name in failed):
