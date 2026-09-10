@@ -17,6 +17,7 @@ import argparse
 import base64
 import ipaddress
 import json
+import math
 import time
 import urllib.parse
 import urllib.request
@@ -48,6 +49,15 @@ def _require_loopback_http(value: str, name: str) -> str:
     if not is_loopback or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
         raise ValueError(f"{name} must be a loopback service origin")
     return value.rstrip("/")
+
+
+def _require_positive_finite(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite positive number")
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return value
 
 
 def _request(url: str, *, method: str = "GET", auth: tuple[str, str] | None = None) -> bytes:
@@ -183,9 +193,10 @@ def main() -> int:
     parser.add_argument("--stale-timeout", type=float, default=95.0)
     args = parser.parse_args()
     for name in ("prometheus_timeout", "alert_timeout", "resolve_timeout", "stale_timeout"):
-        value = getattr(args, name)
-        if value <= 0:
-            parser.error(f"--{name.replace('_', '-')} must be positive")
+        try:
+            _require_positive_finite(getattr(args, name), name)
+        except ValueError as exc:
+            parser.error(str(exc))
     try:
         fixture = _require_loopback_http(args.fixture, "fixture")
         prometheus = _require_loopback_http(args.prometheus, "prometheus")
