@@ -1,0 +1,62 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: StageGuard runtime safety
+    folder: StageGuard
+    interval: 10s
+    rules:
+      - uid: stageguard-remediation-deadline
+        title: StageGuard remediation execution deadline exceeded
+        condition: B
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: stageguard-prometheus
+            model:
+              expr: max(stageguard_remediation_execution_deadline_exceeded)
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: -100
+            model:
+              conditions:
+                - evaluator:
+                    params: [0.5]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: -100
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        dashboardUid: stageguard-runtime-safety
+        panelId: 2
+        noDataState: Alerting
+        execErrState: Error
+        for: 10s
+        annotations:
+          summary: StageGuard remediation execution exceeded its configured safety deadline
+          description: StageGuard has withdrawn readiness while a remediation call remains in flight beyond its bounded execution window. Do not replay remediation; inspect the incident lifecycle and provider state before reconciliation.
+        labels:
+          component: stageguard-runtime
+          severity: critical
