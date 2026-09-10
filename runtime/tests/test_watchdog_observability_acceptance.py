@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import unittest
 from pathlib import Path
 
@@ -84,6 +85,14 @@ class WatchdogObservabilityAcceptanceTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(TypeError):
                     self.module.set_telemetry("http://127.0.0.1:1", value)
+
+    def test_timeout_validation_requires_positive_finite_values(self) -> None:
+        self.assertEqual(self.module._require_positive_finite(1, "timeout"), 1.0)
+        self.assertEqual(self.module._require_positive_finite(0.25, "timeout"), 0.25)
+        for value in (0, -1, True, math.inf, -math.inf, math.nan, "1", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.module._require_positive_finite(value, "timeout")
 
     def test_loopback_guard_rejects_remote_or_credentialed_origins(self) -> None:
         rejected = (
