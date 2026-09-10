@@ -51,16 +51,27 @@
       "targets": [{"editorMode": "code", "expr": "stageguard_remediation_execution_max_seconds - stageguard_remediation_execution_age_seconds", "legendFormat": "deadline headroom", "range": true, "refId": "A"}],
       "title": "Watchdog headroom",
       "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Age of the newest watchdog deadline sample. More than 45 seconds means StageGuard can no longer trust an apparently healthy zero value.",
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 30}, {"color": "red", "value": 45}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 8},
+      "id": 5,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "max(time() - timestamp(stageguard_remediation_execution_deadline_exceeded)) or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)", "legendFormat": "sample age", "range": true, "refId": "A"}],
+      "title": "Watchdog telemetry freshness",
+      "type": "stat"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": ["stageguard", "runtime", "remediation", "safety"],
+  "tags": ["stageguard", "runtime", "remediation", "safety", "telemetry"],
   "templating": {"list": []},
   "time": {"from": "now-30m", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
   "title": "StageGuard Runtime Safety",
   "uid": "stageguard-runtime-safety",
-  "version": 1
+  "version": 2
 }
