@@ -13,6 +13,7 @@ flight, and all state promotion/checkpoint/audit work remains lock protected.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 
@@ -50,11 +51,15 @@ class AnchoredExecutionSafeIncidentService(
         monotonic: Callable[[], float] | None = None,
         **kwargs,
     ) -> None:
-        if isinstance(execution_max_seconds, bool) or execution_max_seconds <= 0:
-            raise ValueError("execution_max_seconds must be positive")
+        try:
+            maximum = float(execution_max_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("execution_max_seconds must be a finite positive number") from exc
+        if isinstance(execution_max_seconds, bool) or not math.isfinite(maximum) or maximum <= 0:
+            raise ValueError("execution_max_seconds must be a finite positive number")
         self._execution_in_flight = False
         self._execution_started_monotonic: float | None = None
-        self._execution_max_seconds = float(execution_max_seconds)
+        self._execution_max_seconds = maximum
         self._execution_monotonic = monotonic or time.monotonic
         super().__init__(*args, **kwargs)
 
