@@ -11,74 +11,70 @@ Core invariants:
 - Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
 - Authenticated checkpoints and audit integrity fail closed.
 
-## Run log — 2026-09-10 — end-to-end fake-gcloud deployment doctor
+## Run log — 2026-09-10 — fail-closed gcloud process boundary
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected the repository root and the current Google Cloud deployment-preflight boundary, especially:
+Read `progress.md` completely before choosing work. Inspected the current repository state and the deployment-preflight surface, especially:
 - `scripts/gcp_deploy_doctor.py`
+- `scripts/gcp_identifiers.py`
 - `runtime/tests/test_gcp_deploy_doctor.py`
-- current repository root/documentation layout
+- `runtime/tests/test_gcp_deploy_doctor_fake_gcloud.py`
 
-The previous handoff identified the right next gap: the live Cloud Run region check had unit coverage, but there was no subprocess-level proof that the complete deployment doctor could traverse its real `gcloud` command sequence and derive `ready_to_deploy` correctly without real Google Cloud credentials.
+The previous handoff identified `_run_gcloud()` as the highest-value robustness gap. Confirmed that it called `subprocess.run(..., timeout=30)` without catching process-layer exceptions, so a hung gcloud command, executable race/OS failure, or output decode failure could crash the deployment doctor before it emitted the promised structured fail-closed report.
 
 ### Exact changes made
 
-1. Added `runtime/tests/test_gcp_deploy_doctor_fake_gcloud.py`.
-   - Runs the actual `scripts/gcp_deploy_doctor.py --json` entrypoint as a subprocess.
-   - Installs a temporary executable `gcloud` shim at the front of `PATH`; no real Google Cloud CLI, account, project, API, IAM policy, secret, bucket, image, or Cloud Run service is required.
-   - Records every fake-gcloud invocation as JSONL so command families can be asserted after the doctor exits.
-   - Simulates active authentication, project-number resolution, Cloud Run region catalog, enabled APIs, secret existence, IAM Policy Troubleshooter, checkpoint bucket existence, and Artifact Registry image existence.
+1. Hardened `scripts/gcp_deploy_doctor.py::_run_gcloud()`.
+   - Added named process-boundary constants: `GCLOUD_TIMEOUT_SECONDS=30`, timeout exit code `124`, and execution failure exit code `126`.
+   - `subprocess.TimeoutExpired` is converted to `(124, "", "gcloud command timed out")`.
+   - `OSError` and `UnicodeError` are converted to `(126, "", "gcloud command could not be executed")`.
+   - Exception objects, command arguments, paths, secret identifiers, and raw subprocess stderr are not interpolated into those synthetic failure strings.
+   - Existing callers therefore continue through their established nonzero-return fail-closed branches rather than losing the JSON report to an uncaught exception.
 
-2. Added behavioral coverage proving:
-   - a supported Cloud Run region can complete the full read-only preflight and produce `ready_to_deploy=true` when every simulated dependency and permission is healthy;
-   - an unsupported region forces exit code 2 and `ready_to_deploy=false` while the doctor still collects the remaining API/storage/IAM/image evidence instead of prematurely hiding additional failures;
-   - an empty provider region catalog fails closed;
-   - denying exactly `storage.objects.delete` keeps deploy readiness false while `storage.objects.get` and `storage.objects.create` remain independently successful;
-   - the complete healthy non-Gemini path issues 10 Policy Troubleshooter calls: five Secret Manager permissions, three checkpoint-object permissions, and two Cloud Logging permissions.
-
-3. Simplified the fake Policy Troubleshooter dispatcher after re-reading the committed harness so its command match is explicit and maintainable.
+2. Added `runtime/tests/test_gcp_deploy_doctor_process_failures.py`.
+   - Unit coverage injects `TimeoutExpired`, `FileNotFoundError`, and `UnicodeDecodeError` directly at the subprocess boundary.
+   - Verifies timeout/OS/decode failures return stable sanitized codes/messages and do not echo a synthetic secret marker or private filesystem path.
+   - Verifies `_gcloud_checks()` converts a runner timeout into a required failed `gcloud_auth` check rather than raising.
+   - Adds a POSIX subprocess-level fake-`gcloud` case where the executable exits nonzero and writes synthetic stderr; the real doctor entrypoint must still emit parseable JSON, `ready_to_deploy=false`, exit 2, no traceback, and no forwarded fake-gcloud stderr.
 
 Commits:
-- `7f53b231027ab8f4581f344d5e8ae9e2b108e620` — initial end-to-end fake-gcloud deployment-doctor harness
-- `97a288b4ac3fcfbdf5e98c81099944e6b39e48a6` — clean imports and simplify fake Policy Troubleshooter dispatch
+- `b14eb67c213f5fbcd57f172ae5087d0b177ce11e` — fail closed on gcloud invocation errors
+- `1164300aa966b61f3c5cb2427de0de9d11da34eb` — cover sanitized gcloud process failures
 
 ### Tests / checks / results
 
-Attempted the exact focused suite from a clean checkout:
+Execution evidence available in this run:
+- Exercised the exact new `_run_gcloud()` exception mapping logic in an isolated Python harness.
+- Timeout case returned `(124, "", "gcloud command timed out")`.
+- OS invocation failure returned `(126, "", "gcloud command could not be executed")`.
+- Unicode decode failure returned `(126, "", "gcloud command could not be executed")`.
+- Re-fetched and reviewed the committed regression test file after the GitHub write.
 
-`python -m unittest runtime.tests.test_gcp_deploy_doctor_fake_gcloud runtime.tests.test_gcp_deploy_doctor`
-
-The execution container still cannot resolve `github.com`; `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` failed with `Could not resolve host: github.com` before tests could execute. Therefore no committed-suite green claim is made.
-
-Additional validation performed:
-- re-fetched the newly committed harness through the GitHub connector and reviewed the final source;
-- verified the fake command dispatcher covers every non-Gemini `gcloud` command family currently issued by `_gcloud_checks()`;
-- verified the expected Policy Troubleshooter cardinality against the current doctor contract: 5 secret + 3 storage + 2 logging = 10;
-- kept the test isolated to temporary files and subprocess environment overrides.
+The full committed unittest modules were not executed from a repository checkout in this environment, so no new full-suite green claim is made. The retained historical execution baselines below remain the latest broader runnable evidence.
 
 No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud project, Cloud Run service, bucket/object, IAM policy, Secret Manager payload, Vertex/Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. Live-provider deployment preflight should have both unit-level checks and a credential-free subprocess contract test.
-2. Unsupported region availability is a required failure, but the doctor should continue collecting other read-only deployment evidence so operators receive one useful diagnostic report rather than serial one-error-at-a-time failures.
-3. Effective IAM permissions remain tested independently; losing one checkpoint permission must not blur the state of the other permissions.
-4. The fake-gcloud harness is intentionally POSIX-only for now because the production deploy/operator path is shell-oriented; Windows continues to have unit-level Python doctor coverage.
-5. No CI was enabled for this harness to avoid unnecessary Actions usage; it is designed for local/manual focused execution.
+1. Deployment preflight must treat CLI process reliability as part of the fail-closed security boundary, not as an unhandled operational exception.
+2. Synthetic runner failures use stable generic messages. Raw exception text is intentionally discarded because it can contain command arguments, local paths, or other operator context that should not be copied into machine-readable deployment reports.
+3. Existing gcloud stderr remains consumed by individual check logic; the new exception path does not introduce a second reporting channel or leak subprocess diagnostics to stdout/stderr.
+4. Exit codes 124/126 are internal sentinel values only; deploy readiness still derives from required check status, not from trusting these codes as success/failure policy by themselves.
+5. No CI was enabled for the new tests to avoid unnecessary Actions usage.
 
 ### Current blockers / unknowns
 
-- The exact new fake-gcloud suite still needs execution from a runnable checkout because the current execution container cannot resolve GitHub.
-- The full historical suite still needs systematic triage after repository execution is available.
+- The exact committed `runtime.tests.test_gcp_deploy_doctor_process_failures`, fake-gcloud suite, and broader doctor suite still need execution from a runnable repository checkout.
+- The historical full suite still needs systematic triage after repository execution is available.
 - The exact Cloud Storage object Policy Troubleshooter tuple still needs one authorized disposable-project acceptance run.
 - `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
 - `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real Vertex AI acceptance run after the doctor passes.
-- `_run_gcloud()` currently relies directly on `subprocess.run(..., timeout=30)`. A true CLI hang/timeout or executable race can raise instead of being converted into a structured failed check; this is now the clearest fail-closed robustness gap in the deployment doctor.
+- Process failures are now safe, but the first auth-stage runner timeout/executable race is still summarized as the generic `gcloud_auth` failure text. This is fail-closed but operationally imprecise.
 
 ## Single best next step
 
-**Harden `scripts/gcp_deploy_doctor.py::_run_gcloud()` so `subprocess.TimeoutExpired` and executable/OS invocation failures become sanitized nonzero results rather than crashing the doctor, then extend the fake-gcloud/subprocess coverage to prove command timeout/failure yields structured `ready_to_deploy=false` JSON without leaking credentials or stack traces.**
+**Make gcloud process-failure classification explicit in the deployment report: distinguish timeout/execution failure from genuine authentication denial without exposing raw subprocess context, and add regression coverage proving later command failures (region/API/secret/storage/IAM/image probes) retain their specific check names while reporting a sanitized process-failure reason.**
 
 ## Retained production hardening
 
@@ -91,6 +87,7 @@ No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance
 - Runtime MCP launcher parsing is centralized and cross-platform.
 - Readiness validates local activation/pin trust before spawning/querying Grafana MCP.
 - Deployment doctor validates required APIs, secrets/access, Cloud Logging permissions, checkpoint storage permissions, conditional Vertex prediction permission, image availability, live Cloud Run region availability, and deployment serialization boundaries; offline validation can never report deploy-ready.
+- Deployment-doctor gcloud timeouts, OS invocation failures, and decode failures now fail closed through sanitized nonzero results instead of escaping as exceptions.
 - Gemini acceptance smoke defaults to zero model calls and requires explicit `--execute`.
 - Standard Cloud Run deployment keeps production remediation disabled.
 
