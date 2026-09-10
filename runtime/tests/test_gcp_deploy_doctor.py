@@ -35,6 +35,9 @@ VALID_ENV = {
 
 
 def _load_doctor_module():
+    scripts_dir = str(DOCTOR.parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
     spec = importlib.util.spec_from_file_location("stageguard_gcp_deploy_doctor_test_module", DOCTOR)
     if spec is None or spec.loader is None:
         raise RuntimeError("could not load gcp_deploy_doctor.py")
@@ -126,12 +129,12 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(self._checks(self._payload(result))[check_name]["status"], "failed")
 
-    def test_non_artifact_registry_image_is_advisory_only(self) -> None:
+    def test_non_artifact_registry_image_fails_closed(self) -> None:
         result = self._run({"IMAGE_URL": "example.com/stageguard/api:test"})
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 2)
         check = self._checks(self._payload(result))["image_url_format"]
-        self.assertEqual(check["status"], "warning")
-        self.assertIs(check["required"], False)
+        self.assertEqual(check["status"], "failed")
+        self.assertIs(check["required"], True)
 
     def test_gemini_contract_and_boolean_aliases(self) -> None:
         result = self._run({"ENABLE_GEMINI": "true"})
@@ -228,6 +231,33 @@ class GcpDeployDoctorPermissionTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertIn("//aiplatform.googleapis.com/projects/stageguard-test/locations/global/publishers/google/models/gemini-2.5-flash", args)
         self.assertIn("--permission=aiplatform.endpoints.predict", args)
+
+    def test_cloud_run_region_check_uses_live_provider_catalog(self) -> None:
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(0, "asia-south1\nus-central1\neurope-west1\n", "")) as run:
+            check = self.doctor._cloud_run_region_check("stageguard-test", "us-central1")
+        self.assertEqual(check.status, "ok")
+        self.assertEqual(
+            run.call_args.args[0],
+            ["run", "regions", "list", "--project=stageguard-test", "--format=value(locationId)"],
+        )
+
+    def test_cloud_run_region_check_fails_closed_for_missing_or_unreadable_catalog(self) -> None:
+        cases = (
+            ((0, "asia-south1\neurope-west1\n", ""), "us-central1"),
+            ((0, "\n", ""), "us-central1"),
+            ((1, "", "permission denied"), "us-central1"),
+        )
+        for response, region in cases:
+            with self.subTest(response=response):
+                with mock.patch.object(self.doctor, "_run_gcloud", return_value=response):
+                    check = self.doctor._cloud_run_region_check("stageguard-test", region)
+                self.assertEqual(check.status, "failed")
+                self.assertTrue(check.required)
+
+    def test_next_steps_explain_live_region_contract(self) -> None:
+        checks = [self.doctor.Check("cloud_run_region_available", "failed", "not available")]
+        steps = self.doctor._next_steps(checks, offline=False)
+        self.assertTrue(any("gcloud run regions list" in step for step in steps))
 
     def test_next_steps_explain_least_privilege_storage_contract(self) -> None:
         checks = [self.doctor.Check("checkpoint_storage_access:delete", "failed", "denied")]
