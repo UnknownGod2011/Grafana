@@ -6,7 +6,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
@@ -79,7 +78,7 @@ if args[:4] == ["artifacts", "docker", "images", "describe"]:
     print("sha256:" + "a" * 64)
     raise SystemExit(0)
 
-if args[:4] == ["policy-intelligence", "troubleshoot-policy", "iam", args[3] if len(args) > 3 else ""]:
+if args[:3] == ["policy-intelligence", "troubleshoot-policy", "iam"]:
     denied = os.environ.get("FAKE_GCLOUD_DENY_PERMISSION", "")
     permission = next((item.split("=", 1)[1] for item in args if item.startswith("--permission=")), "")
     state = "CANNOT_ACCESS" if permission == denied else "CAN_ACCESS"
