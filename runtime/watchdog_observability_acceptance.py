@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Credential-free acceptance rehearsal for StageGuard watchdog observability.
 
-Requires the default Docker Compose stack. The script drives only the local
-metrics fixture and proves two independent Grafana safety contracts:
+Requires the default Docker Compose stack. The script first attests that the
+running Prometheus and Grafana versions match the repository's pinned
+acceptance baseline, then drives only the local metrics fixture and proves two
+independent Grafana safety contracts:
 
 1. healthy -> remediation deadline firing -> healthy/resolved
 2. healthy -> metrics unavailable -> stale-evidence warning -> telemetry restored
@@ -24,6 +26,8 @@ import urllib.request
 from typing import Any
 
 
+EXPECTED_PROMETHEUS_VERSION = "3.13.3"
+EXPECTED_GRAFANA_VERSION = "13.2.1"
 DEADLINE_ALERT_TITLE = "StageGuard remediation execution deadline exceeded"
 DEADLINE_ALERT_SUMMARY = "StageGuard remediation execution exceeded its configured safety deadline"
 STALE_ALERT_TITLE = "StageGuard runtime telemetry stale"
@@ -68,6 +72,37 @@ def _request(url: str, *, method: str = "GET", auth: tuple[str, str] | None = No
     request = urllib.request.Request(url, data=b"" if method == "POST" else None, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=3) as response:
         return response.read()
+
+
+def prometheus_runtime_version_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise ValueError("Prometheus build-info response must be a successful object")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Prometheus build-info data must be an object")
+    version = data.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("Prometheus build-info version must be a non-empty string")
+    return version.strip()
+
+
+def grafana_runtime_version_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("Grafana health response must be an object")
+    version = payload.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("Grafana health version must be a non-empty string")
+    return version.strip()
+
+
+def prometheus_runtime_version(base: str) -> str:
+    payload = json.loads(_request(f"{base}/api/v1/status/buildinfo").decode("utf-8"))
+    return prometheus_runtime_version_from_payload(payload)
+
+
+def grafana_runtime_version(base: str, auth: tuple[str, str]) -> str:
+    payload = json.loads(_request(f"{base}/api/health", auth=auth).decode("utf-8"))
+    return grafana_runtime_version_from_payload(payload)
 
 
 def set_fixture(base: str, state: str) -> None:
@@ -205,6 +240,34 @@ def main() -> int:
         parser.error(str(exc))
     auth = (args.grafana_user, args.grafana_password)
 
+    # A stale local container can otherwise make a repository-pinned rehearsal
+    # appear green against the wrong upstream runtime. Wait only for API
+    # availability, then require exact version identity before driving state.
+    if not wait_until(lambda: bool(prometheus_runtime_version(prometheus)), timeout=args.prometheus_timeout):
+        print("FAIL: Prometheus build-info API did not become available")
+        return 1
+    if not wait_until(lambda: bool(grafana_runtime_version(grafana, auth)), timeout=args.prometheus_timeout):
+        print("FAIL: Grafana health API did not become available")
+        return 1
+    try:
+        live_prometheus = prometheus_runtime_version(prometheus)
+        live_grafana = grafana_runtime_version(grafana, auth)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        print("FAIL: could not attest observability runtime versions")
+        return 1
+    if live_prometheus != EXPECTED_PROMETHEUS_VERSION:
+        print(
+            f"FAIL: Prometheus runtime version {live_prometheus!r} does not match "
+            f"pinned acceptance version {EXPECTED_PROMETHEUS_VERSION!r}"
+        )
+        return 1
+    if live_grafana != EXPECTED_GRAFANA_VERSION:
+        print(
+            f"FAIL: Grafana runtime version {live_grafana!r} does not match "
+            f"pinned acceptance version {EXPECTED_GRAFANA_VERSION!r}"
+        )
+        return 1
+
     try:
         # First prove the genuine remediation-deadline lifecycle.
         set_telemetry(fixture, True)
@@ -264,7 +327,8 @@ def main() -> int:
             return 1
 
         print(
-            "PASS: deadline alert fired/resolved; telemetry outage fired only stale warning and recovered cleanly"
+            "PASS: pinned runtime versions attested; deadline alert fired/resolved; "
+            "telemetry outage fired only stale warning and recovered cleanly"
         )
         return 0
     finally:
