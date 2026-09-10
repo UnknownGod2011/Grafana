@@ -1,6 +1,6 @@
 # Runtime metrics ingestion
 
-StageGuard exposes runtime safety metrics at `/metrics`, including the remediation execution watchdog used by the source-controlled Grafana dashboard and alert. Production Cloud Run services should remain authenticated; do **not** make the service public merely so Prometheus can scrape it.
+StageGuard exposes runtime safety metrics at `/metrics`, including the remediation execution watchdog used by the source-controlled Grafana dashboard and alerts. Production Cloud Run services should remain authenticated; do **not** make the service public merely so Prometheus can scrape it.
 
 ## Local rehearsal
 
@@ -29,6 +29,22 @@ stageguard_remediation_execution_deadline_exceeded
 ```
 
 The Grafana-managed `stageguard-remediation-deadline` rule evaluates the last series. It intentionally treats missing telemetry as `NoData`, not as a synthetic deadline breach.
+
+### Freshness is independent from watchdog value
+
+A stored `stageguard_remediation_execution_deadline_exceeded 0` is only meaningful while the telemetry path is still delivering fresh samples. The runtime dashboard therefore also computes sample age from Prometheus timestamps:
+
+```promql
+max(time() - timestamp(stageguard_remediation_execution_deadline_exceeded))
+or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)
+```
+
+Prometheus documents `time()` as the evaluation timestamp, `timestamp()` as the source sample timestamp, and `absent()` as a way to detect a missing series. StageGuard uses those primitives to keep two conditions separate:
+
+- `stageguard-remediation-deadline` means a fresh watchdog sample positively reports that execution exceeded its configured bound;
+- `stageguard-runtime-telemetry-stale` means the evidence plane itself is stale or missing, so an old healthy value must not be trusted.
+
+The stale-telemetry rule enters warning after the newest watchdog deadline sample is more than 45 seconds old and remains so for 30 seconds. A completely absent series is mapped to a deliberately enormous sample age by the query, so missing telemetry follows the same bounded stale-evidence path instead of masquerading as healthy. This rule does not replay remediation, change incident state, or grant Grafana any write credential.
 
 After `docker compose up --build -d`, run the bounded acceptance rehearsal:
 
@@ -96,7 +112,9 @@ References:
 
 - Google Cloud — Authenticate service-to-service requests: https://cloud.google.com/run/docs/authenticating/service-to-service
 - Google Cloud — Get an ID token: https://cloud.google.com/docs/authentication/get-id-token
+- Prometheus — Query functions (`time`, `timestamp`, `absent`): https://prometheus.io/docs/prometheus/latest/querying/functions/
 - Prometheus — scrape configuration / authorization: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+- Grafana — Prometheus alerting, including missing/stale metric patterns: https://grafana.com/docs/grafana/latest/datasources/prometheus/alerting/
 - Grafana — Alerting provisioning: https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/
 - Grafana — View active notifications: https://grafana.com/docs/grafana/latest/alerting/monitor-status/view-active-notifications/
 
