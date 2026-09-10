@@ -49,6 +49,15 @@ class CloudRunDeployContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotIn(name, self.deploy)
 
+    def test_deploy_exposes_only_remediation_watchdog_tuning_not_write_enablement(self) -> None:
+        setting = "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"
+        self.assertIn(f'{setting}=${{{setting}}}', self.deploy)
+        self.assertIn(f'if [[ -v {setting} ]]; then', self.deploy)
+        self.assertIn(f'{setting}="60"', self.deploy)
+        self.assertIn("must be a finite positive decimal number", self.deploy)
+        self.assertLess(self.deploy.index(f'if [[ -v {setting} ]]'), self.deploy.index("gcloud run deploy"))
+        self.assertNotIn("STAGEGUARD_ENABLE_REMEDIATION", self.deploy)
+
     def test_grafana_token_remains_secret_manager_file_mount(self) -> None:
         self.assertIn('/secrets/grafana-token=${GRAFANA_TOKEN_SECRET}:latest', self.deploy)
         self.assertIn('GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token', self.deploy)
