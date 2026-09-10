@@ -68,6 +68,7 @@ TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off", ""}
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$")
 _IPV4_LIKE_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+_SECRET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
 
 
 @dataclass(frozen=True)
@@ -108,8 +109,7 @@ def _gemini_model() -> str:
 
 
 def _checkpoint_object() -> str:
-    raw = os.getenv("CHECKPOINT_OBJECT", DEFAULT_CHECKPOINT_OBJECT)
-    return raw
+    return os.getenv("CHECKPOINT_OBJECT", DEFAULT_CHECKPOINT_OBJECT)
 
 
 def _valid_checkpoint_bucket(bucket: str) -> bool:
@@ -138,6 +138,11 @@ def _valid_checkpoint_object(raw: str) -> bool:
     )
 
 
+def _safe_cli_mapping_value(value: str) -> bool:
+    """Return whether a value is safe inside gcloud comma-delimited mappings."""
+    return bool(value and "," not in value and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value))
+
+
 def _required_apis() -> tuple[str, ...]:
     apis = list(BASE_REQUIRED_APIS)
     if _gemini_enabled() is True:
@@ -160,8 +165,8 @@ def _env_checks() -> list[Check]:
     if gemini_enabled is True:
         location = _gemini_location()
         model = _gemini_model()
-        location_ok = bool(re.match(r"^[a-z0-9-]+$", location))
-        model_ok = bool(re.match(r"^[A-Za-z0-9._-]+$", model))
+        location_ok = bool(re.fullmatch(r"[a-z0-9-]+", location))
+        model_ok = bool(re.fullmatch(r"[A-Za-z0-9._-]+", model))
         checks.append(Check("gemini_location_format", "ok" if location_ok else "failed", f"Vertex AI location: {location}" if location_ok else "GOOGLE_CLOUD_LOCATION must be a Vertex AI location identifier"))
         checks.append(Check("gemini_model_format", "ok" if model_ok else "failed", f"Gemini publisher model: {model}" if model_ok else "STAGEGUARD_GEMINI_MODEL must be a model identifier, not a resource path or URL"))
 
@@ -171,13 +176,24 @@ def _env_checks() -> list[Check]:
 
     grafana_url = os.getenv("GRAFANA_URL", "").strip()
     if grafana_url:
-        ok = bool(re.match(r"^https?://[^\s,]+$", grafana_url))
+        ok = bool(re.fullmatch(r"https?://[^\s,]+", grafana_url))
         checks.append(Check("grafana_url_format", "ok" if ok else "failed", "absolute http(s) URL" if ok else "GRAFANA_URL must be an absolute http(s) URL without commas"))
 
     service_account = os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip()
     if service_account:
-        ok = bool(re.match(r"^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$", service_account))
-        checks.append(Check("runtime_service_account_format", "ok" if ok else "failed", "service-account email format" if ok else "RUNTIME_SERVICE_ACCOUNT must be a service-account email"))
+        ok = bool(re.fullmatch(r"[^@\s,]+@[^@\s,]+\.iam\.gserviceaccount\.com", service_account))
+        checks.append(Check("runtime_service_account_format", "ok" if ok else "failed", "service-account email format" if ok else "RUNTIME_SERVICE_ACCOUNT must be a service-account email without commas"))
+
+    iap_audience = os.getenv("IAP_AUDIENCE", "")
+    if iap_audience:
+        ok = _safe_cli_mapping_value(iap_audience)
+        checks.append(Check("iap_audience_format", "ok" if ok else "failed", "safe IAP audience value" if ok else "IAP_AUDIENCE must not contain commas, whitespace, or control characters"))
+
+    for name in SECRET_ENV_NAMES:
+        secret_id = os.getenv(name, "").strip()
+        if secret_id:
+            ok = bool(_SECRET_ID_RE.fullmatch(secret_id))
+            checks.append(Check(f"secret_id_format:{name}", "ok" if ok else "failed", "bounded Secret Manager secret ID" if ok else f"{name} must contain only letters, digits, underscores, or hyphens and be at most 255 characters"))
 
     bucket = os.getenv("CHECKPOINT_BUCKET", "").strip()
     if bucket:
@@ -190,9 +206,12 @@ def _env_checks() -> list[Check]:
 
     image_url = os.getenv("IMAGE_URL", "").strip()
     if image_url:
-        leaf = image_url.rsplit("/", 1)[-1]
-        ok = ".pkg.dev/" in image_url and (":" in leaf or "@sha256:" in image_url)
-        checks.append(Check("image_url_format", "ok" if ok else "warning", "Artifact Registry image reference" if ok else "IMAGE_URL does not look like a pinned/tagged Artifact Registry image", required=False))
+        safe = _safe_cli_mapping_value(image_url)
+        checks.append(Check("image_url_cli_safety", "ok" if safe else "failed", "image reference is safe for deployment command serialization" if safe else "IMAGE_URL must not contain commas, whitespace, or control characters"))
+        if safe:
+            leaf = image_url.rsplit("/", 1)[-1]
+            ok = ".pkg.dev/" in image_url and (":" in leaf or "@sha256:" in image_url)
+            checks.append(Check("image_url_format", "ok" if ok else "warning", "Artifact Registry image reference" if ok else "IMAGE_URL does not look like a pinned/tagged Artifact Registry image", required=False))
     return checks
 
 
@@ -259,116 +278,94 @@ def _gcloud_checks() -> list[Check]:
     project_number = stdout.splitlines()[0].strip()
     checks.append(Check("project_access", "ok", f"project accessible; number {project_number}"))
 
-    configured_number = os.getenv("PROJECT_NUMBER", "").strip()
-    if configured_number:
-        checks.append(Check("project_number_match", "ok" if project_number == configured_number else "failed", "PROJECT_NUMBER matches project" if project_number == configured_number else "PROJECT_NUMBER does not match PROJECT_ID"))
+    configured_project_number = os.getenv("PROJECT_NUMBER", "").strip()
+    checks.append(Check("project_number_match", "ok" if configured_project_number == project_number else "failed", "PROJECT_NUMBER matches project" if configured_project_number == project_number else f"PROJECT_NUMBER mismatch: expected {project_number}"))
 
-    code, enabled, _ = _run_gcloud(["services", "list", f"--project={project_id}", "--enabled", "--format=value(config.name)"])
-    enabled_set = set(enabled.splitlines()) if code == 0 else set()
-    for api in _required_apis():
-        checks.append(Check(f"api:{api}", "ok" if api in enabled_set else "failed", "enabled" if api in enabled_set else "required API is not enabled or could not be verified"))
+    required_apis = _required_apis()
+    code, stdout, _ = _run_gcloud(["services", "list", "--enabled", f"--project={project_id}", "--format=value(config.name)"])
+    if code != 0:
+        checks.append(Check("apis", "failed", "could not list enabled APIs"))
+    else:
+        enabled = {line.strip() for line in stdout.splitlines() if line.strip()}
+        missing = [api for api in required_apis if api not in enabled]
+        checks.append(Check("apis", "ok" if not missing else "failed", "all required APIs enabled" if not missing else f"missing required APIs: {', '.join(missing)}"))
 
-    sa = os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip()
-    service_account_exists = False
-    if sa:
-        code, _, _ = _run_gcloud(["iam", "service-accounts", "describe", sa, f"--project={project_id}"])
-        service_account_exists = code == 0
-        checks.append(Check("runtime_service_account", "ok" if service_account_exists else "failed", "service account exists" if service_account_exists else "service account not found or not accessible"))
-
-    existing_secrets: list[tuple[str, str]] = []
     for env_name in SECRET_ENV_NAMES:
         secret = os.getenv(env_name, "").strip()
         if not secret:
             continue
-        code, _, _ = _run_gcloud(["secrets", "describe", secret, f"--project={project_id}"])
-        secret_exists = code == 0
-        checks.append(Check(f"secret:{env_name}", "ok" if secret_exists else "failed", "secret exists; payload not read" if secret_exists else "secret not found or not accessible"))
-        if secret_exists:
-            existing_secrets.append((env_name, secret))
+        code, _, _ = _run_gcloud(["secrets", "describe", secret, f"--project={project_id}", "--format=value(name)"])
+        checks.append(Check(f"secret:{env_name}", "ok" if code == 0 else "failed", "secret exists; payload not read" if code == 0 else "secret not found or not accessible; payload not read"))
+        if code == 0:
+            checks.append(_secret_access_check(project_number, os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip(), secret, env_name))
 
     bucket = os.getenv("CHECKPOINT_BUCKET", "").strip()
-    bucket_exists = False
-    if bucket and _valid_checkpoint_bucket(bucket):
+    if bucket:
         code, _, _ = _run_gcloud(["storage", "buckets", "describe", f"gs://{bucket}", f"--project={project_id}", "--format=value(name)"])
-        bucket_exists = code == 0
-        checks.append(Check("checkpoint_bucket", "ok" if bucket_exists else "failed", "checkpoint bucket exists and metadata is accessible" if bucket_exists else "checkpoint bucket not found or metadata is not accessible"))
+        checks.append(Check("checkpoint_bucket_exists", "ok" if code == 0 else "failed", "checkpoint bucket exists" if code == 0 else "checkpoint bucket not found or not accessible"))
+        if code == 0:
+            checkpoint_object = _checkpoint_object()
+            for permission in STORAGE_RUNTIME_PERMISSIONS:
+                checks.append(_storage_access_check(bucket, checkpoint_object, os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip(), permission))
 
-    if service_account_exists and project_number.isdigit():
-        for env_name, secret in existing_secrets:
-            checks.append(_secret_access_check(project_number, sa, secret, env_name))
-        for permission in LOGGING_RUNTIME_PERMISSIONS:
-            checks.append(_logging_access_check(project_id, sa, permission))
-        if bucket_exists:
-            object_name = _checkpoint_object()
-            if _valid_checkpoint_object(object_name):
-                for permission in STORAGE_RUNTIME_PERMISSIONS:
-                    checks.append(_storage_access_check(bucket, object_name, sa, permission))
-        if _gemini_enabled() is True:
-            checks.append(_vertex_predict_access_check(project_id, sa, _gemini_location(), _gemini_model()))
+    service_account = os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip()
+    for permission in LOGGING_RUNTIME_PERMISSIONS:
+        checks.append(_logging_access_check(project_id, service_account, permission))
 
-    image = os.getenv("IMAGE_URL", "").strip()
-    if image and ".pkg.dev/" in image:
-        code, _, _ = _run_gcloud(["artifacts", "docker", "images", "describe", image, f"--project={project_id}"])
-        checks.append(Check("container_image", "ok" if code == 0 else "failed", "container image exists" if code == 0 else "container image not found or not accessible"))
+    if _gemini_enabled() is True:
+        checks.append(_vertex_predict_access_check(project_id, service_account, _gemini_location(), _gemini_model()))
+
+    image_url = os.getenv("IMAGE_URL", "").strip()
+    if image_url and ".pkg.dev/" in image_url:
+        code, _, _ = _run_gcloud(["artifacts", "docker", "images", "describe", image_url, f"--project={project_id}", "--format=value(image_summary.digest)"])
+        checks.append(Check("image_exists", "ok" if code == 0 else "failed", "container image exists" if code == 0 else "container image not found or not accessible"))
     return checks
 
 
-def _next_steps(checks: list[Check], *, offline: bool) -> list[str]:
-    failures = [check for check in checks if check.required and check.status in {"failed", "missing"}]
-    if not failures:
-        if offline:
-            return ["Run: python scripts/gcp_deploy_doctor.py --json to verify live Google Cloud prerequisites before deployment."]
-        return ["Run: bash scripts/deploy_cloud_run.sh"]
-    names = {check.name for check in failures}
+def _next_steps(checks: list[Check], offline: bool) -> list[str]:
+    failed = {check.name for check in checks if check.required and check.status != "ok"}
     steps: list[str] = []
-    if any(name.startswith("env:") for name in names):
-        steps.append("Set every required deployment environment variable documented in GOOGLE_CLOUD_DEPLOYMENT.md.")
-    if "enable_gemini_format" in names:
-        steps.append("Set ENABLE_GEMINI to true or false using the same accepted boolean forms as scripts/deploy_cloud_run.sh.")
-    if "gemini_location_format" in names or "gemini_model_format" in names:
-        steps.append("Set GOOGLE_CLOUD_LOCATION and STAGEGUARD_GEMINI_MODEL to plain Vertex AI location/model identifiers; do not pass URLs or resource paths.")
-    if "checkpoint_bucket_format" in names or "checkpoint_object_format" in names:
-        steps.append("Set CHECKPOINT_BUCKET and optional CHECKPOINT_OBJECT to identifiers accepted by the Cloud Run entrypoint; do not use traversal segments, delimiters, backslashes, or reserved bucket names.")
-    if "gcloud" in names:
-        steps.append("Install the Google Cloud CLI and place gcloud on PATH.")
-    if "gcloud_auth" in names:
-        steps.append("Authenticate gcloud using an authorized operator or workload identity.")
-    if any(name.startswith("api:") for name in names):
-        steps.append("Enable only the missing required Google Cloud APIs in the target project; Storage and Policy Troubleshooter are required for durable checkpoint preflight, and Vertex AI is required when ENABLE_GEMINI=true.")
-    if any(name.startswith("secret:") for name in names):
-        steps.append("Create or grant metadata visibility to the missing Secret Manager secrets, including CHECKPOINT_HMAC_SECRET; do not place secret values in environment variables.")
-    if any(name.startswith("secret_access:") for name in names):
-        steps.append("Grant the runtime service account secretmanager.versions.access on each mounted secret (normally roles/secretmanager.secretAccessor at the secret or an appropriate parent), then rerun the doctor.")
-    if "checkpoint_bucket" in names:
-        steps.append("Create or correct CHECKPOINT_BUCKET and ensure the operator running the doctor can read its metadata; the doctor never reads checkpoint object payloads.")
-    if any(name.startswith("checkpoint_storage_access:") for name in names):
-        steps.append("Grant the runtime service account storage.objects.get, storage.objects.create, and storage.objects.delete on the checkpoint bucket/object scope (roles/storage.objectUser at the bucket is the standard predefined role), then rerun the doctor. List or bucket-admin permissions are not required by StageGuard runtime.")
-    if any(name.startswith("logging_access:") for name in names):
-        steps.append("Grant the runtime service account the minimum Cloud Logging permissions needed by StageGuard: logging.logEntries.create for audit writes and logging.logEntries.list for restart/reconciliation reads, then rerun the doctor.")
-    if any(name.startswith("vertex_access:") for name in names):
-        steps.append("When ENABLE_GEMINI=true, grant the runtime service account aiplatform.endpoints.predict for the configured Vertex AI publisher-model path (roles/aiplatform.user is the standard predefined role, but a narrower custom/inherited grant is acceptable), then rerun the doctor.")
-    if "container_image" in names:
-        steps.append("Build and push the StageGuard API image to Artifact Registry, then set IMAGE_URL to that image.")
-    if "runtime_service_account" in names:
-        steps.append("Create or correct the least-privilege Cloud Run runtime service account.")
-    if "project_number_match" in names:
-        steps.append("Correct PROJECT_NUMBER so it matches PROJECT_ID before configuring the IAP service-agent binding.")
-    return steps or ["Resolve the failed checks above, then rerun this doctor."]
+    if any(name.startswith("env:") for name in failed):
+        steps.append("Set every required deployment environment variable; use Secret Manager secret names, never secret payloads.")
+    if "enable_gemini_format" in failed:
+        steps.append("Set ENABLE_GEMINI to true/false (aliases 1/0, yes/no, on/off are accepted).")
+    if any(name.startswith("secret_id_format:") for name in failed):
+        steps.append("Use Secret Manager secret IDs containing only letters, digits, underscores, or hyphens (max 255 characters); never place payloads in secret-name variables.")
+    if "iap_audience_format" in failed or "image_url_cli_safety" in failed or "grafana_url_format" in failed:
+        steps.append("Remove commas, whitespace, and control characters from values serialized into Cloud Run deployment arguments.")
+    if "checkpoint_bucket_format" in failed or "checkpoint_object_format" in failed:
+        steps.append("Fix the checkpoint bucket/object identifiers so they match the bounded runtime contract before deploying.")
+    if any(name.startswith("checkpoint_storage_access:") for name in failed):
+        steps.append("Grant the runtime service account exactly storage.objects.get, storage.objects.create, and storage.objects.delete on the checkpoint object/bucket (roles/storage.objectUser is sufficient at bucket scope); storage.objects.list is not required.")
+    if any(name.startswith("secret_access:") for name in failed):
+        steps.append("Grant the runtime service account secretmanager.versions.access only on the StageGuard runtime secrets it needs.")
+    if any(name.startswith("logging_access:") for name in failed):
+        steps.append("Grant the runtime service account logging.logEntries.create and logging.logEntries.list on the target project using the narrowest suitable roles/custom role.")
+    if "vertex_access:predict" in failed:
+        steps.append("When Gemini is enabled, grant the runtime service account a role containing aiplatform.endpoints.predict for the configured publisher model/project.")
+    if offline:
+        steps.append("Run `python scripts/gcp_deploy_doctor.py --json` in the authorized deployment environment before deploying; offline validation can never report ready_to_deploy=true.")
+    elif not failed:
+        steps.append("Preflight passed. Review the target project/service values, then run scripts/deploy_cloud_run.sh from an authorized operator shell.")
+    return steps
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate StageGuard Google Cloud deployment prerequisites without mutating cloud resources.")
-    parser.add_argument("--offline", action="store_true", help="validate environment syntax only; do not invoke gcloud")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--offline", action="store_true", help="validate local configuration only; never report deploy-ready")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
+
     checks = _env_checks()
-    if not args.offline:
+    if not args.offline and not any(check.required and check.status != "ok" for check in checks):
         checks.extend(_gcloud_checks())
-    hard_failures = [check for check in checks if check.required and check.status in {"failed", "missing"}]
+
+    offline_checks_passed = not any(check.required and check.status != "ok" for check in _env_checks())
+    ready_to_deploy = (not args.offline) and not any(check.required and check.status != "ok" for check in checks)
     payload = {
-        "ready_to_deploy": not hard_failures and not args.offline,
-        "offline_checks_passed": not hard_failures,
         "offline": args.offline,
+        "offline_checks_passed": offline_checks_passed,
+        "ready_to_deploy": ready_to_deploy,
         "gemini_enabled": _gemini_enabled(),
         "gemini_location": _gemini_location(),
         "gemini_model": _gemini_model(),
@@ -376,21 +373,17 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint_object": _checkpoint_object(),
         "required_apis": list(_required_apis()),
         "checks": [asdict(check) for check in checks],
-        "next_steps": _next_steps(checks, offline=args.offline),
+        "next_steps": _next_steps(checks, args.offline),
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print("StageGuard Google Cloud deployment doctor")
-        print("=========================================")
         for check in checks:
-            marker = {"ok": "PASS", "warning": "WARN", "missing": "MISS", "failed": "FAIL"}[check.status]
-            requirement = "required" if check.required else "advisory"
-            print(f"[{marker}] {check.name} ({requirement}): {check.detail}")
-        print("\nNext steps:")
-        for index, step in enumerate(payload["next_steps"], 1):
-            print(f"  {index}. {step}")
-    return 0 if not hard_failures else 2
+            print(f"[{check.status.upper():7}] {check.name}: {check.detail}")
+        print(f"ready_to_deploy={str(ready_to_deploy).lower()}")
+        for step in payload["next_steps"]:
+            print(f"next: {step}")
+    return 0 if (offline_checks_passed if args.offline else ready_to_deploy) else 2
 
 
 if __name__ == "__main__":
