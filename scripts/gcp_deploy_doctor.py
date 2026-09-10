@@ -279,6 +279,23 @@ def _vertex_predict_access_check(project_id: str, service_account: str, location
     return _troubleshoot_permission(full_resource_name, service_account, VERTEX_PREDICT_PERMISSION, "vertex_access:predict", f"runtime service account has effective {VERTEX_PREDICT_PERMISSION} on Gemini publisher model {model}", f"runtime service account lacks effective {VERTEX_PREDICT_PERMISSION} on Gemini publisher model {model}", f"IAM Policy Troubleshooter could not determine effective {VERTEX_PREDICT_PERMISSION} access")
 
 
+def _cloud_run_region_check(project_id: str, region: str) -> Check:
+    """Verify REGION against Cloud Run's live fully-managed region catalog."""
+    code, stdout, _ = _run_gcloud([
+        "run", "regions", "list",
+        f"--project={project_id}",
+        "--format=value(locationId)",
+    ])
+    if code != 0:
+        return Check("cloud_run_region_available", "failed", "could not list currently available Cloud Run regions")
+    regions = {line.strip() for line in stdout.splitlines() if line.strip()}
+    if not regions:
+        return Check("cloud_run_region_available", "failed", "Cloud Run region catalog returned no usable locations")
+    if region in regions:
+        return Check("cloud_run_region_available", "ok", f"Cloud Run currently reports {region} as available")
+    return Check("cloud_run_region_available", "failed", f"Cloud Run does not currently report {region} as an available fully managed region")
+
+
 def _gcloud_checks() -> list[Check]:
     if not shutil.which("gcloud"):
         return [Check("gcloud", "missing", "Google Cloud CLI is not installed or not on PATH")]
@@ -301,6 +318,10 @@ def _gcloud_checks() -> list[Check]:
 
     configured_project_number = os.getenv("PROJECT_NUMBER", "").strip()
     checks.append(Check("project_number_match", "ok" if configured_project_number == project_number else "failed", "PROJECT_NUMBER matches project" if configured_project_number == project_number else f"PROJECT_NUMBER mismatch: expected {project_number}"))
+
+    region = os.getenv("REGION", "").strip()
+    if region:
+        checks.append(_cloud_run_region_check(project_id, region))
 
     required_apis = _required_apis()
     code, stdout, _ = _run_gcloud(["services", "list", "--enabled", f"--project={project_id}", "--format=value(config.name)"])
@@ -350,6 +371,8 @@ def _next_steps(checks: list[Check], offline: bool) -> list[str]:
         steps.append("Set every required deployment environment variable; use Secret Manager secret names, never secret payloads.")
     if any(name in failed for name in ("project_id_format", "region_format", "service_name_format", "image_url_format")):
         steps.append("Fix PROJECT_ID, REGION, SERVICE_NAME, and IMAGE_URL so they satisfy the shared StageGuard Google Cloud identifier contract; Artifact Registry images must be explicitly tagged or sha256-pinned.")
+    if "cloud_run_region_available" in failed:
+        steps.append("Choose REGION from the live output of `gcloud run regions list`; do not rely on a static Cloud Run region list.")
     if "enable_gemini_format" in failed:
         steps.append("Set ENABLE_GEMINI to true/false (aliases 1/0, yes/no, on/off are accepted).")
     if any(name.startswith("secret_id_format:") for name in failed):
