@@ -19,6 +19,8 @@ required=(
   METRIC_ACTIVATION_SECRET
   LOG_ACTIVATION_SECRET
   GRAFANA_TOKEN_SECRET
+  CHECKPOINT_BUCKET
+  CHECKPOINT_HMAC_SECRET
 )
 
 for name in "${required[@]}"; do
@@ -49,8 +51,37 @@ for name in GOOGLE_CLOUD_LOCATION STAGEGUARD_GEMINI_MODEL; do
   fi
 done
 
-ENV_VARS="STAGEGUARD_TELEMETRY_CONFIG=/config/telemetry.json,STAGEGUARD_METRIC_ACTIVATION=/config/activation.json,STAGEGUARD_LOG_ACTIVATION=/config/log-activation.json,STAGEGUARD_IAP_AUDIENCE=${IAP_AUDIENCE},STAGEGUARD_ENABLE_GEMINI=${ENABLE_GEMINI},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION},STAGEGUARD_GEMINI_MODEL=${STAGEGUARD_GEMINI_MODEL},GRAFANA_URL=${GRAFANA_URL},GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token"
-SECRETS="/config/telemetry.json=${TELEMETRY_SECRET}:latest,/config/activation.json=${METRIC_ACTIVATION_SECRET}:latest,/config/log-activation.json=${LOG_ACTIVATION_SECRET}:latest,/secrets/grafana-token=${GRAFANA_TOKEN_SECRET}:latest"
+# Production Cloud Run deployments always use authenticated durable checkpoint
+# state. The HMAC payload itself is never put in this shell command or ENV_VARS;
+# Cloud Run resolves it directly from Secret Manager at container start.
+if [[ ! "${CHECKPOINT_BUCKET}" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]] || \
+   [[ "${CHECKPOINT_BUCKET}" == *".."* ]] || \
+   [[ "${CHECKPOINT_BUCKET}" == goog* ]] || \
+   [[ "${CHECKPOINT_BUCKET}" == *google* ]] || \
+   [[ "${CHECKPOINT_BUCKET}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  echo "CHECKPOINT_BUCKET is not a valid bounded GCS bucket name" >&2
+  exit 2
+fi
+
+CHECKPOINT_OBJECT="${CHECKPOINT_OBJECT:-stageguard/incident-checkpoint.json}"
+if [[ -z "${CHECKPOINT_OBJECT}" || \
+      "${CHECKPOINT_OBJECT}" == /* || \
+      "${CHECKPOINT_OBJECT}" == */ || \
+      "${CHECKPOINT_OBJECT}" == *//* || \
+      "${CHECKPOINT_OBJECT}" == *","* || \
+      "${CHECKPOINT_OBJECT}" == *\\* || \
+      "${CHECKPOINT_OBJECT}" =~ (^|/)\.\.?(/|$) || \
+      "${CHECKPOINT_OBJECT}" =~ [[:cntrl:]] ]]; then
+  echo "CHECKPOINT_OBJECT is not a valid bounded object path" >&2
+  exit 2
+fi
+if (( ${#CHECKPOINT_OBJECT} > 512 )); then
+  echo "CHECKPOINT_OBJECT must be at most 512 characters" >&2
+  exit 2
+fi
+
+ENV_VARS="STAGEGUARD_TELEMETRY_CONFIG=/config/telemetry.json,STAGEGUARD_METRIC_ACTIVATION=/config/activation.json,STAGEGUARD_LOG_ACTIVATION=/config/log-activation.json,STAGEGUARD_IAP_AUDIENCE=${IAP_AUDIENCE},STAGEGUARD_ENABLE_GEMINI=${ENABLE_GEMINI},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION},STAGEGUARD_GEMINI_MODEL=${STAGEGUARD_GEMINI_MODEL},GRAFANA_URL=${GRAFANA_URL},GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token,STAGEGUARD_CHECKPOINT_BUCKET=${CHECKPOINT_BUCKET},STAGEGUARD_CHECKPOINT_OBJECT=${CHECKPOINT_OBJECT}"
+SECRETS="/config/telemetry.json=${TELEMETRY_SECRET}:latest,/config/activation.json=${METRIC_ACTIVATION_SECRET}:latest,/config/log-activation.json=${LOG_ACTIVATION_SECRET}:latest,/secrets/grafana-token=${GRAFANA_TOKEN_SECRET}:latest,STAGEGUARD_CHECKPOINT_HMAC_KEY=${CHECKPOINT_HMAC_SECRET}:latest"
 
 gcloud run deploy "${SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
@@ -68,5 +99,5 @@ gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
   --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com" \
   --role="roles/run.invoker"
 
-echo "StageGuard deployed with IAP enabled and remediation disabled."
+echo "StageGuard deployed with IAP, authenticated GCS checkpoints, and remediation disabled."
 echo "Grant roles/iap.httpsResourceAccessor only to intended operators/groups."
