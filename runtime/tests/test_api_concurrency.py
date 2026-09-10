@@ -29,6 +29,20 @@ class SequenceMetrics:
         return value
 
 
+class FakeMonotonic:
+    def __init__(self):
+        self.value = 100.0
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            return self.value
+
+    def advance(self, seconds):
+        with self.lock:
+            self.value += seconds
+
+
 class BlockingRemediation:
     """Hold the provider call open so the HTTP concurrency contract is observable."""
 
@@ -55,6 +69,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
         self.remediation = BlockingRemediation()
+        self.monotonic = FakeMonotonic()
         self.service = AnchoredExecutionSafeIncidentService(
             SequenceMetrics(diagnosed_and_recovery_metrics()),
             self.remediation,
@@ -63,6 +78,8 @@ class ApiConcurrencyTests(unittest.TestCase):
             clock_ms=lambda: 123456789,
             id_factory=lambda: "incident-api-concurrency-001",
             recovery_sleep=lambda _: None,
+            execution_max_seconds=5.0,
+            monotonic=self.monotonic,
         )
         self.provider = StaticBearerIdentityProvider({"operator-secret": "operator@example.com"})
         self.server = make_server(self.service, "127.0.0.1", 0, identity_provider=self.provider)
@@ -129,20 +146,42 @@ class ApiConcurrencyTests(unittest.TestCase):
             lifecycle = json.loads(raw)
             self.assertEqual(self.approved.revision, lifecycle["incident"]["revision"])
             self.assertIsNone(lifecycle["incident"]["outcome"])
+            self.assertEqual(
+                {"active": True, "age_seconds": 0.0, "max_seconds": 5.0, "deadline_exceeded": False},
+                lifecycle["remediation_execution"],
+            )
 
             status, raw, elapsed = self.request("GET", "/readyz", token=None)
             self.assertIn(status, {200, 503})
             self.assertLess(elapsed, 0.75, "readiness blocked behind provider/recovery I/O")
             readiness = json.loads(raw)
             self.assertEqual("dispatching", readiness["checks"]["remediation_execution_phase"])
+            self.assertEqual("ok", readiness["checks"]["remediation_execution_deadline"])
 
             status, raw, elapsed = self.request("GET", "/metrics", token=None)
             self.assertEqual(200, status)
             self.assertLess(elapsed, 0.75, "metrics blocked behind provider/recovery I/O")
-            self.assertIn(
-                'stageguard_remediation_execution_phase{phase="dispatching"} 1',
-                raw,
-            )
+            self.assertIn('stageguard_remediation_execution_phase{phase="dispatching"} 1', raw)
+            self.assertIn("stageguard_remediation_execution_active 1", raw)
+            self.assertIn("stageguard_remediation_execution_age_seconds 0.0", raw)
+            self.assertIn("stageguard_remediation_execution_max_seconds 5.0", raw)
+            self.assertIn("stageguard_remediation_execution_deadline_exceeded 0", raw)
+
+            self.monotonic.advance(6.0)
+            status, raw, elapsed = self.request("GET", "/readyz", token=None)
+            self.assertEqual(503, status)
+            self.assertLess(elapsed, 0.75, "deadline readiness blocked behind provider/recovery I/O")
+            readiness = json.loads(raw)
+            self.assertEqual("exceeded", readiness["checks"]["remediation_execution_deadline"])
+            self.assertEqual("execution_uncertain", readiness["checks"]["checkpoint"])
+
+            status, raw, elapsed = self.request("GET", "/metrics", token=None)
+            self.assertEqual(200, status)
+            self.assertLess(elapsed, 0.75, "deadline metrics blocked behind provider/recovery I/O")
+            self.assertIn("stageguard_remediation_execution_active 1", raw)
+            self.assertIn("stageguard_remediation_execution_age_seconds 6.0", raw)
+            self.assertIn("stageguard_remediation_execution_max_seconds 5.0", raw)
+            self.assertIn("stageguard_remediation_execution_deadline_exceeded 1", raw)
 
             status, raw, elapsed = self.request("POST", "/v1/investigate", {})
             self.assertEqual(409, status)
@@ -166,6 +205,12 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.assertEqual("recovered", completed["incident"]["outcome"]["status"])
         self.assertEqual("resolved", self.service.execution_checkpoint_phase())
         self.assertEqual(1, self.remediation.calls)
+
+        status, raw, _elapsed = self.request("GET", "/metrics", token=None)
+        self.assertEqual(200, status)
+        self.assertIn("stageguard_remediation_execution_active 0", raw)
+        self.assertIn("stageguard_remediation_execution_age_seconds 0.0", raw)
+        self.assertIn("stageguard_remediation_execution_deadline_exceeded 0", raw)
 
 
 if __name__ == "__main__":
