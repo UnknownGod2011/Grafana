@@ -10,6 +10,8 @@ DASHBOARD = ROOT / "runtime" / "grafana" / "dashboards" / "stageguard-runtime.js
 DASHBOARD_PROVIDER = ROOT / "runtime" / "grafana" / "provisioning" / "dashboards" / "stageguard.yml"
 ALERTING = ROOT / "runtime" / "grafana" / "provisioning" / "alerting" / "stageguard-watchdog.yml"
 COMPOSE = ROOT / "docker-compose.yml"
+PROMETHEUS = ROOT / "runtime" / "prometheus.yml"
+RUNTIME_DOCKERFILE = ROOT / "runtime" / "Dockerfile"
 
 
 class GrafanaRuntimeObservabilityTests(unittest.TestCase):
@@ -19,6 +21,8 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
         cls.provider = DASHBOARD_PROVIDER.read_text(encoding="utf-8")
         cls.alerting = ALERTING.read_text(encoding="utf-8")
         cls.compose = COMPOSE.read_text(encoding="utf-8")
+        cls.prometheus = PROMETHEUS.read_text(encoding="utf-8")
+        cls.runtime_dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
 
     def test_dashboard_is_stable_and_queries_all_watchdog_metrics(self) -> None:
         self.assertEqual(self.dashboard["uid"], "stageguard-runtime-safety")
@@ -55,6 +59,15 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
             "./runtime/grafana/dashboards:/var/lib/grafana/dashboards:ro",
             self.compose,
         )
+
+    def test_local_stack_ingests_watchdog_series_without_credentials(self) -> None:
+        self.assertIn("watchdog-fixture:", self.compose)
+        self.assertIn('"127.0.0.1:9111:9111"', self.compose)
+        self.assertIn('command: ["python", "/app/watchdog_metrics_fixture.py"]', self.compose)
+        self.assertIn("stageguard-runtime-watchdog", self.prometheus)
+        self.assertIn('targets: ["watchdog-fixture:9111"]', self.prometheus)
+        self.assertIn("component: stageguard-runtime", self.prometheus)
+        self.assertIn("COPY watchdog_metrics_fixture.py /app/watchdog_metrics_fixture.py", self.runtime_dockerfile)
 
     def test_deadline_alert_is_bound_to_dashboard_panel_and_metric(self) -> None:
         self.assertIn("uid: stageguard-remediation-deadline", self.alerting)
