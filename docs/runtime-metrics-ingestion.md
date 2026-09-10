@@ -6,6 +6,24 @@ StageGuard exposes runtime safety metrics at `/metrics`, including the remediati
 
 The default Docker Compose stack includes a credential-free `watchdog-fixture` service. Prometheus scrapes it as `stageguard-runtime-watchdog`, so the `StageGuard Runtime Safety` dashboard has realistic watchdog series even when the full incident API is not running.
 
+### Reproducible observability images
+
+The local acceptance stack deliberately does not follow floating `latest` tags. The alerting rehearsal depends on concrete PromQL sample-aging semantics, Grafana file-provisioned alert behavior, and the active-alert API shape, so upstream image drift must be an explicit repository change.
+
+Current pins:
+
+- `prom/prometheus:v3.13.3` — Prometheus 3.13 is the current LTS line, supported through 2027-07-31; 3.13.3 was released 2026-09-07.
+- `grafana/grafana:13.2.1` — current stable Grafana 13.2 patch as of 2026-09-11, released 2026-09-02 and containing security fixes.
+- `grafana/mcp-grafana:1.3.0` — the already-validated official Grafana MCP pin used by StageGuard's optional read-only MCP profile.
+
+`runtime/tests/test_observability_image_pins.py` is a lightweight repository contract guard: it requires the expected Prometheus/Grafana versions and rejects `latest` for all three observability services. Updating one of these images should therefore be intentional, accompanied by a review of upstream release notes and a rerun of the complete watchdog deadline + stale-telemetry acceptance rehearsal.
+
+Official release references:
+
+- Grafana releases: https://github.com/grafana/grafana/releases
+- Prometheus releases: https://github.com/prometheus/prometheus/releases
+- Prometheus LTS policy: https://prometheus.io/docs/introduction/release-cycle/
+
 The fixture has only three named remediation states and is not a remediation provider:
 
 ```bash
