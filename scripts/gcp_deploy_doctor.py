@@ -71,6 +71,9 @@ VERTEX_PREDICT_PERMISSION = "aiplatform.endpoints.predict"
 DEFAULT_GEMINI_LOCATION = "global"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_CHECKPOINT_OBJECT = "stageguard/incident-checkpoint.json"
+GCLOUD_TIMEOUT_SECONDS = 30
+GCLOUD_TIMEOUT_EXIT_CODE = 124
+GCLOUD_EXECUTION_EXIT_CODE = 126
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off", ""}
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$")
@@ -87,14 +90,20 @@ class Check:
 
 
 def _run_gcloud(args: list[str]) -> tuple[int, str, str]:
-    proc = subprocess.run(
-        ["gcloud", *args],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=30,
-    )
+    """Run one read-only gcloud probe and convert process failures into safe results."""
+    try:
+        proc = subprocess.run(
+            ["gcloud", *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=GCLOUD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return GCLOUD_TIMEOUT_EXIT_CODE, "", "gcloud command timed out"
+    except (OSError, UnicodeError):
+        return GCLOUD_EXECUTION_EXIT_CODE, "", "gcloud command could not be executed"
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
