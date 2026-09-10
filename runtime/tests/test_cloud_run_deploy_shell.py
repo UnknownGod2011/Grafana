@@ -12,7 +12,11 @@ DEPLOY = ROOT / "scripts" / "deploy_cloud_run.sh"
 
 
 class CloudRunDeployShellTests(unittest.TestCase):
-    def _run_deploy(self, checkpoint_object: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    def _run_deploy(
+        self,
+        checkpoint_object: str = "stageguard/incident-checkpoint.json",
+        overrides: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             bin_dir = tmp_path / "bin"
@@ -49,6 +53,8 @@ class CloudRunDeployShellTests(unittest.TestCase):
                     "ENABLE_GEMINI": "false",
                 }
             )
+            if overrides:
+                env.update(overrides)
             result = subprocess.run(
                 ["bash", str(DEPLOY)],
                 cwd=ROOT,
@@ -60,6 +66,12 @@ class CloudRunDeployShellTests(unittest.TestCase):
             )
             call_text = calls.read_text(encoding="utf-8") if calls.exists() else ""
             return result, call_text
+
+    def _assert_rejected_before_gcloud(self, overrides: dict[str, str], message: str) -> None:
+        result, calls = self._run_deploy(overrides=overrides)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertEqual(calls, "")
 
     def test_exactly_512_ascii_bytes_reaches_fake_gcloud(self) -> None:
         result, calls = self._run_deploy("a" * 512)
@@ -95,6 +107,65 @@ class CloudRunDeployShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("CHECKPOINT_OBJECT is not a valid bounded object path", result.stderr)
         self.assertEqual(calls, "")
+
+    def test_checkpoint_hmac_payload_env_is_never_forwarded(self) -> None:
+        sentinel = "TOP-SECRET-HMAC-PAYLOAD-MUST-NOT-LEAK"
+        result, calls = self._run_deploy(
+            overrides={"STAGEGUARD_CHECKPOINT_HMAC_KEY": sentinel}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(sentinel, calls)
+        deploy_call = calls.splitlines()[0]
+        self.assertIn("STAGEGUARD_CHECKPOINT_HMAC_KEY=stageguard-checkpoint-hmac:latest", deploy_call)
+        self.assertNotIn("--set-env-vars=STAGEGUARD_CHECKPOINT_HMAC_KEY", deploy_call)
+
+    def test_grafana_url_comma_injection_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"GRAFANA_URL": "https://grafana.example.net,INJECTED=true"},
+            "GRAFANA_URL must be an absolute http(s) URL without commas or whitespace",
+        )
+
+    def test_iap_audience_comma_injection_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"IAP_AUDIENCE": "/projects/1/global/backendServices/2,INJECTED=true"},
+            "IAP_AUDIENCE must be a non-empty value without commas, whitespace, or control characters",
+        )
+
+    def test_secret_mapping_injection_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"CHECKPOINT_HMAC_SECRET": "checkpoint-hmac,INJECTED=other-secret"},
+            "CHECKPOINT_HMAC_SECRET must be a Secret Manager secret ID",
+        )
+
+    def test_malformed_runtime_service_account_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"RUNTIME_SERVICE_ACCOUNT": "runtime@example.com,INJECTED=true"},
+            "RUNTIME_SERVICE_ACCOUNT must be a service-account email",
+        )
+
+    def test_nonnumeric_project_number_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"PROJECT_NUMBER": "123,INJECTED"},
+            "PROJECT_NUMBER must contain digits only",
+        )
+
+    def test_invalid_enable_gemini_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"ENABLE_GEMINI": "treu"},
+            "ENABLE_GEMINI must be true or false",
+        )
+
+    def test_invalid_gemini_location_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"ENABLE_GEMINI": "true", "GOOGLE_CLOUD_LOCATION": "us-central1,INJECTED=true"},
+            "GOOGLE_CLOUD_LOCATION must be a non-empty value without commas or whitespace",
+        )
+
+    def test_invalid_gemini_model_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"ENABLE_GEMINI": "true", "STAGEGUARD_GEMINI_MODEL": "gemini-2.5-flash INJECTED"},
+            "STAGEGUARD_GEMINI_MODEL must be a non-empty value without commas or whitespace",
+        )
 
 
 if __name__ == "__main__":
