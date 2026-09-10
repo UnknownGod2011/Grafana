@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from command_line import split_command
 from log_evidence import LogQueryResult, LogRecord
 from mcp_smoke import DEFAULT_COMMAND, McpError, StdioClient
 
@@ -137,7 +137,7 @@ class McpLokiLogClient:
         command: list[str] | None = None,
         datasource_uid: str | None = None,
     ) -> None:
-        self.command = command or shlex.split(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
+        self.command = command or split_command(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
         self.datasource_uid = datasource_uid or os.getenv(
             "STAGEGUARD_LOKI_DATASOURCE_UID", DEFAULT_LOKI_DATASOURCE_UID
         )
