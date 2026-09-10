@@ -53,6 +53,7 @@ class CloudRunDeployShellTests(unittest.TestCase):
                     "ENABLE_GEMINI": "false",
                 }
             )
+            env.pop("STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS", None)
             if overrides:
                 env.update(overrides)
             result = subprocess.run(
@@ -118,6 +119,30 @@ class CloudRunDeployShellTests(unittest.TestCase):
         deploy_call = calls.splitlines()[0]
         self.assertIn("STAGEGUARD_CHECKPOINT_HMAC_KEY=stageguard-checkpoint-hmac:latest", deploy_call)
         self.assertNotIn("--set-env-vars=STAGEGUARD_CHECKPOINT_HMAC_KEY", deploy_call)
+
+    def test_remediation_watchdog_default_is_forwarded_without_enabling_writes(self) -> None:
+        result, calls = self._run_deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deploy_call = calls.splitlines()[0]
+        self.assertIn("STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS=60", deploy_call)
+        self.assertNotIn("STAGEGUARD_ENABLE_REMEDIATION", deploy_call)
+
+    def test_custom_remediation_watchdog_is_forwarded(self) -> None:
+        result, calls = self._run_deploy(
+            overrides={"STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS": "12.5"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deploy_call = calls.splitlines()[0]
+        self.assertIn("STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS=12.5", deploy_call)
+
+    def test_invalid_remediation_watchdog_fails_before_gcloud(self) -> None:
+        message = "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be a finite positive decimal number"
+        for value in ("", "0", "0.0", "-1", "NaN", "inf", "1,INJECTED=true", " 5", "5 "):
+            with self.subTest(value=value):
+                self._assert_rejected_before_gcloud(
+                    {"STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS": value},
+                    message,
+                )
 
     def test_invalid_project_id_fails_before_gcloud(self) -> None:
         self._assert_rejected_before_gcloud(
