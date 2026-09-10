@@ -25,10 +25,13 @@ class CloudRunEntrypointTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--audit-integrity-policy") + 1], "allow_unbound_legacy")
         self.assertNotIn("--enable-production-remediation", argv)
 
-    def test_checkpoint_bucket_requires_hmac_secret_and_enables_gcs(self) -> None:
+    def test_checkpoint_bucket_requires_strong_hmac_secret_and_enables_gcs(self) -> None:
         env = self._env()
         env["STAGEGUARD_CHECKPOINT_BUCKET"] = "stageguard-state-prod"
         with self.assertRaisesRegex(ValueError, "STAGEGUARD_CHECKPOINT_HMAC_KEY"):
+            build_bootstrap_argv(env)
+        env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "short"
+        with self.assertRaisesRegex(ValueError, "at least 32 bytes"):
             build_bootstrap_argv(env)
         env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 32
         env["STAGEGUARD_CHECKPOINT_OBJECT"] = "prod/current.json"
@@ -38,6 +41,63 @@ class CloudRunEntrypointTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--audit-integrity-policy") + 1], "require_verified")
         self.assertNotIn("stageguard-state-prod", argv)
         self.assertNotIn("k" * 32, argv)
+
+    def test_checkpoint_object_defaults_to_bounded_stageguard_path(self) -> None:
+        env = self._env()
+        env["STAGEGUARD_CHECKPOINT_BUCKET"] = "stageguard-state-prod"
+        env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 32
+        argv = build_bootstrap_argv(env)
+        self.assertEqual(
+            argv[argv.index("--checkpoint-object") + 1],
+            "stageguard/incident-checkpoint.json",
+        )
+
+    def test_invalid_checkpoint_bucket_fails_closed(self) -> None:
+        for value in (
+            "ab",
+            "StageGuard-State",
+            "192.168.0.1",
+            "stageguard..state",
+            "goog-stageguard-state",
+            "stageguard_google_state",
+            "-stageguard-state",
+        ):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_CHECKPOINT_BUCKET"] = value
+                env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 32
+                with self.assertRaisesRegex(ValueError, "STAGEGUARD_CHECKPOINT_BUCKET"):
+                    build_bootstrap_argv(env)
+
+    def test_invalid_checkpoint_object_fails_closed(self) -> None:
+        for value in (
+            "/prod/current.json",
+            "prod//current.json",
+            "prod/../current.json",
+            "prod/./current.json",
+            "prod\\current.json",
+            "prod/current.json,other",
+            "prod/current.json ",
+            "prod/\x00current.json",
+        ):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_CHECKPOINT_BUCKET"] = "stageguard-state-prod"
+                env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 32
+                env["STAGEGUARD_CHECKPOINT_OBJECT"] = value
+                with self.assertRaisesRegex(ValueError, "STAGEGUARD_CHECKPOINT_OBJECT"):
+                    build_bootstrap_argv(env)
+
+    def test_orphan_checkpoint_configuration_fails_closed(self) -> None:
+        for name, value in (
+            ("STAGEGUARD_CHECKPOINT_OBJECT", "prod/current.json"),
+            ("STAGEGUARD_CHECKPOINT_HMAC_KEY", "k" * 32),
+        ):
+            with self.subTest(name=name):
+                env = self._env()
+                env[name] = value
+                with self.assertRaisesRegex(ValueError, name):
+                    build_bootstrap_argv(env)
 
     def test_gemini_is_opt_in(self) -> None:
         env = self._env()
