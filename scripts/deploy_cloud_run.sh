@@ -30,6 +30,20 @@ for name in "${required[@]}"; do
   fi
 done
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+  echo "python3 is required to validate Google Cloud deployment identifiers" >&2
+  exit 2
+fi
+if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/gcp_identifiers.py" \
+  --project-id "${PROJECT_ID}" \
+  --region "${REGION}" \
+  --service-name "${SERVICE_NAME}" \
+  --image-url "${IMAGE_URL}"; then
+  exit 2
+fi
+
 # Every value below crosses a command-line serialization boundary. In
 # particular, --set-env-vars and --set-secrets use comma-delimited mappings.
 # Validate their components here even when the deploy doctor was skipped so a
