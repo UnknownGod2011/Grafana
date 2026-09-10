@@ -60,6 +60,12 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
                 with self.assertRaises(BridgeConfigurationError):
                     normalize_audience(invalid)
 
+    def test_timeout_must_be_finite_and_positive(self) -> None:
+        for invalid in (0, -1, True, float("nan"), float("inf"), float("-inf"), "not-a-number"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(BridgeConfigurationError):
+                    CloudRunMetricsClient("https://stageguard.example", timeout_seconds=invalid)
+
     def test_fetch_adds_only_bridge_owned_authorization_header(self) -> None:
         observed = {}
 
