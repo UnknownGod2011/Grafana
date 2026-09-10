@@ -29,8 +29,12 @@ services:
       timeout: 3s
       retries: 10
 
+  # Reproducibility matters here: the acceptance rehearsal depends on concrete
+  # PromQL/sample-aging behavior, so never float this image on `latest`.
+  # Prometheus 3.13 is the current LTS line (support through 2027-07-31); 3.13.3
+  # was released 2026-09-07.
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.13.3
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=2h
@@ -44,8 +48,10 @@ services:
       watchdog-fixture:
         condition: service_healthy
 
+  # Grafana alert provisioning and active-alert API behavior are part of the
+  # acceptance contract, so pin the stable patch instead of following `latest`.
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.1
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: stageguard-local-only
