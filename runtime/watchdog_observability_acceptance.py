@@ -2,10 +2,14 @@
 """Credential-free acceptance rehearsal for StageGuard watchdog observability.
 
 Requires the default Docker Compose stack. The script drives only the local
-metrics fixture, proves Prometheus ingests the deadline series, and observes a
-complete Grafana-managed alert lifecycle through Grafana's Alertmanager API:
-healthy -> firing -> healthy/resolved. It always returns the fixture to idle
-before exiting.
+metrics fixture and proves two independent Grafana safety contracts:
+
+1. healthy -> remediation deadline firing -> healthy/resolved
+2. healthy -> metrics unavailable -> stale-evidence warning -> telemetry restored
+
+The outage path never changes remediation state. It also proves that stale
+telemetry does not falsely activate the critical remediation-deadline alert.
+The fixture is always restored to idle with telemetry online before exit.
 """
 from __future__ import annotations
 
@@ -19,9 +23,13 @@ import urllib.request
 from typing import Any
 
 
-ALERT_TITLE = "StageGuard remediation execution deadline exceeded"
-ALERT_SUMMARY = "StageGuard remediation execution exceeded its configured safety deadline"
+DEADLINE_ALERT_TITLE = "StageGuard remediation execution deadline exceeded"
+DEADLINE_ALERT_SUMMARY = "StageGuard remediation execution exceeded its configured safety deadline"
+STALE_ALERT_TITLE = "StageGuard runtime telemetry stale"
+STALE_ALERT_SUMMARY = "StageGuard runtime watchdog telemetry is stale or missing"
 METRIC = "stageguard_remediation_execution_deadline_exceeded"
+FRESHNESS_QUERY = f"max(time() - timestamp({METRIC})) or vector(1000000000) * absent({METRIC})"
+FRESHNESS_THRESHOLD_SECONDS = 45.0
 
 
 def _require_loopback_http(value: str, name: str) -> str:
@@ -58,30 +66,51 @@ def set_fixture(base: str, state: str) -> None:
     _request(f"{base}/scenario/{state}", method="POST")
 
 
-def prometheus_value(base: str) -> float | None:
-    query = urllib.parse.urlencode({"query": METRIC})
+def set_telemetry(base: str, available: bool) -> None:
+    if not isinstance(available, bool):
+        raise TypeError("telemetry availability must be boolean")
+    mode = "online" if available else "offline"
+    _request(f"{base}/telemetry/{mode}", method="POST")
+
+
+def prometheus_query_value(base: str, expression: str) -> float | None:
+    query = urllib.parse.urlencode({"query": expression})
     payload = json.loads(_request(f"{base}/api/v1/query?{query}").decode("utf-8"))
     if payload.get("status") != "success":
         return None
-    results = payload.get("data", {}).get("result", [])
-    if not results:
+    data = payload.get("data")
+    if not isinstance(data, dict):
         return None
-    return float(results[0]["value"][1])
+    results = data.get("result", [])
+    if not isinstance(results, list) or not results:
+        return None
+    value = results[0].get("value") if isinstance(results[0], dict) else None
+    if not isinstance(value, list) or len(value) < 2:
+        return None
+    return float(value[1])
 
 
-def _is_watchdog_alert(alert: dict[str, Any]) -> bool:
+def prometheus_value(base: str) -> float | None:
+    return prometheus_query_value(base, METRIC)
+
+
+def prometheus_freshness_age(base: str) -> float | None:
+    return prometheus_query_value(base, FRESHNESS_QUERY)
+
+
+def _alert_matches(alert: dict[str, Any], *, title: str, summary: str) -> bool:
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
     if not isinstance(labels, dict) or not isinstance(annotations, dict):
         raise ValueError("Grafana alert labels/annotations must be objects")
-    return labels.get("alertname") == ALERT_TITLE or annotations.get("summary") == ALERT_SUMMARY
+    return labels.get("alertname") == title or annotations.get("summary") == summary
 
 
-def grafana_alert_active_from_payload(payload: Any) -> bool:
-    """Return whether the active-alert payload contains StageGuard's watchdog alert.
+def grafana_alert_active_from_payload(payload: Any, *, title: str, summary: str) -> bool:
+    """Return whether a validated active-alert payload contains the requested rule.
 
     Grafana's Alertmanager v2 alerts endpoint represents active alerts. An empty
-    valid list therefore proves the alert is no longer active. Unexpected shapes
+    valid list therefore proves the rule is no longer active. Unexpected shapes
     raise instead of being interpreted as recovery, preventing malformed API
     responses from creating a false resolved result.
     """
@@ -90,16 +119,31 @@ def grafana_alert_active_from_payload(payload: Any) -> bool:
     for alert in payload:
         if not isinstance(alert, dict):
             raise ValueError("Grafana active alert entry must be an object")
-        if _is_watchdog_alert(alert):
+        if _alert_matches(alert, title=title, summary=summary):
             return True
     return False
 
 
-def grafana_alert_firing(base: str, auth: tuple[str, str]) -> bool:
-    payload = json.loads(
+def grafana_active_alerts(base: str, auth: tuple[str, str]) -> Any:
+    return json.loads(
         _request(f"{base}/api/alertmanager/grafana/api/v2/alerts", auth=auth).decode("utf-8")
     )
-    return grafana_alert_active_from_payload(payload)
+
+
+def deadline_alert_active(base: str, auth: tuple[str, str]) -> bool:
+    return grafana_alert_active_from_payload(
+        grafana_active_alerts(base, auth),
+        title=DEADLINE_ALERT_TITLE,
+        summary=DEADLINE_ALERT_SUMMARY,
+    )
+
+
+def stale_alert_active(base: str, auth: tuple[str, str]) -> bool:
+    return grafana_alert_active_from_payload(
+        grafana_active_alerts(base, auth),
+        title=STALE_ALERT_TITLE,
+        summary=STALE_ALERT_SUMMARY,
+    )
 
 
 def wait_until(predicate, *, timeout: float, interval: float = 1.0) -> bool:
@@ -114,6 +158,18 @@ def wait_until(predicate, *, timeout: float, interval: float = 1.0) -> bool:
     return False
 
 
+def _fail_if_deadline_alert_active(grafana: str, auth: tuple[str, str], context: str) -> bool:
+    try:
+        active = deadline_alert_active(grafana, auth)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        print(f"FAIL: could not verify critical deadline alert state {context}")
+        return False
+    if active:
+        print(f"FAIL: critical deadline alert falsely active {context}")
+        return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rehearse StageGuard watchdog Prometheus/Grafana alerting")
     parser.add_argument("--fixture", default="http://127.0.0.1:9111")
@@ -124,7 +180,12 @@ def main() -> int:
     parser.add_argument("--prometheus-timeout", type=float, default=12.0)
     parser.add_argument("--alert-timeout", type=float, default=35.0)
     parser.add_argument("--resolve-timeout", type=float, default=35.0)
+    parser.add_argument("--stale-timeout", type=float, default=95.0)
     args = parser.parse_args()
+    for name in ("prometheus_timeout", "alert_timeout", "resolve_timeout", "stale_timeout"):
+        value = getattr(args, name)
+        if value <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
     try:
         fixture = _require_loopback_http(args.fixture, "fixture")
         prometheus = _require_loopback_http(args.prometheus, "prometheus")
@@ -134,6 +195,8 @@ def main() -> int:
     auth = (args.grafana_user, args.grafana_password)
 
     try:
+        # First prove the genuine remediation-deadline lifecycle.
+        set_telemetry(fixture, True)
         set_fixture(fixture, "idle")
         if not wait_until(lambda: prometheus_value(prometheus) == 0.0, timeout=args.prometheus_timeout):
             print("FAIL: Prometheus did not ingest the idle watchdog metric")
@@ -143,24 +206,59 @@ def main() -> int:
         if not wait_until(lambda: prometheus_value(prometheus) == 1.0, timeout=args.prometheus_timeout):
             print("FAIL: Prometheus did not ingest the overdue watchdog metric")
             return 1
-
-        if not wait_until(lambda: grafana_alert_firing(grafana, auth), timeout=args.alert_timeout):
-            print("FAIL: Grafana watchdog alert did not become active")
+        if not wait_until(lambda: deadline_alert_active(grafana, auth), timeout=args.alert_timeout):
+            print("FAIL: Grafana watchdog deadline alert did not become active")
             return 1
 
         set_fixture(fixture, "idle")
         if not wait_until(lambda: prometheus_value(prometheus) == 0.0, timeout=args.prometheus_timeout):
             print("FAIL: Prometheus did not ingest the recovered watchdog metric")
             return 1
-
-        if not wait_until(lambda: not grafana_alert_firing(grafana, auth), timeout=args.resolve_timeout):
-            print("FAIL: Grafana watchdog alert did not resolve after recovery")
+        if not wait_until(lambda: not deadline_alert_active(grafana, auth), timeout=args.resolve_timeout):
+            print("FAIL: Grafana watchdog deadline alert did not resolve after recovery")
             return 1
 
-        print("PASS: watchdog metric and Grafana alert completed healthy -> firing -> resolved lifecycle")
+        # Then interrupt metrics only. Remediation state remains idle throughout.
+        set_telemetry(fixture, False)
+        if not wait_until(
+            lambda: (prometheus_freshness_age(prometheus) or 0.0) > FRESHNESS_THRESHOLD_SECONDS,
+            timeout=args.stale_timeout,
+        ):
+            print("FAIL: Prometheus watchdog sample age did not cross the stale threshold")
+            return 1
+        if not _fail_if_deadline_alert_active(grafana, auth, "during telemetry outage"):
+            return 1
+        if not wait_until(lambda: stale_alert_active(grafana, auth), timeout=args.stale_timeout):
+            print("FAIL: Grafana stale-telemetry warning did not become active")
+            return 1
+        if not _fail_if_deadline_alert_active(grafana, auth, "while stale warning was active"):
+            return 1
+
+        # Restore scraping and prove freshness + warning resolution.
+        set_telemetry(fixture, True)
+        if not wait_until(lambda: prometheus_value(prometheus) == 0.0, timeout=args.prometheus_timeout):
+            print("FAIL: Prometheus did not resume watchdog metric ingestion")
+            return 1
+        if not wait_until(
+            lambda: (prometheus_freshness_age(prometheus) is not None)
+            and prometheus_freshness_age(prometheus) < FRESHNESS_THRESHOLD_SECONDS,
+            timeout=args.prometheus_timeout,
+        ):
+            print("FAIL: Prometheus watchdog freshness did not recover")
+            return 1
+        if not wait_until(lambda: not stale_alert_active(grafana, auth), timeout=args.resolve_timeout):
+            print("FAIL: Grafana stale-telemetry warning did not resolve after scraping resumed")
+            return 1
+        if not _fail_if_deadline_alert_active(grafana, auth, "after telemetry recovery"):
+            return 1
+
+        print(
+            "PASS: deadline alert fired/resolved; telemetry outage fired only stale warning and recovered cleanly"
+        )
         return 0
     finally:
         try:
+            set_telemetry(fixture, True)
             set_fixture(fixture, "idle")
         except Exception:
             pass
