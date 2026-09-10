@@ -100,7 +100,13 @@ done
 # Bound the time a live remediation may remain in flight before StageGuard
 # withdraws readiness. This setting does not enable remediation; it only tunes
 # the watchdog used if a write-capable composition is deployed separately.
-STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS="${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS:-60}"
+# An unset value gets the canonical safe default; an explicitly blank value is
+# rejected to match cloudrun_entrypoint.py's fail-closed process configuration.
+if [[ -v STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS ]]; then
+  STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS="${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS}"
+else
+  STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS="60"
+fi
 if [[ ! "${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
   echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be a finite positive decimal number" >&2
   exit 2
