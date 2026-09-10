@@ -11,60 +11,104 @@ Core invariants:
 - Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
 - Authenticated checkpoints and audit integrity fail closed.
 
-## Run log — 2026-09-10 — executable fake-gcloud deployment boundary harness
+## Run log — 2026-09-10 — Cloud Run serialization/injection hardening
 
 ### Inspected at start
 
 Read `progress.md` completely before choosing work. Then inspected:
 - `scripts/deploy_cloud_run.sh`
+- `runtime/tests/test_cloud_run_deploy_shell.py`
 - `runtime/tests/test_cloud_run_deploy_contract.py`
+- `scripts/gcp_deploy_doctor.py`
+- `runtime/tests/test_gcp_deploy_doctor.py`
+- recent `main` commits to verify no newer work superseded the handoff
 
-The previous handoff explicitly identified a remaining validation gap: source-level assertions covered the checkpoint object byte/whitespace contract, but the shell helper itself had not been exercised end-to-end with a fake `gcloud` executable.
+The previous handoff requested behavioral proof that secret payloads cannot leak into deployment arguments and that malformed Gemini settings fail before `gcloud`. Inspection also exposed a broader production boundary: multiple operator-controlled values are interpolated into comma-delimited `gcloud --set-env-vars` / `--set-secrets` mappings, so comma/control injection must fail even if the deployment doctor is skipped.
 
 ### Exact changes made
 
-Added `runtime/tests/test_cloud_run_deploy_shell.py` as a credential-free execution harness for the production deploy helper.
+1. Hardened `scripts/deploy_cloud_run.sh` before any `gcloud` invocation:
+   - `PROJECT_NUMBER` must be numeric.
+   - `RUNTIME_SERVICE_ACCOUNT` must be a service-account email without commas/whitespace.
+   - `GRAFANA_URL` must be an absolute HTTP(S) URL without commas/whitespace.
+   - `IAP_AUDIENCE` and `IMAGE_URL` reject commas, whitespace, and control characters at the command serialization boundary.
+   - all five Secret Manager identifiers are restricted to bounded `[A-Za-z0-9_-]{1,255}` IDs.
+   - existing strict `ENABLE_GEMINI`, Gemini location/model, checkpoint bucket, and UTF-8 checkpoint-object validation remains in place.
+   - HMAC material remains Secret Manager resolved; no payload variable is serialized into `ENV_VARS`.
 
-The test:
-- creates an isolated temporary `PATH` containing a fake `gcloud` shim;
-- provides only synthetic project/service/Grafana/Secret Manager identifiers;
-- captures every `gcloud` invocation to a temporary file instead of touching Google Cloud;
-- executes the real `scripts/deploy_cloud_run.sh` under Bash;
-- verifies a checkpoint object of exactly 512 ASCII/UTF-8 bytes reaches the fake deploy and IAM-binding commands;
-- verifies 513 ASCII bytes fail with exit code 2 before any `gcloud` invocation;
-- verifies a 300-character multibyte value (`é` repeated 300 times, 600 UTF-8 bytes) fails before `gcloud`, proving the shell uses bytes rather than character count;
-- verifies leading and trailing whitespace fail before `gcloud`;
-- verifies valid input causes exactly the expected two `gcloud` command families: `run deploy` and `run services add-iam-policy-binding`.
+   Commit:
+   - `1b6805e5f99cb93530489a34f58f2628e2306c64` — harden Cloud Run deploy argument boundaries
 
-Commit created:
-- `60538f0820dcf575886b76c36a951be06db9059c` — test Cloud Run deploy helper with fake gcloud
+2. Expanded `runtime/tests/test_cloud_run_deploy_shell.py`:
+   - generalized the fake-`gcloud` harness to support environment overrides;
+   - verifies a synthetic `STAGEGUARD_CHECKPOINT_HMAC_KEY` payload sentinel never reaches captured deployment arguments;
+   - verifies the checkpoint HMAC *secret identifier* is present only through the `--set-secrets` mapping;
+   - verifies Grafana URL, IAP audience, Secret Manager mapping, runtime-service-account, and project-number injection attempts fail before `gcloud`;
+   - verifies invalid `ENABLE_GEMINI`, Gemini location, and Gemini model values fail before `gcloud`;
+   - retains the 512-byte/513-byte/multibyte/whitespace checkpoint-object execution checks.
+
+   Commit:
+   - `ecf856bb2cb8a2aa679193469f60b7f39c3fb6e9` — exercise Cloud Run config injection guards
+
+3. Aligned `scripts/gcp_deploy_doctor.py` with the deployment helper so offline preflight no longer reports a value acceptable when the shell will later reject it:
+   - added bounded Secret Manager ID validation for every runtime secret reference;
+   - added IAP audience command-serialization safety validation;
+   - added required image-reference command-serialization safety validation while retaining the Artifact Registry shape check as advisory;
+   - tightened Grafana URL and runtime service-account comma handling;
+   - added actionable next-step guidance for serialization/secret-ID failures.
+
+   Commit:
+   - `f0b4b1588375fa4382f664e0b03e551b3f5ca3c6` — align deploy doctor with shell serialization guards
+
+4. Added `runtime/tests/test_gcp_deploy_doctor_serialization.py`:
+   - proves a valid offline configuration passes the new serialization checks;
+   - rejects IAP audience comma injection;
+   - rejects image-reference comma injection;
+   - rejects Secret Manager mapping injection;
+   - enforces the 255-character secret-ID bound.
+
+   Commit:
+   - `1e035f3e74b4acdc7f0e65054bd80819c9bf99a8` — test deploy doctor serialization parity
 
 ### Tests / checks / results
 
-Attempted to execute the newly committed test from a fresh checkout:
+A local, credential-free fake-`gcloud` reproduction of the new shell guards was executed and all 6 focused behavioral checks passed:
 
 ```text
-git clone --depth 1 https://github.com/UnknownGod2011/grafana.git /tmp/stageguard
-python -m unittest runtime.tests.test_cloud_run_deploy_shell
+test_gemini ... ok
+test_grafana ... ok
+test_iap ... ok
+test_secret ... ok
+test_secret_inject ... ok
+test_valid ... ok
+Ran 6 tests ... OK
 ```
 
-The execution container failed at clone time because DNS could not resolve `github.com`. Therefore the new shell suite was not empirically executed in this runtime and no green-suite claim is made.
+This reproduction exercised the same committed guard logic with synthetic values and no network/cloud access. It is useful behavioral evidence, but it is not represented as the complete committed unittest file.
 
-The committed test file was re-read through the GitHub connector after creation to verify the repository contains the intended fake-`gcloud` harness.
+A fresh clean-checkout execution of the actual committed suites was then attempted:
+
+```text
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard-run
+python -m unittest runtime.tests.test_cloud_run_deploy_shell runtime.tests.test_gcp_deploy_doctor_serialization runtime.tests.test_cloud_run_deploy_contract runtime.tests.test_gcp_deploy_doctor -v
+```
+
+The container again failed at clone time because DNS could not resolve `github.com`. Therefore the exact committed combined suite was not executed here and no full green claim is made.
 
 No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud project, bucket, object, IAM policy, Secret Manager payload, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. Deployment safety boundaries should have behavioral shell tests, not only source-string contract assertions.
-2. Fake command shims are preferred for deployment helper tests because they validate argument flow and fail-before-external-call behavior without cloud credentials or billable operations.
-3. The 512-byte checkpoint object rule remains aligned across deploy helper, deployment doctor, and runtime.
-4. Missing cloud credentials or transient checkout DNS do not block useful credential-free implementation work.
+1. `deploy_cloud_run.sh` must independently fail closed at every comma-delimited `gcloud` serialization boundary; the deployment doctor is defense-in-depth, not a prerequisite for safe parsing.
+2. Secret-name variables accept Secret Manager IDs only. They must never be usable as arbitrary `--set-secrets` fragments.
+3. Secret payload environment variables supplied accidentally by an operator are ignored by the deploy helper and must never be forwarded.
+4. The deployment doctor and deployment shell should share acceptance boundaries wherever practical so `offline_checks_passed=true` predicts shell acceptance.
+5. Artifact Registry shape remains advisory in the doctor, while command-line serialization safety is required.
 
 ### Current blockers / unknowns
 
-- The new `runtime.tests.test_cloud_run_deploy_shell` suite still needs empirical execution from a runnable checkout.
-- The focused deployment/entrypoint/doctor suites still need empirical execution from a runnable checkout.
+- The exact committed shell + doctor serialization suites still need execution from a runnable checkout.
+- The broader focused deployment/entrypoint/doctor suites still need empirical execution from a runnable checkout.
 - The exact Cloud Storage object Policy Troubleshooter tuple still needs one authorized disposable-project acceptance run.
 - `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
 - `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real Vertex AI acceptance run after the doctor passes.
@@ -72,24 +116,25 @@ No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance
 
 ## Single best next step
 
-**When repository execution is available, run `runtime.tests.test_cloud_run_deploy_shell` together with `runtime.tests.test_cloud_run_deploy_contract`, `runtime.tests.test_cloudrun_entrypoint`, and `runtime.tests.test_gcp_deploy_doctor`; fix any behavioral mismatch immediately. If those are green, broaden the fake-command harness to assert that secret payloads can never appear in the deploy helper's `--set-env-vars` arguments and that invalid Gemini/location/model values also fail before `gcloud`.**
+**Execute the exact committed Cloud Run shell/doctor suites from a runnable checkout. If green, audit `PROJECT_ID`, `REGION`, `SERVICE_NAME`, and `IMAGE_URL` against Google Cloud's current documented identifier/reference grammar and centralize those deployment validators so `deploy_cloud_run.sh` and `gcp_deploy_doctor.py` cannot drift. Then add parity tests for those identifiers before expanding deployment behavior.**
 
-## Previous run — checkpoint deploy/runtime validation parity
+## Previous run — executable fake-gcloud deployment boundary harness
 
-The previous run fixed a real deploy/runtime mismatch for `CHECKPOINT_OBJECT`: Bash character-count validation was replaced by a 512 UTF-8-byte bound and leading/trailing whitespace now fails before deployment. Source-level regression coverage verifies parity with `gcp_deploy_doctor.py` and `cloudrun_entrypoint.py`.
+The previous run added `runtime/tests/test_cloud_run_deploy_shell.py`, executing the real production deployment helper against an isolated fake `gcloud` and covering checkpoint object UTF-8 boundaries plus fail-before-external-call behavior.
 
 Previous commits:
-- `49b379f6875b103c2ac9b6ff913ee21ad6fe05ae` — align checkpoint object validation with runtime
-- `f3330555ae4a7bf724c95b0ccf92ac4eee9a7a1a` — cover checkpoint object deploy parity
+- `60538f0820dcf575886b76c36a951be06db9059c` — test Cloud Run deploy helper with fake gcloud
+- `a525c4a4f21e132f78c1d46ef087477830266e6c` — record fake gcloud deployment harness progress
 
 ## Retained production hardening
 
 - Cloud Run production deployment uses authenticated GCS checkpoints rather than silent ephemeral/no-checkpoint state.
 - Runtime checkpoint HMAC keys are Secret Manager supplied and at least 32 UTF-8 bytes.
-- Checkpoint object validation is byte-accurate and aligned across deploy helper, doctor, and runtime.
+- Checkpoint object validation is byte-accurate and aligned across deploy helper, deployment doctor, and runtime.
+- Cloud Run deployment now rejects malformed/injected comma-delimited environment and secret mapping inputs before `gcloud`.
 - Runtime MCP launcher parsing is centralized and cross-platform.
 - Readiness validates local activation/pin trust before spawning/querying Grafana MCP.
-- Deployment doctor validates required APIs, secrets/access, Cloud Logging permissions, checkpoint storage permissions, conditional Vertex prediction permission, and image availability; offline validation can never report deploy-ready.
+- Deployment doctor validates required APIs, secrets/access, Cloud Logging permissions, checkpoint storage permissions, conditional Vertex prediction permission, image availability, and deployment serialization boundaries; offline validation can never report deploy-ready.
 - Gemini acceptance smoke defaults to zero model calls and requires explicit `--execute`.
 - Standard Cloud Run deployment keeps production remediation disabled.
 
