@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from command_line import split_command
 from mcp_smoke import DEFAULT_COMMAND, DATASOURCE_UID, McpError, StdioClient
 
 
@@ -85,11 +85,9 @@ def extract_instant_value(result: dict[str, Any]) -> float | None:
     if data is None or data == []:
         return None
 
-    # Prometheus scalar JSON: [unix_timestamp, "numeric-value"]
     if isinstance(data, list) and len(data) == 2 and not isinstance(data[0], dict):
         return _coerce_number(data[1])
 
-    # Prometheus vector JSON: [{"metric": {...}, "value": [ts, "value"]}, ...]
     if isinstance(data, list) and all(isinstance(item, dict) for item in data):
         if len(data) == 0:
             return None
@@ -113,7 +111,7 @@ class McpPrometheusMetricClient:
         command: list[str] | None = None,
         datasource_uid: str | None = None,
     ) -> None:
-        self.command = command or shlex.split(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
+        self.command = command or split_command(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
         self.datasource_uid = datasource_uid or os.getenv(
             "STAGEGUARD_DATASOURCE_UID", DATASOURCE_UID
         )
