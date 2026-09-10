@@ -50,6 +50,27 @@ class CloudRunDeployContractTests(unittest.TestCase):
         self.assertIn('GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token', self.deploy)
         self.assertNotIn('GRAFANA_SERVICE_ACCOUNT_TOKEN=', self.deploy)
 
+    def test_cloud_run_requires_authenticated_durable_checkpoint_configuration(self) -> None:
+        required_block = self.deploy.split('required=(', 1)[1].split(')', 1)[0]
+        self.assertIn('CHECKPOINT_BUCKET', required_block)
+        self.assertIn('CHECKPOINT_HMAC_SECRET', required_block)
+        self.assertIn('STAGEGUARD_CHECKPOINT_BUCKET=${CHECKPOINT_BUCKET}', self.deploy)
+        self.assertIn('STAGEGUARD_CHECKPOINT_OBJECT=${CHECKPOINT_OBJECT}', self.deploy)
+        self.assertIn('CHECKPOINT_OBJECT="${CHECKPOINT_OBJECT:-stageguard/incident-checkpoint.json}"', self.deploy)
+
+    def test_checkpoint_hmac_payload_is_resolved_by_secret_manager_not_literal_env_vars(self) -> None:
+        self.assertIn('STAGEGUARD_CHECKPOINT_HMAC_KEY=${CHECKPOINT_HMAC_SECRET}:latest', self.deploy)
+        env_vars_assignment = next(
+            line for line in self.deploy.splitlines() if line.startswith('ENV_VARS=')
+        )
+        self.assertNotIn('STAGEGUARD_CHECKPOINT_HMAC_KEY', env_vars_assignment)
+        self.assertNotIn('${STAGEGUARD_CHECKPOINT_HMAC_KEY}', self.deploy)
+
+    def test_checkpoint_identifiers_are_validated_before_gcloud_deploy(self) -> None:
+        deploy_index = self.deploy.index('gcloud run deploy')
+        self.assertLess(self.deploy.index('CHECKPOINT_BUCKET is not a valid bounded GCS bucket name'), deploy_index)
+        self.assertLess(self.deploy.index('CHECKPOINT_OBJECT is not a valid bounded object path'), deploy_index)
+
 
 if __name__ == "__main__":
     unittest.main()
