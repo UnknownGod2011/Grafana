@@ -1,0 +1,66 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "1 while a remediation dispatch/recovery verification is in flight.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "idle"}, "1": {"text": "active"}}, "type": "value"}], "min": 0, "max": 1}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_remediation_execution_active", "legendFormat": "active", "range": true, "refId": "A"}],
+      "title": "Remediation execution",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Fail-closed watchdog signal. A value of 1 withdraws StageGuard readiness.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "within deadline"}, "1": {"text": "DEADLINE EXCEEDED"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_remediation_execution_deadline_exceeded", "legendFormat": "deadline", "range": true, "refId": "A"}],
+      "title": "Execution watchdog",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Monotonic elapsed time for the active remediation compared with its configured safety bound.",
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"editorMode": "code", "expr": "stageguard_remediation_execution_age_seconds", "legendFormat": "execution age", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "stageguard_remediation_execution_max_seconds", "legendFormat": "configured maximum", "range": true, "refId": "B"}
+      ],
+      "title": "Remediation age vs safety deadline",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Seconds remaining before StageGuard withdraws readiness. Negative values indicate the bound has been exceeded.",
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 6},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_remediation_execution_max_seconds - stageguard_remediation_execution_age_seconds", "legendFormat": "deadline headroom", "range": true, "refId": "A"}],
+      "title": "Watchdog headroom",
+      "type": "stat"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["stageguard", "runtime", "remediation", "safety"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "StageGuard Runtime Safety",
+  "uid": "stageguard-runtime-safety",
+  "version": 1
+}
