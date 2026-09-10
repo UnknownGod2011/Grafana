@@ -6,7 +6,7 @@ StageGuard exposes runtime safety metrics at `/metrics`, including the remediati
 
 The default Docker Compose stack includes a credential-free `watchdog-fixture` service. Prometheus scrapes it as `stageguard-runtime-watchdog`, so the `StageGuard Runtime Safety` dashboard has realistic watchdog series even when the full incident API is not running.
 
-The fixture has only three named states and is not a remediation provider:
+The fixture has only three named remediation states and is not a remediation provider:
 
 ```bash
 # idle / healthy watchdog
@@ -19,7 +19,19 @@ curl -X POST http://127.0.0.1:9111/scenario/active
 curl -X POST http://127.0.0.1:9111/scenario/overdue
 ```
 
-Prometheus should then expose all four series:
+Metrics delivery can be interrupted **independently** of those states:
+
+```bash
+# make /metrics return 503 while health/control endpoints remain available
+curl -X POST http://127.0.0.1:9111/telemetry/offline
+
+# resume the same remediation state's metrics
+curl -X POST http://127.0.0.1:9111/telemetry/online
+```
+
+Taking telemetry offline never changes the selected remediation state. This separation is intentional: it lets the acceptance rehearsal prove that loss of evidence produces a stale-evidence warning rather than inventing a remediation failure. `/state` exposes `telemetry_available` so tests can verify the separation directly.
+
+When telemetry is online, Prometheus should expose all four series:
 
 ```promql
 stageguard_remediation_execution_active
@@ -52,17 +64,20 @@ After `docker compose up --build -d`, run the bounded acceptance rehearsal:
 python runtime/watchdog_observability_acceptance.py
 ```
 
-The script proves the complete watchdog alert lifecycle rather than only the firing edge:
+The script now proves **both** independent alert lifecycles:
 
-1. force the fixture to `idle` and wait until Prometheus reports `deadline_exceeded=0`;
-2. move the fixture to `overdue` and wait for Prometheus to ingest `1`;
-3. wait for the Grafana-managed watchdog alert to appear in Grafana's active Alertmanager v2 alerts response;
-4. return the fixture to `idle` and wait for Prometheus to report `0` again;
-5. require that the StageGuard watchdog alert disappears from the valid active-alert response, proving resolution rather than merely assuming it from the metric transition.
+1. start with telemetry online and the fixture `idle`, and wait until Prometheus reports `deadline_exceeded=0`;
+2. move the fixture to `overdue`, require Prometheus to ingest `1`, and require the critical remediation-deadline alert to become active;
+3. return the fixture to `idle`, require Prometheus to report `0`, and require the critical alert to resolve;
+4. leave remediation state at `idle` but switch telemetry `offline` so `/metrics` returns 503;
+5. require the Prometheus freshness expression to exceed 45 seconds;
+6. verify the critical remediation-deadline alert remains inactive, then require only `stageguard-runtime-telemetry-stale` to become active;
+7. restore telemetry `online`, require fresh `deadline_exceeded=0` ingestion, require freshness to fall below 45 seconds, and require the stale warning to resolve;
+8. verify the critical deadline alert is still inactive after evidence recovery.
 
-Unexpected Grafana response shapes are never interpreted as recovery. The parser accepts only an active-alert list and fails closed on malformed alert entries, so an API/schema failure cannot produce a false PASS. Unrelated active alerts may remain present; only the StageGuard watchdog rule is required to resolve. The fixture is also reset to `idle` in a `finally` block.
+Unexpected Grafana response shapes are never interpreted as recovery. The parser accepts only an active-alert list and fails closed on malformed alert entries, so an API/schema failure cannot produce a false PASS. Unrelated active alerts may remain present; each StageGuard rule is matched by its own title/summary identity. The fixture is restored to `idle` with telemetry online in a `finally` block.
 
-All three service endpoints are required to be loopback HTTP origins so the local default Grafana credentials cannot be sent to a remote host by mistake. The default firing and resolution waits are bounded and can be adjusted with `--alert-timeout` and `--resolve-timeout` when testing a deliberately slower local evaluation interval.
+All three service endpoints are required to be loopback HTTP origins so the local default Grafana credentials cannot be sent to a remote host by mistake. Firing, stale-detection, and resolution waits are bounded and can be adjusted with `--alert-timeout`, `--stale-timeout`, and `--resolve-timeout` when testing a deliberately slower local evaluation interval. The default stale wait is intentionally long enough to cover the 45-second freshness threshold plus the Grafana rule's 30-second pending interval.
 
 ## Authenticated Cloud Run scrape bridge
 
