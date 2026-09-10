@@ -30,6 +30,38 @@ for name in "${required[@]}"; do
   fi
 done
 
+# Every value below crosses a command-line serialization boundary. In
+# particular, --set-env-vars and --set-secrets use comma-delimited mappings.
+# Validate their components here even when the deploy doctor was skipped so a
+# malformed operator value cannot smuggle an extra environment/secret mapping.
+if [[ ! "${PROJECT_NUMBER}" =~ ^[0-9]+$ ]]; then
+  echo "PROJECT_NUMBER must contain digits only" >&2
+  exit 2
+fi
+if [[ ! "${RUNTIME_SERVICE_ACCOUNT}" =~ ^[^@[:space:],]+@[^@[:space:],]+\.iam\.gserviceaccount\.com$ ]]; then
+  echo "RUNTIME_SERVICE_ACCOUNT must be a service-account email without commas or whitespace" >&2
+  exit 2
+fi
+if [[ ! "${GRAFANA_URL}" =~ ^https?://[^[:space:],]+$ ]]; then
+  echo "GRAFANA_URL must be an absolute http(s) URL without commas or whitespace" >&2
+  exit 2
+fi
+if [[ -z "${IAP_AUDIENCE}" || "${IAP_AUDIENCE}" == *","* || "${IAP_AUDIENCE}" =~ [[:space:][:cntrl:]] ]]; then
+  echo "IAP_AUDIENCE must be a non-empty value without commas, whitespace, or control characters" >&2
+  exit 2
+fi
+if [[ -z "${IMAGE_URL}" || "${IMAGE_URL}" == *","* || "${IMAGE_URL}" =~ [[:space:][:cntrl:]] ]]; then
+  echo "IMAGE_URL must be a non-empty image reference without commas, whitespace, or control characters" >&2
+  exit 2
+fi
+for name in TELEMETRY_SECRET METRIC_ACTIVATION_SECRET LOG_ACTIVATION_SECRET GRAFANA_TOKEN_SECRET CHECKPOINT_HMAC_SECRET; do
+  value="${!name}"
+  if [[ ! "${value}" =~ ^[A-Za-z0-9_-]{1,255}$ ]]; then
+    echo "${name} must be a Secret Manager secret ID (letters, digits, underscores, or hyphens only)" >&2
+    exit 2
+  fi
+done
+
 ENABLE_GEMINI="${ENABLE_GEMINI:-false}"
 case "${ENABLE_GEMINI,,}" in
   1|true|yes|on) ENABLE_GEMINI=true ;;
