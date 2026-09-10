@@ -11,85 +11,110 @@ Core invariants:
 - Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
 - Authenticated checkpoints and audit integrity fail closed.
 
-## Run log — 2026-09-10 — bounded remediation execution watchdog
+## Run log — 2026-09-10 — watchdog HTTP observability and runtime configuration
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding work. Inspected the production remediation/readiness path and prior HTTP concurrency implementation:
+Read `progress.md` completely before deciding work. Inspected the active remediation/watchdog path and HTTP/bootstrap composition:
 - `runtime/anchored_execution_safety.py`
-- `runtime/execution_safety.py`
-- `runtime/remediation.py`
 - `runtime/api.py`
-- `runtime/readiness.py`
 - `runtime/bootstrap.py`
 - `runtime/cloudrun_entrypoint.py`
-- `runtime/tests/test_anchored_execution_safety.py`
+- `runtime/tests/test_api_concurrency.py`
+- `runtime/tests/test_cloudrun_entrypoint.py`
 
-Confirmed that production execution deliberately releases the lifecycle lock across provider I/O and Grafana recovery polling, and that `/readyz` already fails closed whenever `service.checkpoint_state()` reports `execution_uncertain`. The remaining gap was that an in-flight provider call could remain `dispatching` forever with no execution-age bound.
+Confirmed the production service already tracks a monotonic active execution age and fails `checkpoint_state()` closed to `execution_uncertain` after the configured bound. The remaining gap was operator/runtime visibility: the age and deadline were not explicit in `/metrics` or `/readyz`, lifecycle responses did not expose the bounded watchdog view, and the 60-second limit could not be configured through bootstrap/Cloud Run process configuration.
 
 ### Exact changes made
 
-Updated `runtime/anchored_execution_safety.py`:
-1. Added `DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS = 60.0`.
-2. Added injectable monotonic-clock support and a bounded `execution_max_seconds` constructor parameter.
-3. Reject invalid watchdog bounds, including zero, negative, boolean, infinity, NaN, and non-numeric values.
-4. Record the monotonic start time immediately before an approved remediation is marked in flight.
-5. Clear the active start time on both exception and normal completion paths.
-6. Added `remediation_execution_observability()` returning only fixed/provider-detail-free fields: `active`, `age_seconds`, `max_seconds`, and `deadline_exceeded`.
-7. Overrode `checkpoint_state()` so an active execution whose age exceeds the configured maximum reports `execution_uncertain`.
-8. Preserved `dispatching` as the execution phase while the provider call is still physically in progress; competing mutations remain blocked by the existing in-flight guard.
+Updated `runtime/api.py`:
+1. Added a bounded `_remediation_execution_observability()` adapter around the service watchdog method.
+2. The adapter exposes only `active`, `age_seconds`, `max_seconds`, and `deadline_exceeded`; provider URLs, operation IDs, targets, exceptions, credentials, and arbitrary service fields are never forwarded.
+3. Missing watchdog support remains backward compatible and reports an inactive zeroed view.
+4. Malformed/exceptional watchdog output fails closed to `deadline_exceeded=true` with zeroed numeric fields rather than leaking exception/provider detail.
+5. Authenticated lifecycle responses now include a `remediation_execution` object.
+6. `/readyz` now includes `checks.remediation_execution_deadline=ok|exceeded`; an exceeded or malformed watchdog forces `ready=false` independently of the checkpoint-derived signal.
+7. The generic readiness exception fallback now includes `remediation_execution_deadline=failed`.
+8. `/metrics` now exports four fixed-cardinality gauges:
+   - `stageguard_remediation_execution_active`
+   - `stageguard_remediation_execution_age_seconds`
+   - `stageguard_remediation_execution_max_seconds`
+   - `stageguard_remediation_execution_deadline_exceeded`
 
-Because the existing API readiness implementation already forces `ready=false` when checkpoint state is `execution_uncertain`, a wedged remediation now makes `/readyz` fail closed without changing provider-side behavior or attempting an unsafe cancellation/retry.
+Updated `runtime/tests/test_api_concurrency.py`:
+1. Added a thread-safe fake monotonic clock and configured a deterministic 5-second watchdog.
+2. While the blocking remediation fake is active, the HTTP test now verifies lifecycle watchdog state, readiness deadline state, and all four Prometheus gauges.
+3. Advances monotonic time past the deadline without sleeping and verifies `/readyz` returns HTTP 503 with `checkpoint=execution_uncertain` and `remediation_execution_deadline=exceeded`.
+4. Verifies metrics report age 6.0, configured max 5.0, and deadline exceeded while the provider remains blocked.
+5. Retains the single-dispatch/competing-mutation assertions and verifies watchdog metrics return inactive after successful telemetry-verified recovery.
 
-Updated `runtime/tests/test_anchored_execution_safety.py` with deterministic coverage:
-- watchdog configuration rejects non-finite/non-positive/invalid values;
-- a fake monotonic clock starts execution age at zero;
-- execution remains synchronized before the threshold;
-- crossing the configured threshold changes checkpoint state to `execution_uncertain` while phase remains `dispatching`;
-- provider invocation count remains single-dispatch semantics from existing concurrency coverage;
-- after the blocked provider is released and Grafana recovery verification succeeds, execution observability resets to inactive/zero-age and checkpoint state returns to synchronized with phase `resolved`.
+Added `runtime/tests/test_api_execution_watchdog.py`:
+- verifies backward compatibility for runtimes without watchdog support;
+- verifies normalization of valid numeric watchdog output;
+- verifies arbitrary/provider-specific fields are dropped;
+- verifies malformed booleans, negative/NaN ages, non-positive/infinite maxima, missing dictionaries, and runtime exceptions all fail closed;
+- verifies synthetic provider/secret text from an exception is not surfaced.
+
+Updated `runtime/bootstrap.py`:
+1. Imports the service's canonical `DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS` constant.
+2. Added `remediation_execution_max_seconds` to `build_runtime()` with the canonical default.
+3. Passes the configured value to `AnchoredExecutionSafeIncidentService`, which retains the finite/positive validation boundary.
+4. Added CLI option `--remediation-execution-max-seconds` and wired it through `main()`.
+
+Updated `runtime/cloudrun_entrypoint.py`:
+1. Added `STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS` process configuration.
+2. Defaults to the canonical 60-second service value through `bootstrap.DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS` rather than duplicating a numeric default.
+3. Rejects blank, zero, negative, NaN, infinity, and non-numeric values before bootstrap startup.
+4. Always passes the resolved value as `--remediation-execution-max-seconds`, keeping the Cloud Run composition explicit and inspectable.
+5. Did not add any environment switch that enables production remediation; write capability remains an explicit alternate deployment/process decision.
+
+Updated `runtime/tests/test_cloudrun_entrypoint.py`:
+- asserts the default Cloud Run watchdog is 60.0 seconds;
+- verifies a custom finite positive value is forwarded;
+- verifies blank/zero/negative/NaN/infinite/non-numeric values fail closed.
 
 Commits this run:
-- `c3fed1db6894dd5301f63276f18f284a724d36f3` — initial bounded execution timing state
-- `5e8a9d18330e1499fedac21454e499ced390bde0` — fail checkpoint/readiness state closed for wedged execution
-- `70bd0138c3c66da83496e0f7e16391bd1e74c080` — deterministic watchdog regression coverage
-- `e43a3e9ad14e009d2fbb5f453ebacbe369a6f9a9` — harden watchdog bound validation
-- `58ad8e3b45b7bb65ca0ececa78ab1e83fe4839ae` — cover invalid watchdog bounds
+- `da09ed51e3b818f951f0249b3b362b8dff3c59e2` — expose remediation watchdog through readiness and metrics
+- `d34e5da8a7669d034a1be5c3f195348fe53739d4` — cover remediation watchdog HTTP observability
+- `d0ee9e02e84be1b949937b792e87d84ed4674dea` — test fail-closed watchdog API sanitization
+- `63ee41a05512eca0cf923f72d0c0e187aa71677e` — make remediation watchdog duration configurable
+- `ed24d3ca185cfb276a9720335591c2819663d17d` — wire Cloud Run remediation watchdog configuration
+- `246bce50b312231e2241daab09c19ca95ec33ca2` — test Cloud Run watchdog configuration
 
 ### Tests / checks / results
 
 Validation performed in this run:
-- Re-fetched and reviewed the committed production service after the writes.
-- Cross-checked the watchdog with `runtime/api.py`: `_service_readiness()` already sets `ready=false` for `checkpoint_state in {"conflicted", "execution_uncertain"}`.
-- Cross-checked `runtime/execution_safety.py` to preserve the existing durable uncertainty and reconciliation semantics rather than mutating `_execution_uncertain` merely because a live call is slow.
-- Cross-checked the default recovery loop in `runtime/remediation.py`; the 60-second watchdog is deliberately above the built-in 25 seconds of inter-sample sleep so normal six-attempt recovery verification has headroom for provider and Grafana query latency.
-- Re-fetched the new deterministic test after updates and corrected its expected validation message after finite-number hardening.
+- Re-fetched the committed `runtime/api.py` watchdog/readiness/metrics section and visually verified the fixed-shape sanitization, readiness gating, and metric names after the write.
+- Re-fetched `runtime/tests/test_api_execution_watchdog.py` after creation and verified its committed malformed-state/secret-redaction cases.
+- Preserved the prior HTTP concurrency harness rather than introducing timing sleeps; the new deadline transition is driven by an injected monotonic clock.
+- Preserved the canonical service-side finite/positive validation boundary while also failing Cloud Run startup earlier for invalid process configuration.
+- Confirmed no GitHub Actions workflow was created, triggered, or rerun.
 
-The exact committed unittest module could not be executed from a repository checkout in this automation environment because `github.com` DNS resolution still fails for `git clone`. No GitHub Actions workflow was created, triggered, or rerun merely to obtain a test signal, so no full-suite green claim is made.
+The exact committed Python tests still could not be executed from a repository checkout in this automation environment because `github.com` DNS resolution fails for `git ls-remote`/`git clone`. Therefore no new green-suite claim is made. The changed files were re-read through the GitHub connector, but that does not replace executable test coverage.
 
 No external Grafana instance, MCP server, Google Cloud project, Cloud Run service, Secret Manager secret, IAM policy, Gemini endpoint, checkpoint object, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. A slow execution does not automatically become durable execution uncertainty. While the provider call is still alive, StageGuard reports transient `execution_uncertain` through `checkpoint_state()` only for readiness gating; the existing reconciliation state machine is reserved for actual ambiguous/failed execution outcomes.
-2. The watchdog never cancels, retries, or replays remediation. It only withdraws readiness and exposes bounded state, preserving single-dispatch safety.
-3. Monotonic time is used rather than wall-clock time so NTP/system-clock changes cannot hide or manufacture a wedge.
-4. The watchdog surface contains no provider URL, operation ID, production ID, target, query, credential, or exception text.
-5. The default maximum is currently an internal production-safe default rather than a deployment/CLI setting; exposing and validating that configuration is still required.
+1. Watchdog telemetry is treated as a safety signal, not informational-only telemetry: malformed data fails readiness closed.
+2. The HTTP surface exports only a fixed, provider-detail-free schema. Arbitrary keys returned by a service implementation are discarded.
+3. Execution age is a gauge based on the service's monotonic timer; it is zero when inactive and cannot reveal wall-clock execution timestamps.
+4. Deadline readiness is explicit even though checkpoint state also becomes `execution_uncertain`, so operators can distinguish a live over-deadline call from other durable reconciliation conditions.
+5. Cloud Run exposes the watchdog duration without creating a remediation enablement switch. The standard production entrypoint still keeps remediation writes disabled.
+6. The bootstrap uses the service's canonical default instead of duplicating `60.0`, reducing drift between runtime and deployment behavior.
 
 ### Current blockers / unknowns
 
-- `runtime.tests.test_anchored_execution_safety` and the HTTP concurrency suite still need execution from a runnable checkout.
-- The focused production runtime/API/readiness suite should be rerun once repository execution is available.
-- Execution age/deadline are not yet exported as dedicated Prometheus gauges; only the existing checkpoint-derived `stageguard_remediation_execution_uncertain` signal changes after the deadline.
-- `execution_max_seconds` is not yet wired through `bootstrap.py` / production deployment configuration.
-- A hung Python provider call cannot be forcibly interrupted safely by this watchdog; readiness is withdrawn, but process-level termination/replacement remains the supervisor/platform responsibility.
+- `runtime.tests.test_api_concurrency`, `runtime.tests.test_api_execution_watchdog`, `runtime.tests.test_cloudrun_entrypoint`, and the focused bootstrap/API/runtime suite still need execution from a runnable checkout.
+- The production Cloud Run deploy helper does not yet expose `STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS` as an operator-controlled deployment value; the entrypoint supports it, but standard deploy configuration currently receives the safe default unless the environment is set another way.
+- Grafana dashboards/alerts do not yet visualize or alert on the new active/age/deadline gauges.
+- A hung Python provider call still cannot be forcibly interrupted safely; readiness is withdrawn, but process replacement remains the supervisor/platform responsibility.
 - The exact Cloud Storage object Policy Troubleshooter tuple still needs one authorized disposable-project acceptance run.
 - Gemini deployment doctor and real Vertex AI acceptance smoke still need authorized disposable-project credentials.
 
 ## Single best next step
 
-**Wire `remediation_execution_observability()` into the HTTP observability contract: add fixed-cardinality Prometheus gauges for active execution, execution age, configured deadline, and deadline-exceeded state; add an explicit bounded readiness check such as `remediation_execution_deadline=ok|exceeded`; then expose/validate the watchdog duration through production bootstrap configuration and cover the API behavior with the existing blocking-remediation HTTP harness.**
+**Integrate the new watchdog gauges into the actual Grafana runtime observability layer: locate the provisioned StageGuard dashboard/alerting configuration, add panels for active remediation age versus configured maximum and a high-signal alert on `stageguard_remediation_execution_deadline_exceeded == 1`, then expose the watchdog duration through the safe Cloud Run deploy helper so real deployments can tune it without bypassing validation. Add static/config regression coverage without triggering GitHub Actions.**
 
 ## Retained production hardening
 
@@ -104,7 +129,9 @@ No external Grafana instance, MCP server, Google Cloud project, Cloud Run servic
 - Deployment-doctor gcloud process failures fail closed with probe-specific sanitized diagnostics.
 - Production remediation releases the lifecycle lock across provider contact and Grafana recovery polling while blocking competing mutations with an explicit in-flight guard.
 - HTTP concurrency coverage protects incident/readiness/metrics visibility and single-dispatch semantics while remediation is active.
-- Active remediation now has a monotonic bounded watchdog; exceeding it withdraws readiness through `execution_uncertain` checkpoint state without replaying or cancelling the action.
+- Active remediation has a monotonic bounded watchdog; exceeding it withdraws readiness without replaying or cancelling the action.
+- Watchdog state is now exported through authenticated lifecycle state, explicit readiness, and fixed-cardinality Prometheus gauges.
+- The watchdog duration is configurable through runtime bootstrap and validated Cloud Run process configuration.
 - Gemini acceptance smoke defaults to zero model calls and requires explicit `--execute`.
 - Standard Cloud Run deployment keeps production remediation disabled.
 
