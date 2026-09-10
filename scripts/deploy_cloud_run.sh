@@ -70,13 +70,20 @@ if [[ -z "${CHECKPOINT_OBJECT}" || \
       "${CHECKPOINT_OBJECT}" == *//* || \
       "${CHECKPOINT_OBJECT}" == *","* || \
       "${CHECKPOINT_OBJECT}" == *\\* || \
+      "${CHECKPOINT_OBJECT}" =~ ^[[:space:]] || \
+      "${CHECKPOINT_OBJECT}" =~ [[:space:]]$ || \
       "${CHECKPOINT_OBJECT}" =~ (^|/)\.\.?(/|$) || \
       "${CHECKPOINT_OBJECT}" =~ [[:cntrl:]] ]]; then
   echo "CHECKPOINT_OBJECT is not a valid bounded object path" >&2
   exit 2
 fi
-if (( ${#CHECKPOINT_OBJECT} > 512 )); then
-  echo "CHECKPOINT_OBJECT must be at most 512 characters" >&2
+# Runtime and deploy doctor bound object identifiers by UTF-8 bytes, not Unicode
+# character count. LC_ALL=C makes Bash expose byte length so multi-byte object
+# names cannot pass deployment validation and then fail closed at startup.
+CHECKPOINT_OBJECT_BYTES="$(LC_ALL=C; printf '%s' "${CHECKPOINT_OBJECT}" | wc -c)"
+CHECKPOINT_OBJECT_BYTES="${CHECKPOINT_OBJECT_BYTES//[[:space:]]/}"
+if [[ ! "${CHECKPOINT_OBJECT_BYTES}" =~ ^[0-9]+$ ]] || (( CHECKPOINT_OBJECT_BYTES > 512 )); then
+  echo "CHECKPOINT_OBJECT must be at most 512 UTF-8 bytes" >&2
   exit 2
 fi
 
