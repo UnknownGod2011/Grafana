@@ -13,6 +13,7 @@ from collections.abc import Mapping
 import bootstrap
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:
@@ -20,6 +21,19 @@ def _required(environ: Mapping[str, str], name: str) -> str:
     if not value:
         raise ValueError(f"required environment variable {name} is not set")
     return value
+
+
+def _optional_bool(environ: Mapping[str, str], name: str, *, default: bool = False) -> bool:
+    """Parse an optional production feature flag without silently accepting typos."""
+    raw = environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUE:
+        return True
+    if normalized in _FALSE:
+        return False
+    raise ValueError(f"{name} must be a boolean value (true/false, 1/0, yes/no, on/off)")
 
 
 def _port(environ: Mapping[str, str]) -> int:
@@ -71,7 +85,7 @@ def build_bootstrap_argv(environ: Mapping[str, str] | None = None) -> list[str]:
             "--audit-integrity-policy", "allow_unbound_legacy",
         ])
 
-    if env.get("STAGEGUARD_ENABLE_GEMINI", "").strip().lower() in _TRUE:
+    if _optional_bool(env, "STAGEGUARD_ENABLE_GEMINI"):
         argv.append("--enable-gemini")
 
     # There is intentionally no environment switch for production remediation.
