@@ -31,6 +31,51 @@ class WatchdogObservabilityAcceptanceTests(unittest.TestCase):
             summary=summary or self.module.DEADLINE_ALERT_SUMMARY,
         )
 
+    def test_expected_runtime_versions_match_compose_contract(self) -> None:
+        self.assertEqual(self.module.EXPECTED_PROMETHEUS_VERSION, "3.13.3")
+        self.assertEqual(self.module.EXPECTED_GRAFANA_VERSION, "13.2.1")
+
+    def test_prometheus_buildinfo_version_parser_is_strict(self) -> None:
+        self.assertEqual(
+            self.module.prometheus_runtime_version_from_payload(
+                {"status": "success", "data": {"version": "3.13.3"}}
+            ),
+            "3.13.3",
+        )
+        invalid = (
+            None,
+            [],
+            {},
+            {"status": "error", "data": {"version": "3.13.3"}},
+            {"status": "success", "data": None},
+            {"status": "success", "data": {}},
+            {"status": "success", "data": {"version": ""}},
+            {"status": "success", "data": {"version": 3133}},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    self.module.prometheus_runtime_version_from_payload(payload)
+
+    def test_grafana_health_version_parser_is_strict(self) -> None:
+        self.assertEqual(
+            self.module.grafana_runtime_version_from_payload(
+                {"database": "ok", "version": "13.2.1"}
+            ),
+            "13.2.1",
+        )
+        invalid = (
+            None,
+            [],
+            {},
+            {"version": ""},
+            {"version": 1321},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    self.module.grafana_runtime_version_from_payload(payload)
+
     def test_deadline_alert_title_match_is_active(self) -> None:
         payload = [{"labels": {"alertname": self.module.DEADLINE_ALERT_TITLE}, "annotations": {}}]
         self.assertTrue(self._active(payload))
