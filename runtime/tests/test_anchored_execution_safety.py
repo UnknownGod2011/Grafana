@@ -46,6 +46,17 @@ class BlockingRemediation:
         return ActionResult(True, "ok", {})
 
 
+class FakeMonotonic:
+    def __init__(self, value: float = 100.0):
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
 def diagnosed(repeats: int = 1):
     return [4.0, 18.0, 41.0, 37.0, 0.2, 0.1] * repeats
 
@@ -55,7 +66,7 @@ def recovery():
 
 
 class AnchoredExecutionSafetyCompositionTests(unittest.TestCase):
-    def service(self, metrics, audit_path, store, *, interval=1, remediation=None):
+    def service(self, metrics, audit_path, store, *, interval=1, remediation=None, **kwargs):
         return AnchoredExecutionSafeIncidentService(
             SequenceMetrics(metrics),
             remediation or FakeRemediation(),
@@ -65,6 +76,7 @@ class AnchoredExecutionSafetyCompositionTests(unittest.TestCase):
             clock_ms=lambda: 123456789,
             id_factory=lambda: "incident-anchor-exec-001",
             recovery_sleep=lambda _: None,
+            **kwargs,
         )
 
     def test_mro_preserves_both_runtime_contracts(self):
@@ -79,6 +91,17 @@ class AnchoredExecutionSafetyCompositionTests(unittest.TestCase):
             self.assertIsInstance(service, ExecutionSafeIncidentService)
             self.assertEqual("clear", service.execution_reconciliation_state())
             self.assertEqual("synchronized", service.checkpoint_state())
+
+    def test_execution_watchdog_configuration_must_be_positive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "execution_max_seconds must be positive"):
+                self.service(
+                    diagnosed(),
+                    root / "audit.jsonl",
+                    JsonCheckpointStore(root / "checkpoint.json"),
+                    execution_max_seconds=0,
+                )
 
     def test_execution_safe_composition_emits_v4_and_restarts_from_compacted_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -187,6 +210,65 @@ class AnchoredExecutionSafetyCompositionTests(unittest.TestCase):
             self.assertFalse(worker.is_alive(), "execution worker did not finish")
             self.assertEqual([], execution_errors)
             self.assertEqual("recovered", result["snapshot"].outcome.status)
+            self.assertEqual("resolved", service.execution_checkpoint_phase())
+
+    def test_execution_watchdog_fails_checkpoint_state_closed_after_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remediation = BlockingRemediation()
+            monotonic = FakeMonotonic()
+            service = self.service(
+                diagnosed() + recovery(),
+                root / "audit.jsonl",
+                JsonCheckpointStore(root / "checkpoint.json"),
+                remediation=remediation,
+                execution_max_seconds=5.0,
+                monotonic=monotonic,
+            )
+            investigated = service.investigate()
+            service.approve(
+                incident_id=investigated.incident_id,
+                revision=investigated.revision,
+                approved_by="operator@example.com",
+            )
+
+            errors = []
+
+            def execute():
+                try:
+                    service.execute_approved(actor="operator@example.com")
+                except Exception as exc:  # pragma: no cover - surfaced below with context
+                    errors.append(exc)
+
+            worker = threading.Thread(target=execute, daemon=True)
+            worker.start()
+            self.assertTrue(remediation.entered.wait(timeout=0.5), "provider fake was not reached")
+            try:
+                before = service.remediation_execution_observability()
+                self.assertTrue(before["active"])
+                self.assertEqual(0.0, before["age_seconds"])
+                self.assertFalse(before["deadline_exceeded"])
+                self.assertEqual("synchronized", service.checkpoint_state())
+
+                monotonic.advance(5.01)
+                wedged = service.remediation_execution_observability()
+                self.assertTrue(wedged["active"])
+                self.assertAlmostEqual(5.01, wedged["age_seconds"], places=3)
+                self.assertEqual(5.0, wedged["max_seconds"])
+                self.assertTrue(wedged["deadline_exceeded"])
+                self.assertEqual("dispatching", service.execution_checkpoint_phase())
+                self.assertEqual("execution_uncertain", service.checkpoint_state())
+            finally:
+                remediation.release.set()
+
+            worker.join(timeout=1.0)
+            self.assertFalse(worker.is_alive(), "execution worker did not finish")
+            self.assertEqual([], errors)
+            after = service.remediation_execution_observability()
+            self.assertFalse(after["active"])
+            self.assertEqual(0.0, after["age_seconds"])
+            self.assertFalse(after["deadline_exceeded"])
+            self.assertEqual("synchronized", service.checkpoint_state())
             self.assertEqual("resolved", service.execution_checkpoint_phase())
 
 
