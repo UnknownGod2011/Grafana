@@ -3,8 +3,9 @@
 
 This process is deliberately NOT a remediation simulator. It exposes only the
 four bounded watchdog series consumed by the source-controlled runtime-safety
-dashboard and alert. A tiny local-only control surface lets acceptance tests
-move between idle, active, and overdue states deterministically.
+dashboard and alerts. A tiny local-only control surface lets acceptance tests
+move between idle, active, and overdue remediation states and independently
+interrupt/resume metrics delivery.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ class WatchdogFixtureState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._name = "idle"
+        self._telemetry_available = True
 
     def set(self, name: str) -> None:
         if name not in _STATES:
@@ -31,13 +33,22 @@ class WatchdogFixtureState:
         with self._lock:
             self._name = name
 
-    def snapshot(self) -> tuple[str, dict[str, float | int]]:
+    def set_telemetry_available(self, available: bool) -> None:
+        if not isinstance(available, bool):
+            raise TypeError("telemetry availability must be boolean")
+        with self._lock:
+            self._telemetry_available = available
+
+    def snapshot(self) -> tuple[str, dict[str, float | int], bool]:
         with self._lock:
             name = self._name
-        return name, dict(_STATES[name])
+            telemetry_available = self._telemetry_available
+        return name, dict(_STATES[name]), telemetry_available
 
     def prometheus_metrics(self) -> str:
-        _name, state = self.snapshot()
+        _name, state, telemetry_available = self.snapshot()
+        if not telemetry_available:
+            raise RuntimeError("watchdog telemetry intentionally unavailable")
         return (
             "# HELP stageguard_remediation_execution_active Whether an approved remediation/recovery operation is currently active.\n"
             "# TYPE stageguard_remediation_execution_active gauge\n"
@@ -76,29 +87,52 @@ class WatchdogFixtureHandler(BaseHTTPRequestHandler):
             self._send(200, body, "application/json")
             return
         if self.path == "/state":
-            name, state = self.state.snapshot()
-            body = json.dumps({"state": name, **state}, separators=(",", ":")).encode("utf-8")
+            name, state, telemetry_available = self.state.snapshot()
+            body = json.dumps(
+                {"state": name, "telemetry_available": telemetry_available, **state},
+                separators=(",", ":"),
+            ).encode("utf-8")
             self._send(200, body, "application/json")
             return
         if self.path == "/metrics":
-            body = self.state.prometheus_metrics().encode("utf-8")
+            try:
+                metrics = self.state.prometheus_metrics()
+            except RuntimeError:
+                self._send(503, b"telemetry unavailable\n", "text/plain; charset=utf-8")
+                return
+            body = metrics.encode("utf-8")
             self._send(200, body, "text/plain; version=0.0.4; charset=utf-8")
             return
         self._send(404, b"not found\n", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802
-        prefix = "/scenario/"
-        if not self.path.startswith(prefix):
-            self._send(404, b"not found\n", "text/plain; charset=utf-8")
+        scenario_prefix = "/scenario/"
+        if self.path.startswith(scenario_prefix):
+            name = self.path[len(scenario_prefix):]
+            try:
+                self.state.set(name)
+            except ValueError:
+                self._send(404, b"unknown state\n", "text/plain; charset=utf-8")
+                return
+            body = json.dumps({"state": name}, separators=(",", ":")).encode("utf-8")
+            self._send(200, body, "application/json")
             return
-        name = self.path[len(prefix):]
-        try:
-            self.state.set(name)
-        except ValueError:
-            self._send(404, b"unknown state\n", "text/plain; charset=utf-8")
+
+        telemetry_prefix = "/telemetry/"
+        if self.path.startswith(telemetry_prefix):
+            mode = self.path[len(telemetry_prefix):]
+            if mode not in {"online", "offline"}:
+                self._send(404, b"unknown telemetry mode\n", "text/plain; charset=utf-8")
+                return
+            available = mode == "online"
+            self.state.set_telemetry_available(available)
+            body = json.dumps(
+                {"telemetry_available": available}, separators=(",", ":")
+            ).encode("utf-8")
+            self._send(200, body, "application/json")
             return
-        body = json.dumps({"state": name}, separators=(",", ":")).encode("utf-8")
-        self._send(200, body, "application/json")
+
+        self._send(404, b"not found\n", "text/plain; charset=utf-8")
 
 
 def make_server(host: str = "0.0.0.0", port: int = 9111) -> ThreadingHTTPServer:
