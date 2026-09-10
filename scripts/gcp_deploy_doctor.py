@@ -107,6 +107,15 @@ def _run_gcloud(args: list[str]) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
+def _process_failure_detail(code: int, operation: str) -> str | None:
+    """Return a sanitized, operation-specific detail for internal runner failures only."""
+    if code == GCLOUD_TIMEOUT_EXIT_CODE:
+        return f"gcloud process timed out while {operation}"
+    if code == GCLOUD_EXECUTION_EXIT_CODE:
+        return f"gcloud process could not be executed while {operation}"
+    return None
+
+
 def _gemini_enabled() -> bool | None:
     value = os.getenv("ENABLE_GEMINI", "false").strip().lower()
     if value in TRUE_VALUES:
@@ -251,7 +260,10 @@ def _troubleshoot_permission(full_resource_name: str, service_account: str, perm
         "policy-intelligence", "troubleshoot-policy", "iam", full_resource_name,
         f"--principal-email={service_account}", f"--permission={permission}", "--format=json",
     ])
-    if code != 0 or not stdout:
+    if code != 0:
+        detail = _process_failure_detail(code, "checking effective IAM access")
+        return Check(check_name, "failed", detail or "effective runtime access could not be verified with IAM Policy Troubleshooter")
+    if not stdout:
         return Check(check_name, "failed", "effective runtime access could not be verified with IAM Policy Troubleshooter")
     try:
         result = json.loads(stdout)
@@ -296,7 +308,8 @@ def _cloud_run_region_check(project_id: str, region: str) -> Check:
         "--format=value(locationId)",
     ])
     if code != 0:
-        return Check("cloud_run_region_available", "failed", "could not list currently available Cloud Run regions")
+        detail = _process_failure_detail(code, "checking Cloud Run region availability")
+        return Check("cloud_run_region_available", "failed", detail or "could not list currently available Cloud Run regions")
     regions = {line.strip() for line in stdout.splitlines() if line.strip()}
     if not regions:
         return Check("cloud_run_region_available", "failed", "Cloud Run region catalog returned no usable locations")
@@ -310,7 +323,11 @@ def _gcloud_checks() -> list[Check]:
         return [Check("gcloud", "missing", "Google Cloud CLI is not installed or not on PATH")]
     checks = [Check("gcloud", "ok", "Google Cloud CLI found")]
     code, stdout, _ = _run_gcloud(["auth", "list", "--filter=status:ACTIVE", "--format=value(account)"])
-    if code != 0 or not stdout:
+    if code != 0:
+        detail = _process_failure_detail(code, "checking active authentication")
+        checks.append(Check("gcloud_auth", "failed", detail or "no active gcloud account; run gcloud auth login or use an authorized environment"))
+        return checks
+    if not stdout:
         checks.append(Check("gcloud_auth", "failed", "no active gcloud account; run gcloud auth login or use an authorized environment"))
         return checks
     checks.append(Check("gcloud_auth", "ok", f"active account: {stdout.splitlines()[0]}"))
@@ -319,7 +336,11 @@ def _gcloud_checks() -> list[Check]:
     if not project_id:
         return checks
     code, stdout, _ = _run_gcloud(["projects", "describe", project_id, "--format=value(projectNumber)"])
-    if code != 0 or not stdout:
+    if code != 0:
+        detail = _process_failure_detail(code, "checking project access")
+        checks.append(Check("project_access", "failed", detail or f"cannot describe project {project_id!r}"))
+        return checks
+    if not stdout:
         checks.append(Check("project_access", "failed", f"cannot describe project {project_id!r}"))
         return checks
     project_number = stdout.splitlines()[0].strip()
@@ -335,7 +356,8 @@ def _gcloud_checks() -> list[Check]:
     required_apis = _required_apis()
     code, stdout, _ = _run_gcloud(["services", "list", "--enabled", f"--project={project_id}", "--format=value(config.name)"])
     if code != 0:
-        checks.append(Check("apis", "failed", "could not list enabled APIs"))
+        detail = _process_failure_detail(code, "checking enabled APIs")
+        checks.append(Check("apis", "failed", detail or "could not list enabled APIs"))
     else:
         enabled = {line.strip() for line in stdout.splitlines() if line.strip()}
         missing = [api for api in required_apis if api not in enabled]
@@ -346,18 +368,24 @@ def _gcloud_checks() -> list[Check]:
         if not secret:
             continue
         code, _, _ = _run_gcloud(["secrets", "describe", secret, f"--project={project_id}", "--format=value(name)"])
-        checks.append(Check(f"secret:{env_name}", "ok" if code == 0 else "failed", "secret exists; payload not read" if code == 0 else "secret not found or not accessible; payload not read"))
         if code == 0:
+            checks.append(Check(f"secret:{env_name}", "ok", "secret exists; payload not read"))
             checks.append(_secret_access_check(project_number, os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip(), secret, env_name))
+        else:
+            detail = _process_failure_detail(code, "checking Secret Manager resource existence")
+            checks.append(Check(f"secret:{env_name}", "failed", detail or "secret not found or not accessible; payload not read"))
 
     bucket = os.getenv("CHECKPOINT_BUCKET", "").strip()
     if bucket:
         code, _, _ = _run_gcloud(["storage", "buckets", "describe", f"gs://{bucket}", f"--project={project_id}", "--format=value(name)"])
-        checks.append(Check("checkpoint_bucket_exists", "ok" if code == 0 else "failed", "checkpoint bucket exists" if code == 0 else "checkpoint bucket not found or not accessible"))
         if code == 0:
+            checks.append(Check("checkpoint_bucket_exists", "ok", "checkpoint bucket exists"))
             checkpoint_object = _checkpoint_object()
             for permission in STORAGE_RUNTIME_PERMISSIONS:
                 checks.append(_storage_access_check(bucket, checkpoint_object, os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip(), permission))
+        else:
+            detail = _process_failure_detail(code, "checking checkpoint bucket existence")
+            checks.append(Check("checkpoint_bucket_exists", "failed", detail or "checkpoint bucket not found or not accessible"))
 
     service_account = os.getenv("RUNTIME_SERVICE_ACCOUNT", "").strip()
     for permission in LOGGING_RUNTIME_PERMISSIONS:
@@ -369,7 +397,11 @@ def _gcloud_checks() -> list[Check]:
     image_url = os.getenv("IMAGE_URL", "").strip()
     if valid_artifact_registry_image(image_url):
         code, _, _ = _run_gcloud(["artifacts", "docker", "images", "describe", image_url, f"--project={project_id}", "--format=value(image_summary.digest)"])
-        checks.append(Check("image_exists", "ok" if code == 0 else "failed", "container image exists" if code == 0 else "container image not found or not accessible"))
+        if code == 0:
+            checks.append(Check("image_exists", "ok", "container image exists"))
+        else:
+            detail = _process_failure_detail(code, "checking Artifact Registry image existence")
+            checks.append(Check("image_exists", "failed", detail or "container image not found or not accessible"))
     return checks
 
 
