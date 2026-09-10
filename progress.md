@@ -11,96 +11,71 @@ Core invariants:
 - Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
 - Authenticated checkpoints and audit integrity fail closed.
 
-## Run log — 2026-09-10 — nonblocking production remediation execution
+## Run log — 2026-09-10 — HTTP concurrency coverage for live remediation
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work. Inspected the repository tree and deliberately moved away from repeated Google Cloud deployment-doctor hardening because the previous handoff recommended shifting to another unblocked production area if direct checkout execution remained unavailable.
-
-Inspected the runtime path most relevant to live incident operation:
-- `runtime/incident_service.py`
-- `runtime/execution_safety.py`
-- `runtime/anchored_execution_safety.py`
-- `runtime/remediation.py`
+Read `progress.md` completely before choosing work. Inspected the current HTTP/runtime concurrency path and the prior nonblocking production remediation implementation:
 - `runtime/api.py`
-- `runtime/bootstrap.py`
-- `runtime/tests/test_execution_safety.py`
+- `runtime/tests/test_api.py`
 - `runtime/tests/test_anchored_execution_safety.py`
+- `runtime/anchored_execution_safety.py`
+- `runtime/incident_service.py`
+- `runtime/readiness.py`
 
-Confirmed `runtime/bootstrap.py` composes production with `AnchoredExecutionSafeIncidentService`.
-
-Found a concrete operator-availability issue: the inherited `ExecutionSafeIncidentService.execute_approved()` held the service-wide re-entrant lifecycle lock while the remediation provider was contacted and while bounded Grafana recovery samples were collected. In production that external path can take seconds or longer. Because status, checkpoint, audit-integrity, execution-phase, readiness, and metrics views also acquire the same service lock, an operator could temporarily lose useful live visibility at exactly the point a remediation was being dispatched and verified.
+Confirmed the HTTP server is `ThreadingHTTPServer`, `/v1/execute` remains intentionally synchronous per request, and production remediation now releases the lifecycle lock while the provider call and Grafana recovery polling are active. Confirmed status/readiness/metrics obtain lifecycle state through lock-protected service reads and therefore should remain responsive with the narrowed lock scope.
 
 ### Exact changes made
 
-1. Hardened the production-oriented `AnchoredExecutionSafeIncidentService` with a narrow-lock execution path.
-   - Added `_execution_in_flight`, initialized before cooperative parent construction.
-   - Persists the existing dispatch barrier while the lifecycle lock is held and before provider contact.
-   - Marks the execution in flight, then releases the lifecycle lock before `remediate_and_verify()` contacts the remediation adapter and polls Grafana/Prometheus recovery telemetry.
-   - Reacquires the lock before promoting the `RemediationOutcome`, appending the audit event, and saving the authenticated checkpoint.
-   - Revalidates incident id, evidence revision, approval, and absence of an existing outcome before committing the result.
+Added `runtime/tests/test_api_concurrency.py`, a credential-free end-to-end HTTP concurrency regression that exercises the real StageGuard HTTP server with `AnchoredExecutionSafeIncidentService` and a deterministic blocking remediation adapter.
 
-2. Kept competing lifecycle mutations fail-closed while external execution is active.
-   - Overrode `_require_checkpoint_consistency()` so any mutation using the established consistency gate receives `remediation execution is already in progress; lifecycle changes are blocked` while `_execution_in_flight` is true.
-   - A second `execute_approved()` therefore cannot replay the remote action.
-   - Investigation, approval, briefing/reconciliation paths that use the same gate remain blocked until the active execution completes.
+The test now proves the following contract while the first authenticated `POST /v1/execute` is held inside the provider call:
+1. Authenticated `GET /v1/incident` returns promptly and still exposes the approved evidence revision with no fabricated remediation outcome.
+2. Unauthenticated `GET /readyz` returns promptly and reports `remediation_execution_phase=dispatching` even when readiness itself is 503 because the test intentionally has no live Grafana activation configuration.
+3. Unauthenticated `GET /metrics` returns promptly and exports `stageguard_remediation_execution_phase{phase="dispatching"} 1`.
+4. A competing authenticated `POST /v1/investigate` fails immediately with HTTP 409 rather than queuing behind the provider call.
+5. A competing authenticated `POST /v1/execute` also fails immediately with HTTP 409.
+6. The remediation fake call count remains exactly one, proving concurrent HTTP execution cannot replay the external side effect.
+7. After the provider is released, the original execute request completes with a telemetry-verified `recovered` outcome and execution phase becomes `resolved`.
 
-3. Preserved execution-uncertainty semantics.
-   - Added a small `_mark_execution_uncertain()` helper that preserves the parent state machine fields and reason taxonomy.
-   - Provider/recovery exceptions still move the lifecycle into an execution-uncertain fail-closed state rather than permitting a blind replay.
-   - A post-action checkpoint CAS conflict still records `reload_required` semantics; generic post-contact failures retain the existing reloaded/uncertain behavior.
-   - The existing durable `dispatching` checkpoint barrier remains authoritative for production adapters that require provider reconciliation.
+The harness uses only localhost sockets, temporary files, deterministic metric fixtures, and `threading.Event`; it requires no Grafana, Gemini, GCP, Secret Manager, IAM, or remediation credentials.
 
-4. Improved operator observability during the active wait.
-   - `execution_checkpoint_phase()` now returns the existing fixed-cardinality `dispatching` phase while provider/recovery work is in flight.
-   - The remote action and recovery polling no longer occupy `_lock`, so status/checkpoint/readiness/metrics reads can acquire it and report current state.
-   - No provider detail, arbitrary operation text, target, query, or secret was added to the observability surface.
-
-5. Expanded `runtime/tests/test_anchored_execution_safety.py` with a deterministic concurrency regression.
-   - Added a `BlockingRemediation` fake controlled by `threading.Event` so the provider call can be held open without network access or sleeps.
-   - While execution is blocked inside the fake provider, a separate operator-reader thread must obtain status, execution phase, and checkpoint state within a bounded interval.
-   - The test asserts phase=`dispatching`, preserves the approved revision, and confirms checkpoint visibility remains available.
-   - Concurrent `investigate()` and a second `execute_approved()` must fail with the in-progress guard.
-   - The fake remediation call count must remain exactly one, proving the concurrent execute attempt cannot duplicate the side effect.
-   - After the fake provider is released, normal Grafana recovery fixtures complete and the outcome must become `recovered` with execution phase=`resolved`.
-
-Commits:
-- `df6bccb7e12f9d30f738e459a6fbacd171f0a478` — keep operator reads responsive during remediation
-- `9458cdcf7b3e262763fe9347e218aee4f53df00b` — test responsive reads during remediation
+Commit:
+- `b8cda0ff34494bfddce684be94ae859f37637039` — test HTTP visibility during remediation execution
 
 ### Tests / checks / results
 
 Validation available in this run:
-- Re-fetched and reviewed the committed `runtime/anchored_execution_safety.py` after the write.
-- Re-fetched and reviewed the committed concurrency regression after the write.
-- Verified from repository source that the production bootstrap imports and composes `AnchoredExecutionSafeIncidentService`.
-- The regression is credential-free and uses only local temporary files, deterministic metric values, and thread events; it creates no network/cloud side effects.
+- Re-fetched and reviewed the committed `runtime/tests/test_api_concurrency.py` after the write.
+- Cross-checked the assertions against `runtime/api.py`, including `/v1/incident`, `/readyz`, `/metrics`, HTTP 409 handling for `RuntimeError`, and `ThreadingHTTPServer` construction.
+- Cross-checked the blocking fixture against `AnchoredExecutionSafeIncidentService.execute_approved()`: the service persists the dispatch barrier, sets `_execution_in_flight`, releases `_lock`, performs remediation/recovery I/O, and later reacquires the lock to promote the outcome.
+- Confirmed `IncidentService.investigate()` and `approve()` use `_require_checkpoint_consistency()`, so the in-flight guard is the correct mutation gate for the production composition.
 
-The exact committed unittest module still could not be executed from a fresh local repository checkout in this automation environment. No GitHub Actions workflow was created, triggered, or rerun merely to obtain this signal, so no full-suite green claim is made.
+The exact committed unittest module still could not be executed from a local repository checkout in this automation environment. No GitHub Actions workflow was created, triggered, or rerun merely to obtain this signal, so no full-suite green claim is made.
 
 No external Grafana instance, MCP server, Google Cloud project, Cloud Run service, bucket/object, IAM policy, Secret Manager payload, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. Fixed the concurrency boundary only in `AnchoredExecutionSafeIncidentService`, which is the production bootstrap composition, rather than changing the stable base `IncidentService` or legacy execution-safe service and increasing regression scope unnecessarily.
-2. External provider and Grafana recovery I/O is the only work moved outside the lifecycle lock. Dispatch barriers, state promotion, audit append, authenticated anchor advancement, and checkpoint CAS remain serialized under `_lock`.
-3. Reused the existing `dispatching` execution phase instead of creating a new public state/schema solely for in-process execution.
-4. Competing mutations fail closed rather than queueing behind a potentially slow provider call. Operators receive an immediate bounded state error and can continue reading status/readiness/metrics.
-5. No async job queue or background executor was introduced; the HTTP execute request keeps its existing synchronous completion semantics, minimizing API compatibility risk while making other ThreadingHTTPServer requests responsive.
+1. Added a separate HTTP concurrency module instead of bloating the basic API unit-test class; the new test is specifically a production-composition/concurrency contract.
+2. Used real localhost HTTP connections and the real `ThreadingHTTPServer` rather than invoking handlers directly, because worker-level concurrency is the behavior that matters in production.
+3. Kept the original execute request synchronous. The test validates that other HTTP workers remain usable without introducing an async job API or changing public semantics.
+4. Allowed `/readyz` to be either 200 or 503 in this credential-free harness and asserted the stronger property: it must return promptly and expose bounded `dispatching` state. Production evidence-plane readiness remains independently fail closed.
+5. Used bounded 0.75-second responsiveness assertions with a 3-second blocking provider window; this is deliberately generous enough for CI scheduling noise while still detecting accidental lock serialization.
 
 ### Current blockers / unknowns
 
-- `runtime.tests.test_anchored_execution_safety` must be executed from a runnable checkout to validate the new concurrency regression against the complete import graph.
-- The focused production runtime/API suite should be rerun once repository execution is available because this change intentionally alters lock timing.
+- `runtime.tests.test_api_concurrency` and `runtime.tests.test_anchored_execution_safety` still need execution from a runnable checkout to validate the complete import graph and timing assertions.
+- The focused production runtime/API/readiness suite should be rerun once repository execution is available because the previous runtime change intentionally altered lock timing.
 - The historical full suite still needs systematic triage after repository execution is available.
 - The exact Cloud Storage object Policy Troubleshooter tuple still needs one authorized disposable-project acceptance run.
 - `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
 - `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real Vertex AI acceptance run after the doctor passes.
-- The synchronous `/v1/execute` request can still occupy one HTTP worker until recovery verification completes; other requests are now intended to remain responsive, but a future production load pass should determine whether an explicit operation-status resource is justified.
+- `/v1/execute` still occupies one HTTP worker for the full provider + recovery-verification duration. The new regression protects parallel operator visibility, but high-concurrency production capacity has not yet been load-tested.
 
 ## Single best next step
 
-**Run `runtime.tests.test_anchored_execution_safety` plus the focused execution-safety/API/readiness tests from a runnable checkout. If those pass, add an API-level concurrency regression using `ThreadingHTTPServer`: hold `/v1/execute` inside a blocking remediation fake and prove authenticated `/v1/incident`, `/readyz`, and `/metrics` remain responsive and expose the bounded `dispatching` state while all competing mutation endpoints fail closed.**
+**Move to operator/runtime resilience: add bounded execution-duration observability without exposing provider details. Export fixed-cardinality metrics for active remediation execution and elapsed execution age, plus a readiness warning/fail-closed threshold for an execution that exceeds its configured maximum recovery window. Cover the behavior with deterministic clock-driven tests so a wedged provider cannot remain silently `dispatching` forever.**
 
 ## Retained production hardening
 
@@ -114,7 +89,8 @@ No external Grafana instance, MCP server, Google Cloud project, Cloud Run servic
 - Readiness validates local activation/pin trust before spawning/querying Grafana MCP.
 - Deployment doctor validates required APIs, secrets/access, Cloud Logging permissions, checkpoint storage permissions, conditional Vertex prediction permission, image availability, live Cloud Run region availability, and deployment serialization boundaries; offline validation can never report deploy-ready.
 - Deployment-doctor gcloud timeouts, OS invocation failures, and decode failures fail closed through sanitized nonzero results and retain probe-specific operational diagnostics.
-- Production remediation now releases the lifecycle lock across provider contact and Grafana recovery polling while blocking competing mutations with an explicit in-flight guard.
+- Production remediation releases the lifecycle lock across provider contact and Grafana recovery polling while blocking competing mutations with an explicit in-flight guard.
+- HTTP concurrency coverage now protects incident/readiness/metrics visibility and single-dispatch semantics while remediation is active.
 - Gemini acceptance smoke defaults to zero model calls and requires explicit `--execute`.
 - Standard Cloud Run deployment keeps production remediation disabled.
 
