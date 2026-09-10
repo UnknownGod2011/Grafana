@@ -11,89 +11,74 @@ Core invariants:
 - Remediation success is never inferred from an action response; fresh Grafana telemetry must prove recovery.
 - Authenticated checkpoints and audit integrity fail closed.
 
-## Run log — 2026-09-10 — live Cloud Run region availability
+## Run log — 2026-09-10 — end-to-end fake-gcloud deployment doctor
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work, then inspected the current repository root and the deployment boundary most relevant to the previous handoff:
+Read `progress.md` completely before choosing work. Inspected the repository root and the current Google Cloud deployment-preflight boundary, especially:
 - `scripts/gcp_deploy_doctor.py`
-- `scripts/gcp_identifiers.py`
 - `runtime/tests/test_gcp_deploy_doctor.py`
-- recent deployment-doctor commits on `main`
+- current repository root/documentation layout
 
-The previous handoff identified the highest-value next gap correctly: `REGION` had local grammar validation but no live provider availability check, so a syntactically valid but unsupported/stale Cloud Run region could still survive preflight until deployment.
-
-### Research / attribution
-
-Verified against current official Google Cloud CLI documentation that `gcloud run regions list` is the supported read-only command for listing available Cloud Run fully managed regions. The doctor now uses that provider result rather than a repository-maintained allowlist.
-
-Official references consulted:
-- https://docs.cloud.google.com/sdk/gcloud/reference/run/regions/list
-- https://docs.cloud.google.com/sdk/gcloud/reference/run/regions
+The previous handoff identified the right next gap: the live Cloud Run region check had unit coverage, but there was no subprocess-level proof that the complete deployment doctor could traverse its real `gcloud` command sequence and derive `ready_to_deploy` correctly without real Google Cloud credentials.
 
 ### Exact changes made
 
-1. Added a live Cloud Run region availability check to `scripts/gcp_deploy_doctor.py`.
-   - Executes `gcloud run regions list --project=<PROJECT_ID> --format=value(locationId)` only in the live/non-offline preflight path.
-   - Parses the provider-reported region catalog without a static allowlist.
-   - Reports `cloud_run_region_available=ok` only when the configured `REGION` is present.
-   - Fails closed when the command fails, returns an empty/unusable catalog, or omits the configured region.
-   - Adds an actionable next step directing the operator to the live `gcloud run regions list` output.
+1. Added `runtime/tests/test_gcp_deploy_doctor_fake_gcloud.py`.
+   - Runs the actual `scripts/gcp_deploy_doctor.py --json` entrypoint as a subprocess.
+   - Installs a temporary executable `gcloud` shim at the front of `PATH`; no real Google Cloud CLI, account, project, API, IAM policy, secret, bucket, image, or Cloud Run service is required.
+   - Records every fake-gcloud invocation as JSONL so command families can be asserted after the doctor exits.
+   - Simulates active authentication, project-number resolution, Cloud Run region catalog, enabled APIs, secret existence, IAM Policy Troubleshooter, checkpoint bucket existence, and Artifact Registry image existence.
 
-   Commit:
-   - `b4171deef7820795f8369457fa5e88f4caa3711b` — verify live Cloud Run region availability in deploy doctor
+2. Added behavioral coverage proving:
+   - a supported Cloud Run region can complete the full read-only preflight and produce `ready_to_deploy=true` when every simulated dependency and permission is healthy;
+   - an unsupported region forces exit code 2 and `ready_to_deploy=false` while the doctor still collects the remaining API/storage/IAM/image evidence instead of prematurely hiding additional failures;
+   - an empty provider region catalog fails closed;
+   - denying exactly `storage.objects.delete` keeps deploy readiness false while `storage.objects.get` and `storage.objects.create` remain independently successful;
+   - the complete healthy non-Gemini path issues 10 Policy Troubleshooter calls: five Secret Manager permissions, three checkpoint-object permissions, and two Cloud Logging permissions.
 
-2. Expanded `runtime/tests/test_gcp_deploy_doctor.py`.
-   - Added coverage for the exact read-only command shape.
-   - Added supported-region success coverage.
-   - Added fail-closed cases for unsupported region, empty provider output, and command failure.
-   - Added next-step coverage for live region selection.
-   - Fixed the test module loader so `scripts/gcp_identifiers.py` is importable when the doctor is loaded directly with `importlib`.
+3. Simplified the fake Policy Troubleshooter dispatcher after re-reading the committed harness so its command match is explicit and maintainable.
 
-3. Removed a stale regression expectation in `runtime/tests/test_gcp_deploy_doctor.py` that still treated non-Artifact-Registry images as optional warnings. The production doctor now intentionally rejects those images, so the test now expects a required failure and exit code 2. This aligns the older test file with the centralized identifier contract already implemented in previous runs.
-
-   Commit:
-   - `3852c551c69ec6d4c71cd159e2e74079b76c23eb` — cover live Cloud Run region preflight
+Commits:
+- `7f53b231027ab8f4581f344d5e8ae9e2b108e620` — initial end-to-end fake-gcloud deployment-doctor harness
+- `97a288b4ac3fcfbdf5e98c81099944e6b39e48a6` — clean imports and simplify fake Policy Troubleshooter dispatch
 
 ### Tests / checks / results
 
-Attempted a clean repository checkout first so the exact committed tests could run. The execution container still cannot resolve `github.com`; `git clone` failed with `Could not resolve host: github.com`. Therefore the exact committed unittest suite was not executed and no green-suite claim is made.
+Attempted the exact focused suite from a clean checkout:
 
-Performed additional validation despite that transient environment limitation:
-- inspected both committed diffs through the GitHub API after each write;
-- re-fetched the updated region-check section from `main` and verified the live check is wired into `_gcloud_checks()` and `_next_steps()`;
-- ran a credential-free local parser micro-harness covering supported, unsupported, empty-output, and command-failure cases: **4/4 passed**.
+`python -m unittest runtime.tests.test_gcp_deploy_doctor_fake_gcloud runtime.tests.test_gcp_deploy_doctor`
 
-No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud project, Cloud Run service, bucket/object, IAM policy, Secret Manager payload, Gemini endpoint, or remediation endpoint was modified.
+The execution container still cannot resolve `github.com`; `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` failed with `Could not resolve host: github.com` before tests could execute. Therefore no committed-suite green claim is made.
+
+Additional validation performed:
+- re-fetched the newly committed harness through the GitHub connector and reviewed the final source;
+- verified the fake command dispatcher covers every non-Gemini `gcloud` command family currently issued by `_gcloud_checks()`;
+- verified the expected Policy Troubleshooter cardinality against the current doctor contract: 5 secret + 3 storage + 2 logging = 10;
+- kept the test isolated to temporary files and subprocess environment overrides.
+
+No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud project, Cloud Run service, bucket/object, IAM policy, Secret Manager payload, Vertex/Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. Cloud Run region availability is a live provider fact, not a static repository constant.
-2. Region-catalog lookup is read-only and belongs only to live preflight; `--offline` remains fully credential/network independent.
-3. A failure to obtain a usable provider region catalog is a required failure. The doctor must not guess deployability from local region syntax alone.
-4. Existing deployment image policy remains fail-closed: production `IMAGE_URL` must be an explicitly tagged or sha256-pinned Artifact Registry image.
-5. Direct test-module loading now explicitly exposes the `scripts/` directory to Python imports, avoiding a test-loader-only failure unrelated to product behavior.
+1. Live-provider deployment preflight should have both unit-level checks and a credential-free subprocess contract test.
+2. Unsupported region availability is a required failure, but the doctor should continue collecting other read-only deployment evidence so operators receive one useful diagnostic report rather than serial one-error-at-a-time failures.
+3. Effective IAM permissions remain tested independently; losing one checkpoint permission must not blur the state of the other permissions.
+4. The fake-gcloud harness is intentionally POSIX-only for now because the production deploy/operator path is shell-oriented; Windows continues to have unit-level Python doctor coverage.
+5. No CI was enabled for this harness to avoid unnecessary Actions usage; it is designed for local/manual focused execution.
 
 ### Current blockers / unknowns
 
-- The exact deployment-doctor test suite still needs execution from a runnable checkout.
-- The full historical suite still needs systematic triage after repository execution is available; one stale doctor expectation was corrected in this run.
+- The exact new fake-gcloud suite still needs execution from a runnable checkout because the current execution container cannot resolve GitHub.
+- The full historical suite still needs systematic triage after repository execution is available.
 - The exact Cloud Storage object Policy Troubleshooter tuple still needs one authorized disposable-project acceptance run.
 - `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
 - `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real Vertex AI acceptance run after the doctor passes.
-- The live region check currently trusts `gcloud run regions list`'s `locationId` value output; this matches current CLI behavior/documentation conventions but still needs an exact fake-`gcloud` end-to-end doctor test from a runnable checkout.
+- `_run_gcloud()` currently relies directly on `subprocess.run(..., timeout=30)`. A true CLI hang/timeout or executable race can raise instead of being converted into a structured failed check; this is now the clearest fail-closed robustness gap in the deployment doctor.
 
 ## Single best next step
 
-**Build an end-to-end fake-`gcloud` harness for live `gcp_deploy_doctor.py --json` that exercises the full read-only command sequence, proves an unsupported/empty Cloud Run region catalog forces `ready_to_deploy=false`, and proves a supported region can progress to the remaining IAM/storage/image checks without any real GCP credentials. Then run that harness plus the focused doctor/identifier/deploy-shell suites when checkout execution is available.**
-
-## Previous run — 2026-09-10 — deploy doctor identifier parity
-
-- Refactored `scripts/gcp_deploy_doctor.py` to share `scripts/gcp_identifiers.py` for `PROJECT_ID`, `REGION`, `SERVICE_NAME`, and `IMAGE_URL`.
-- Preserved legitimate cross-project Artifact Registry deployment support.
-- Expanded serialization/identifier parity regression coverage.
-- Commits: `e1324166a3034331a05287b3abe4a212ae65e1cc`, `26163bd9e7b38e2aa0ae1652b2d97e21c82ca831`, `9e8947f06a6a6d6e7d8add7b604f2b819cfdc912`.
-- Exact tests were blocked by the same container DNS failure; no external resources or Actions were touched.
+**Harden `scripts/gcp_deploy_doctor.py::_run_gcloud()` so `subprocess.TimeoutExpired` and executable/OS invocation failures become sanitized nonzero results rather than crashing the doctor, then extend the fake-gcloud/subprocess coverage to prove command timeout/failure yields structured `ready_to_deploy=false` JSON without leaking credentials or stack traces.**
 
 ## Retained production hardening
 
