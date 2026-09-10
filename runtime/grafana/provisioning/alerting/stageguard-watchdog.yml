@@ -60,3 +60,58 @@ groups:
         labels:
           component: stageguard-runtime
           severity: critical
+
+      - uid: stageguard-runtime-telemetry-stale
+        title: StageGuard runtime telemetry stale
+        condition: B
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: stageguard-prometheus
+            model:
+              expr: max(time() - timestamp(stageguard_remediation_execution_deadline_exceeded)) or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: -100
+            model:
+              conditions:
+                - evaluator:
+                    params: [45]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: -100
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        dashboardUid: stageguard-runtime-safety
+        panelId: 5
+        noDataState: Alerting
+        execErrState: Error
+        for: 30s
+        annotations:
+          summary: StageGuard runtime watchdog telemetry is stale or missing
+          description: The watchdog evidence plane has not delivered a fresh deadline sample within 45 seconds. Treat watchdog health as unknown until Prometheus ingestion is restored; do not infer remediation safety from an old zero value.
+        labels:
+          component: stageguard-runtime
+          severity: warning
