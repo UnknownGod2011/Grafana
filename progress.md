@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, and authenticated Cloud Run metrics ingestion.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, and explicit stale-telemetry detection.
 
 Core invariants remain unchanged:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -10,105 +10,119 @@ Core invariants remain unchanged:
 - Approval is exact-revision-bound and single-use.
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove it.
 - Durable checkpoint/audit integrity failures fail closed.
+- A healthy watchdog value is trustworthy only while the observability path is delivering fresh samples.
 
-## Run log — 2026-09-11 — watchdog alert recovery acceptance
+## Run log — 2026-09-11 — watchdog telemetry freshness
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/watchdog_observability_acceptance.py`, `runtime/tests/test_grafana_runtime_observability.py`, `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml`, and `docs/runtime-metrics-ingestion.md`.
+Read `progress.md` completely first. Then inspected the current runtime tree and specifically:
+- `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml`
+- `runtime/grafana/dashboards/stageguard-runtime.json`
+- `runtime/tests/test_grafana_runtime_observability.py`
+- `runtime/prometheus.yml`
+- `runtime/watchdog_metrics_fixture.py`
+- `docs/runtime-metrics-ingestion.md`
 
-The previous run's strongest unblocked gap was confirmed: the local observability acceptance utility proved `idle -> overdue -> alert firing`, but returned the fixture to idle only as cleanup. It did not prove that Prometheus ingested recovery or that Grafana actually cleared the StageGuard watchdog alert. A stuck/latched alert could therefore pass the rehearsal.
+The prior run's next production gap was confirmed: StageGuard could display `stageguard_remediation_execution_deadline_exceeded=0` even when that sample was old because the scrape/bridge path had stopped delivering telemetry. The watchdog value and telemetry freshness therefore needed to become separate observable conditions.
 
 ### Research / attribution
 
-Checked current official Grafana material before changing the acceptance contract:
-- Grafana — View active notifications: https://grafana.com/docs/grafana/latest/alerting/monitor-status/view-active-notifications/
-- Grafana — Configure notifications / Alertmanager architecture: https://grafana.com/docs/grafana/latest/alerting/configure-notifications/
-- Grafana Labs 2026 note confirming the Alertmanager API remains available while the legacy UI changes: https://grafana.com/whats-new/2026-05-15-alerting--the-legacy-alertmanager-ui-is-no-longer-available-in-grafana-cloud/
+Checked current official documentation before selecting the PromQL contract:
+- Prometheus query functions (`time`, `timestamp`, `absent`): https://prometheus.io/docs/prometheus/latest/querying/functions/
+- Grafana Prometheus alerting guidance, including missing/stale series patterns: https://grafana.com/docs/grafana/latest/datasources/prometheus/alerting/
 
-The acceptance tool continues to use the Grafana Alertmanager v2 active-alert endpoint already used by the project. No third-party code was copied.
+Prometheus documents `time()` as query evaluation time and `timestamp()` as each sample's timestamp. Grafana documents `absent()` / `absent_over_time()` patterns for metrics that stop arriving. No third-party implementation code was copied.
 
 ### Exact changes made
 
-#### Full watchdog alert lifecycle acceptance
+#### Separate stale-evidence alert
 
-Updated `runtime/watchdog_observability_acceptance.py` so a PASS now requires the complete bounded lifecycle:
+Updated `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml` with a second Grafana-managed rule:
 
-1. set fixture `idle` and observe `deadline_exceeded=0` in Prometheus;
-2. set fixture `overdue` and observe `deadline_exceeded=1`;
-3. observe the StageGuard watchdog alert as active in Grafana;
-4. explicitly set fixture back to `idle`;
-5. observe `deadline_exceeded=0` again in Prometheus;
-6. require the StageGuard watchdog alert to disappear from a valid Grafana active-alert response before declaring PASS.
+`stageguard-runtime-telemetry-stale`
 
-Added `--resolve-timeout` with a bounded 35-second default. The existing `finally` cleanup remains, so failure anywhere still attempts to return the fixture to idle.
+Its PromQL is:
 
-#### Fail-closed Grafana response parser
+```promql
+max(time() - timestamp(stageguard_remediation_execution_deadline_exceeded))
+or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)
+```
 
-Added a testable `grafana_alert_active_from_payload()` boundary:
-- only a JSON list is accepted as an active-alert response;
-- each alert must be an object;
-- `labels` and `annotations` must be objects when present;
-- the StageGuard alert can be matched by the committed alert title or committed summary annotation;
-- unrelated active alerts do not prevent StageGuard from being considered resolved;
-- malformed/unexpected API shapes raise instead of being interpreted as `False`/resolved.
+Behavior:
+- sample age greater than 45 seconds is stale;
+- the condition must persist for 30 seconds before warning;
+- a completely absent series maps to a deliberately huge sample age so missing telemetry follows the same stale-evidence path;
+- the alert is `warning`, separate from the `critical` remediation-deadline alert;
+- the description explicitly forbids inferring remediation safety from an old zero value;
+- no remediation, notification destination, credential, or provider detail is introduced.
 
-This matters specifically on the recovery edge: an HTML error body, object-shaped API response, or malformed alert entry must never create a false recovery PASS.
+The existing `stageguard-remediation-deadline` rule is unchanged semantically and still uses `NoData` instead of pretending missing data is a deadline breach.
 
-#### Regression tests
+#### Grafana freshness panel
 
-Added `runtime/tests/test_watchdog_observability_acceptance.py` covering:
-- title-based active alert recognition;
-- summary-based recognition;
-- unrelated active alerts;
-- empty active-alert list as resolved;
-- fail-closed handling for invalid root response shapes;
-- fail-closed handling for malformed alert entries;
-- rejection of remote, credentialed, path-bearing, query-bearing, and HTTPS endpoints by the local acceptance loopback guard;
-- acceptance of `127.0.0.1` and `localhost` development origins.
+Updated `runtime/grafana/dashboards/stageguard-runtime.json` to dashboard version 2 and added panel ID 5, `Watchdog telemetry freshness`.
+
+The panel displays the age of the newest watchdog deadline sample using the same PromQL as the stale alert, with visual thresholds at 30 seconds and 45 seconds. This means operators can distinguish:
+- fresh `deadline_exceeded=0` -> watchdog is healthy and evidence is current;
+- fresh `deadline_exceeded=1` -> remediation execution deadline breached;
+- stale/missing sample -> watchdog health is unknown regardless of the last stored value.
+
+#### Regression coverage
+
+Expanded `runtime/tests/test_grafana_runtime_observability.py` to assert:
+- the freshness expression is present in the dashboard;
+- panel ID 5 is the dedicated freshness panel;
+- the stale rule has its own stable UID;
+- the stale threshold is 45 seconds with a 30-second pending duration;
+- the stale alert is bound to panel 5 and severity `warning`;
+- the query contains both `timestamp(...)` and `absent(...)` fail-safe branches;
+- the original deadline rule still treats missing telemetry as `NoData` rather than conflating it with a real execution breach;
+- alert provisioning still contains no notification destinations or secrets.
 
 #### Documentation
 
-Updated `docs/runtime-metrics-ingestion.md` to document the full healthy -> firing -> resolved acceptance lifecycle, the fail-closed response-shape rule, the bounded resolution timeout, and the fact that unrelated active Grafana alerts do not block this rule-specific recovery check.
+Updated `docs/runtime-metrics-ingestion.md` with a dedicated freshness section explaining the two independent safety conditions, the exact PromQL, thresholds, absent-series behavior, and current official Prometheus/Grafana references.
 
 ### Commits this run
 
-- `8efe14640e4529de0f04efc2fa6915809fa57faa` — verify watchdog alert recovery in acceptance rehearsal
-- `a377ba2ea8ca150f7bce0eaf7e9056c1b57521c9` — test watchdog acceptance alert lifecycle parsing
-- `a12d65d461525bdcda06a3e4c1b70c630a2d6925` — document watchdog alert resolution acceptance
+- `0aa30ffd891278dadd35c23320451c4971dcd2eb` — alert on stale StageGuard watchdog telemetry
+- `91eca870c74635c7842e9465fabcee93502cce14` — show watchdog telemetry freshness in Grafana
+- `330658ebce26cfe9eb9da2a8ec9839d0c78a71eb` — test watchdog telemetry freshness observability
+- `5a80c97da6885bdfe1dd4163e96c0d51b9a0e280` — document watchdog telemetry freshness contract
 
 ### Tests / checks / results
 
-- Re-fetched the committed acceptance script and manually inspected the final recovery sequence and parser boundary.
-- Ran credential-free parser micro-checks locally for empty/resolved, title match, summary match, unrelated alerts, invalid root shapes, malformed entries: PASS.
-- The repository checkout/Docker environment is still unavailable to this run, so the exact committed unittest module and Docker Compose acceptance could not be executed end-to-end. No green-suite claim is made.
+- Re-fetched and inspected the committed Grafana alerting YAML after the write: the original deadline rule and new stale-evidence rule are both present with separate UIDs, severities, panel bindings, and meanings.
+- Re-fetched and inspected the committed dashboard JSON after the write: panel ID 5 is present, uses the provisioned Prometheus datasource, and carries the exact freshness expression.
+- Attempted a clean checkout plus `python -m unittest runtime.tests.test_grafana_runtime_observability`; the execution environment still failed before checkout because `github.com` DNS resolution is unavailable. Therefore the exact committed unittest is not claimed green.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
 - No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Recovery is an observable contract, not cleanup: the acceptance rehearsal must prove both Prometheus recovery ingestion and Grafana alert resolution.
-2. A malformed Grafana active-alert response fails closed and cannot count as resolution.
-3. Alert resolution is scoped to the StageGuard watchdog rule; unrelated alerts may legitimately remain active.
-4. The acceptance utility remains loopback-only because it uses local-development Grafana credentials.
-5. No CI is triggered merely to obtain test signal while direct repository execution remains unavailable.
+1. Deadline state and evidence freshness are intentionally separate alerts. Missing telemetry must not be mislabeled as a confirmed remediation deadline breach.
+2. Freshness is derived from Prometheus sample timestamps instead of adding a second runtime-generated clock metric, keeping the application/runtime API surface smaller and measuring the actual ingestion path.
+3. A missing series is treated as stale evidence rather than healthy or silently `NoData` for the freshness rule.
+4. The 45-second threshold is deliberately much larger than the local 2-second scrape interval, leaving room for transient scrape jitter while still surfacing a broken evidence path promptly.
+5. The alert remains observational only; Grafana continues to have no remediation credentials or action authority.
 
 ### Blockers / unknowns
 
-- The new exact unittest module still needs execution from a runnable checkout.
-- The Docker acceptance rehearsal still needs a real local stack run against the currently pinned Grafana image to verify firing and resolution timing/API shape together.
+- The focused observability unittest still needs execution from a runnable checkout.
+- The Docker rehearsal still needs to exercise an intentionally interrupted watchdog scrape so the new stale alert can be proven firing and resolving against the pinned Grafana/Prometheus images.
 - The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity.
 - Cloud Storage Policy Troubleshooter and live Gemini/Vertex acceptance still require authorized disposable-project credentials.
 
 ## Single best next step
 
-**On the first runnable Docker checkout, run the focused observability unit tests and `python runtime/watchdog_observability_acceptance.py` against the default Compose stack. If that passes, move to the next production gap: add scrape-freshness/staleness observability so StageGuard can distinguish a healthy `deadline_exceeded=0` sample from a metrics pipeline that has silently stopped delivering fresh runtime telemetry.**
+**Extend the credential-free watchdog fixture and acceptance rehearsal with a bounded `telemetry-offline` mode that makes `/metrics` unavailable without changing remediation state. Prove end-to-end that Prometheus sample age crosses the freshness threshold, Grafana fires `stageguard-runtime-telemetry-stale`, the critical deadline alert does not falsely fire, and both telemetry freshness and the warning alert recover after scraping resumes.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog fixture/acceptance path.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog freshness acceptance path.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
