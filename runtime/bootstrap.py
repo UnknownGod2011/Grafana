@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Callable
 
 from activation import ActivationRecord, load_activation_record
-from anchored_execution_safety import AnchoredExecutionSafeIncidentService
+from anchored_execution_safety import (
+    DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS,
+    AnchoredExecutionSafeIncidentService,
+)
 from anchored_incident_service import AnchoredJsonlAuditLog
 from api import _is_loopback, make_server
 from audit_anchor import DEFAULT_ANCHOR_INTERVAL, MAX_VERIFICATION_SUFFIX_EVENTS
@@ -185,6 +188,7 @@ def build_runtime(
     checkpoint_object: str = "stageguard/incident-checkpoint.json",
     audit_integrity_policy: str = "allow_unbound_legacy",
     audit_anchor_interval: int = DEFAULT_ANCHOR_INTERVAL,
+    remediation_execution_max_seconds: float = DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS,
     metrics_factory: Callable[[], McpPrometheusMetricClient] = McpPrometheusMetricClient,
     logs_factory: Callable[[], McpLokiLogClient] = McpLokiLogClient,
     remediation_factory: Callable[[TelemetryProfile], RemediationClient] | None = None,
@@ -259,6 +263,7 @@ def build_runtime(
             logs=logs, log_activation_record=log_activation, commander=commander,
             activation_now_unix=activation_now_unix,
             audit_anchor_interval=anchor_interval,
+            execution_max_seconds=remediation_execution_max_seconds,
         )
         setattr(service, "_audit_integrity_policy", policy)
         server = make_server(service, host, port, identity_provider=identity)
@@ -297,6 +302,12 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_ANCHOR_INTERVAL,
         help=f"authenticated audit events between anchor rolls (1-{MAX_VERIFICATION_SUFFIX_EVENTS})",
     )
+    parser.add_argument(
+        "--remediation-execution-max-seconds",
+        type=float,
+        default=DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS,
+        help="maximum active remediation/recovery duration before readiness fails closed",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9110)
     parser.add_argument("--identity-mode", choices=("auto", "local", "bearer", "iap"), default="auto")
@@ -332,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_object=args.checkpoint_object,
             audit_integrity_policy=args.audit_integrity_policy,
             audit_anchor_interval=args.audit_anchor_interval,
+            remediation_execution_max_seconds=args.remediation_execution_max_seconds,
             host=args.host,
             port=args.port,
             identity_mode=args.identity_mode,
