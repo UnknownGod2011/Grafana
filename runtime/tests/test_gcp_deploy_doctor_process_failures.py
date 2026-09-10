@@ -85,6 +85,18 @@ class GcloudRunnerFailureTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "gcloud command could not be executed")
 
+    def test_process_failure_detail_only_classifies_internal_sentinels(self) -> None:
+        self.assertEqual(
+            self.doctor._process_failure_detail(self.doctor.GCLOUD_TIMEOUT_EXIT_CODE, "checking active authentication"),
+            "gcloud process timed out while checking active authentication",
+        )
+        self.assertEqual(
+            self.doctor._process_failure_detail(self.doctor.GCLOUD_EXECUTION_EXIT_CODE, "checking enabled APIs"),
+            "gcloud process could not be executed while checking enabled APIs",
+        )
+        self.assertIsNone(self.doctor._process_failure_detail(1, "checking enabled APIs"))
+        self.assertIsNone(self.doctor._process_failure_detail(125, "checking enabled APIs"))
+
     def test_gcloud_checks_turn_runner_failure_into_required_check(self) -> None:
         with mock.patch.object(self.doctor.shutil, "which", return_value="/usr/bin/gcloud"), mock.patch.object(
             self.doctor,
@@ -96,7 +108,78 @@ class GcloudRunnerFailureTests(unittest.TestCase):
         by_name = {check.name: check for check in checks}
         self.assertEqual(by_name["gcloud"].status, "ok")
         self.assertEqual(by_name["gcloud_auth"].status, "failed")
+        self.assertEqual(by_name["gcloud_auth"].detail, "gcloud process timed out while checking active authentication")
         self.assertTrue(by_name["gcloud_auth"].required)
+
+    def test_region_timeout_keeps_region_check_identity(self) -> None:
+        with mock.patch.object(
+            self.doctor,
+            "_run_gcloud",
+            return_value=(self.doctor.GCLOUD_TIMEOUT_EXIT_CODE, "", "gcloud command timed out"),
+        ):
+            check = self.doctor._cloud_run_region_check("stageguard-test", "us-central1")
+
+        self.assertEqual(check.name, "cloud_run_region_available")
+        self.assertEqual(check.status, "failed")
+        self.assertEqual(check.detail, "gcloud process timed out while checking Cloud Run region availability")
+
+    def test_iam_execution_failure_keeps_requested_check_identity(self) -> None:
+        with mock.patch.object(
+            self.doctor,
+            "_run_gcloud",
+            return_value=(self.doctor.GCLOUD_EXECUTION_EXIT_CODE, "", "gcloud command could not be executed"),
+        ):
+            check = self.doctor._troubleshoot_permission(
+                "//cloudresourcemanager.googleapis.com/projects/stageguard-test",
+                "stageguard@stageguard-test.iam.gserviceaccount.com",
+                "logging.logEntries.list",
+                "logging_access:list",
+                "ok",
+                "denied",
+                "unknown",
+            )
+
+        self.assertEqual(check.name, "logging_access:list")
+        self.assertEqual(check.status, "failed")
+        self.assertEqual(check.detail, "gcloud process could not be executed while checking effective IAM access")
+
+    def test_late_process_failures_remain_probe_specific_and_sanitized(self) -> None:
+        def fake_run(args: list[str]) -> tuple[int, str, str]:
+            if args[:2] == ["auth", "list"]:
+                return 0, "operator@example.com", ""
+            if args[:2] == ["projects", "describe"]:
+                return 0, VALID_ENV["PROJECT_NUMBER"], ""
+            if args[:3] == ["run", "regions", "list"]:
+                return self.doctor.GCLOUD_TIMEOUT_EXIT_CODE, "", "sensitive region command"
+            if args[:2] == ["services", "list"]:
+                return self.doctor.GCLOUD_EXECUTION_EXIT_CODE, "", "sensitive API command"
+            if args[:2] == ["secrets", "describe"]:
+                return self.doctor.GCLOUD_EXECUTION_EXIT_CODE, "", "sensitive secret command"
+            if args[:3] == ["storage", "buckets", "describe"]:
+                return self.doctor.GCLOUD_TIMEOUT_EXIT_CODE, "", "sensitive bucket command"
+            if args[:3] == ["policy-intelligence", "troubleshoot-policy", "iam"]:
+                return self.doctor.GCLOUD_EXECUTION_EXIT_CODE, "", "sensitive IAM command"
+            if args[:4] == ["artifacts", "docker", "images", "describe"]:
+                return self.doctor.GCLOUD_TIMEOUT_EXIT_CODE, "", "sensitive image command"
+            raise AssertionError(f"unexpected fake gcloud args: {args!r}")
+
+        with mock.patch.dict(os.environ, VALID_ENV, clear=True), mock.patch.object(
+            self.doctor.shutil, "which", return_value="/usr/bin/gcloud"
+        ), mock.patch.object(self.doctor, "_run_gcloud", side_effect=fake_run):
+            checks = self.doctor._gcloud_checks()
+
+        by_name = {check.name: check for check in checks}
+        self.assertEqual(by_name["cloud_run_region_available"].detail, "gcloud process timed out while checking Cloud Run region availability")
+        self.assertEqual(by_name["apis"].detail, "gcloud process could not be executed while checking enabled APIs")
+        self.assertEqual(by_name["secret:TELEMETRY_SECRET"].detail, "gcloud process could not be executed while checking Secret Manager resource existence")
+        self.assertEqual(by_name["checkpoint_bucket_exists"].detail, "gcloud process timed out while checking checkpoint bucket existence")
+        self.assertEqual(by_name["logging_access:create"].detail, "gcloud process could not be executed while checking effective IAM access")
+        self.assertEqual(by_name["logging_access:list"].detail, "gcloud process could not be executed while checking effective IAM access")
+        self.assertEqual(by_name["image_exists"].detail, "gcloud process timed out while checking Artifact Registry image existence")
+        combined = "\n".join(check.detail for check in checks)
+        self.assertNotIn("sensitive", combined)
+        self.assertNotIn(VALID_ENV["TELEMETRY_SECRET"], combined)
+        self.assertNotIn(VALID_ENV["CHECKPOINT_BUCKET"], combined)
 
 
 @unittest.skipIf(os.name == "nt", "fake gcloud executable harness currently targets POSIX deployment environments")
@@ -133,6 +216,7 @@ raise SystemExit(125)
         checks = {str(check["name"]): check for check in payload["checks"]}
         self.assertIs(payload["ready_to_deploy"], False)
         self.assertEqual(checks["gcloud_auth"]["status"], "failed")
+        self.assertEqual(checks["gcloud_auth"]["detail"], "no active gcloud account; run gcloud auth login or use an authorized environment")
         self.assertNotIn("synthetic gcloud failure", result.stdout)
         self.assertNotIn("Traceback", result.stdout)
 
