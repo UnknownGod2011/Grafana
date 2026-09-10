@@ -23,47 +23,67 @@ class WatchdogObservabilityAcceptanceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = _load_module()
 
-    def test_alert_title_match_is_active(self) -> None:
-        payload = [
-            {
-                "labels": {"alertname": self.module.ALERT_TITLE},
-                "annotations": {},
-            }
-        ]
-        self.assertTrue(self.module.grafana_alert_active_from_payload(payload))
+    def _active(self, payload, *, title=None, summary=None) -> bool:
+        return self.module.grafana_alert_active_from_payload(
+            payload,
+            title=title or self.module.DEADLINE_ALERT_TITLE,
+            summary=summary or self.module.DEADLINE_ALERT_SUMMARY,
+        )
 
-    def test_summary_match_is_active(self) -> None:
-        payload = [
-            {
-                "labels": {},
-                "annotations": {"summary": self.module.ALERT_SUMMARY},
-            }
-        ]
-        self.assertTrue(self.module.grafana_alert_active_from_payload(payload))
+    def test_deadline_alert_title_match_is_active(self) -> None:
+        payload = [{"labels": {"alertname": self.module.DEADLINE_ALERT_TITLE}, "annotations": {}}]
+        self.assertTrue(self._active(payload))
+
+    def test_deadline_summary_match_is_active(self) -> None:
+        payload = [{"labels": {}, "annotations": {"summary": self.module.DEADLINE_ALERT_SUMMARY}}]
+        self.assertTrue(self._active(payload))
+
+    def test_stale_alert_matches_only_stale_identity(self) -> None:
+        payload = [{"labels": {"alertname": self.module.STALE_ALERT_TITLE}, "annotations": {}}]
+        self.assertTrue(
+            self._active(
+                payload,
+                title=self.module.STALE_ALERT_TITLE,
+                summary=self.module.STALE_ALERT_SUMMARY,
+            )
+        )
+        self.assertFalse(self._active(payload))
 
     def test_unrelated_active_alert_does_not_block_resolution(self) -> None:
-        payload = [
-            {
-                "labels": {"alertname": "Different alert"},
-                "annotations": {"summary": "Different summary"},
-            }
-        ]
-        self.assertFalse(self.module.grafana_alert_active_from_payload(payload))
+        payload = [{"labels": {"alertname": "Different alert"}, "annotations": {"summary": "Different summary"}}]
+        self.assertFalse(self._active(payload))
 
     def test_empty_active_alert_list_is_resolved(self) -> None:
-        self.assertFalse(self.module.grafana_alert_active_from_payload([]))
+        self.assertFalse(self._active([]))
 
     def test_unexpected_root_shape_fails_closed(self) -> None:
         for payload in ({}, None, "[]", 1):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
-                    self.module.grafana_alert_active_from_payload(payload)
+                    self._active(payload)
 
     def test_malformed_alert_entry_fails_closed(self) -> None:
         for payload in ([None], [{"labels": [], "annotations": {}}], [{"labels": {}, "annotations": []}]):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
-                    self.module.grafana_alert_active_from_payload(payload)
+                    self._active(payload)
+
+    def test_freshness_query_matches_provisioned_contract(self) -> None:
+        self.assertIn(
+            "timestamp(stageguard_remediation_execution_deadline_exceeded)",
+            self.module.FRESHNESS_QUERY,
+        )
+        self.assertIn(
+            "absent(stageguard_remediation_execution_deadline_exceeded)",
+            self.module.FRESHNESS_QUERY,
+        )
+        self.assertEqual(self.module.FRESHNESS_THRESHOLD_SECONDS, 45.0)
+
+    def test_set_telemetry_rejects_non_boolean_mode_before_http(self) -> None:
+        for value in (0, 1, "offline", None):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    self.module.set_telemetry("http://127.0.0.1:1", value)
 
     def test_loopback_guard_rejects_remote_or_credentialed_origins(self) -> None:
         rejected = (
