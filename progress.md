@@ -15,68 +15,60 @@ Core invariants remain unchanged:
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-10 — readiness local-trust short circuit
+## Run log — 2026-09-10 — cross-platform MCP launcher parsing
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work, then inspected the current repository tree and the production readiness path, especially:
+Read `progress.md` completely before choosing work, then inspected the current repository tree, recent commits, `runtime/readiness.py`, both official Grafana MCP runtime adapters, and the existing MCP adapter tests.
 
-- `runtime/readiness.py`
-- `runtime/tests/test_readiness.py`
-- the retained Google Cloud/Gemini acceptance work from the previous run
-
-The live Google Cloud acceptance step remains blocked because this runtime has no authorized disposable GCP environment, so this run worked on the highest-value unblocked production-safety issue instead.
+The requested full-suite execution remains blocked in this execution container because a clean checkout still fails DNS resolution for `github.com`. Rather than add speculative deployment work, this run inspected the runtime source for a concrete unblocked defect and found the same Windows command-line parsing class previously fixed in the onboarding doctor still existed in the production MCP adapters.
 
 ### Exact changes made
 
-Updated `runtime/readiness.py` so local activation/pin trust is now a hard prerequisite for any external Grafana MCP readiness probe:
+Added `runtime/command_line.py` with one shared `split_command()` helper for child-process launcher configuration:
 
-- metric and Loki activation records are still validated on every readiness request;
-- if either activation is missing or invalid, readiness immediately fails closed;
-- Prometheus/Loki MCP status is reported as `blocked` (or `missing` for an absent Loki client) rather than opening a new external connection;
-- no MCP process/connect call or Grafana `get_datasource` request is attempted when local trust cannot make the process traffic-eligible;
-- cached external success can no longer visually mask a newly failed activation state;
-- external probe attempt counters remain unchanged for locally blocked checks;
-- existing bounded TTL, stale-grace, failure-backoff, provider-error suppression, and single-flight behavior remain unchanged when local trust is valid.
+- POSIX launchers retain normal POSIX `shlex` parsing;
+- Windows launchers use non-POSIX parsing so unescaped path backslashes such as `C:\\Python312\\python.exe` are preserved;
+- one matching wrapper quote pair is removed from Windows tokens before argv is passed directly to subprocess launchers;
+- empty commands and malformed quoting fail closed with bounded configuration errors;
+- the platform choice is injectable for deterministic cross-platform tests.
 
-Added `runtime/tests/test_readiness_local_short_circuit.py` covering:
+Updated `runtime/mcp_metric_client.py` and `runtime/mcp_log_client.py` so `STAGEGUARD_MCP_COMMAND` is parsed through the shared helper instead of unconditional POSIX `shlex.split`.
 
-- invalid metric activation blocks both external evidence-plane probes;
-- invalid Loki activation blocks both external probes;
-- missing Loki dependency does not cause a Prometheus-only probe that cannot make readiness succeed;
-- valid local trust still probes both Grafana evidence planes;
-- blocked checks do not increment external-probe attempt metrics.
+Added `runtime/tests/test_command_line.py` covering:
 
-Updated `runtime/tests/test_readiness.py` to align the existing cached-success regression test with the stricter contract and to assert that failed/missing local trust returns `blocked` without additional MCP connects.
+- POSIX quoted arguments;
+- unquoted absolute Windows executable paths with backslashes;
+- quoted Windows executable paths containing spaces;
+- quoted ordinary Windows arguments;
+- empty launcher commands;
+- unbalanced quotes.
 
 Commits created this run:
 
-- `41cbdce8798e39c6b69f32153cca3f7c6b6d1faa` — short-circuit MCP readiness when local trust fails
-- `d4823f8e1b9c1a1f52832835e5d5d1060dcf2843` — readiness local-trust short-circuit tests
-- `30e858a2ce6ce42265a21285e17bd398b31d934b` — align existing readiness regression contract
+- `9e0cf0ff37d46e077835eaeb2f1991d910b70144` — add cross-platform MCP command parser
+- `ef4566c1171fd6cf20b2cfccb80bb7f1d6f66ad3` — wire metric MCP adapter to shared parser
+- `1635ac9c564dc581c93b88ebd0d0204612fa744d` — wire Loki MCP adapter to shared parser
+- `b3ae3dfaef1b68bf80d5f26d41e692c612f4c8f0` — add parser regression tests
 
 ### Tests / checks / results
 
-Attempted a clean executable verification with:
+Attempted a fresh checkout with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution container still returned `Could not resolve host: github.com`, so the committed unittest module could not be executed from the repository and no green-suite claim is made.
 
-`PYTHONPATH=runtime python -m unittest runtime.tests.test_readiness runtime.tests.test_readiness_local_short_circuit -v`
-
-A fresh checkout could not be created because the execution container still cannot resolve `github.com`, so the committed test modules could not be executed locally. No PASS claim is made for these new changes.
-
-Source-level verification through the GitHub connector confirmed the committed readiness logic and the aligned test expectations.
+The critical parser behavior was independently exercised with Python's stdlib `shlex`: POSIX mode demonstrably transforms `C:\\Python312\\python.exe` into a path with stripped backslashes, while the new Windows-mode parsing preserves the backslashes and quoted argument grouping. Source-level verification through the GitHub connector confirmed both runtime adapters now call the shared parser.
 
 No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud resource, IAM policy, secret, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. **Local trust precedes network readiness.** If activation/pin validation cannot pass, external Grafana access cannot make the process safe to receive traffic.
-2. **Blocked is distinct from failed.** `blocked` means the external check was intentionally not attempted because a prerequisite failed; `failed` remains reserved for attempted external checks that did not succeed.
-3. **Do not spend external capacity on impossible readiness.** This reduces unnecessary MCP process churn and Grafana API load during expired, missing, or drifted activation states.
-4. **Preserve fail-closed semantics over cached optics.** A previously healthy Grafana probe is not surfaced as current `ok` once local trust has failed.
+1. **Runtime and onboarding must use the same platform semantics.** Passing onboarding while the actual incident runtime corrupts the same launcher path is not acceptable.
+2. **Pass argv directly; do not re-shell commands.** StageGuard keeps command configuration as an argument vector after parsing, avoiding another quoting/injection layer.
+3. **Centralize launcher parsing.** Future MCP/evidence adapters should import one parser rather than independently choosing `shlex` behavior.
+4. **Fail closed on malformed configuration.** Invalid quoting is reported as a bounded configuration error instead of being repaired heuristically.
 
 ### Current blockers / unknowns
 
-- The new readiness tests still need empirical execution from a checkout with working GitHub/DNS access.
+- `runtime.tests.test_command_line`, the prior readiness tests, and the full unittest suite still need empirical execution from a checkout with working GitHub/DNS access.
 - `runtime.tests.test_gemini_acceptance_smoke` still needs empirical execution.
 - `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
 - `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real authorized Vertex AI acceptance run after the doctor passes.
@@ -84,7 +76,11 @@ No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance
 
 ## Single best next step
 
-**When an executable checkout is available, run the focused readiness tests first, then run the full unittest suite and classify every remaining failure/error into product defect vs optional/environmental integration. Fix the highest-severity real product defect before adding more deployment features.**
+**When an executable checkout is available, run `runtime.tests.test_command_line` plus the focused MCP/readiness suites first, then run the complete unittest suite and fix the highest-severity genuine product failure before adding more deployment features.**
+
+## Previous run — readiness local-trust short circuit
+
+`runtime/readiness.py` now validates metric/Loki activation and semantic/datasource pins before attempting any external Grafana MCP readiness work. Invalid local trust fails closed, reports external probes as `blocked`/`missing`, does not spawn/connect MCP clients, cannot be masked by cached success, and does not increment external-attempt counters. Dedicated regression coverage was added in `runtime/tests/test_readiness_local_short_circuit.py`, with the existing readiness cache test aligned to the stricter contract.
 
 ## Retained production hardening
 
