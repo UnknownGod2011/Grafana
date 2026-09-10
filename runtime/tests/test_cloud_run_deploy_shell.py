@@ -119,6 +119,36 @@ class CloudRunDeployShellTests(unittest.TestCase):
         self.assertIn("STAGEGUARD_CHECKPOINT_HMAC_KEY=stageguard-checkpoint-hmac:latest", deploy_call)
         self.assertNotIn("--set-env-vars=STAGEGUARD_CHECKPOINT_HMAC_KEY", deploy_call)
 
+    def test_invalid_project_id_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"PROJECT_ID": "StageGuard_Project"},
+            "PROJECT_ID must be 6-30 lowercase letters, digits, or hyphens",
+        )
+
+    def test_invalid_region_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"REGION": "US CENTRAL1"},
+            "REGION must be a bounded lowercase Google Cloud region/location identifier",
+        )
+
+    def test_invalid_service_name_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"SERVICE_NAME": "StageGuard_Prod"},
+            "SERVICE_NAME must be 1-49 lowercase letters, digits, or hyphens",
+        )
+
+    def test_non_artifact_registry_image_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"IMAGE_URL": "docker.io/library/python:3.13"},
+            "IMAGE_URL must be a tagged or sha256-pinned Artifact Registry Docker image URI",
+        )
+
+    def test_unversioned_artifact_registry_image_fails_before_gcloud(self) -> None:
+        self._assert_rejected_before_gcloud(
+            {"IMAGE_URL": "us-central1-docker.pkg.dev/stageguard-test-project/stageguard/runtime"},
+            "IMAGE_URL must be a tagged or sha256-pinned Artifact Registry Docker image URI",
+        )
+
     def test_grafana_url_comma_injection_fails_before_gcloud(self) -> None:
         self._assert_rejected_before_gcloud(
             {"GRAFANA_URL": "https://grafana.example.net,INJECTED=true"},
