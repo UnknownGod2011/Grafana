@@ -58,10 +58,25 @@ class AnchoredExecutionSafeIncidentService(
         self._execution_monotonic = monotonic or time.monotonic
         super().__init__(*args, **kwargs)
 
+    def _execution_age_unlocked(self) -> float:
+        if not self._execution_in_flight or self._execution_started_monotonic is None:
+            return 0.0
+        return max(0.0, float(self._execution_monotonic()) - self._execution_started_monotonic)
+
+    def _execution_deadline_exceeded_unlocked(self) -> bool:
+        return self._execution_in_flight and self._execution_age_unlocked() > self._execution_max_seconds
+
     def _require_checkpoint_consistency(self) -> None:
         if self._execution_in_flight:
             raise RuntimeError("remediation execution is already in progress; lifecycle changes are blocked")
         super()._require_checkpoint_consistency()
+
+    def checkpoint_state(self) -> str:
+        """Fail readiness closed when an active provider call exceeds its bounded window."""
+        with self._lock:
+            if self._execution_deadline_exceeded_unlocked():
+                return "execution_uncertain"
+            return super().checkpoint_state()
 
     def execution_checkpoint_phase(self):
         """Expose active dispatch/recovery as a bounded operator-safe phase."""
@@ -74,12 +89,8 @@ class AnchoredExecutionSafeIncidentService(
         """Return fixed-cardinality execution watchdog state with no provider details."""
         with self._lock:
             active = self._execution_in_flight
-            started = self._execution_started_monotonic
+            age = self._execution_age_unlocked()
             maximum = self._execution_max_seconds
-        if not active or started is None:
-            age = 0.0
-        else:
-            age = max(0.0, float(self._execution_monotonic()) - started)
         return {
             "active": active,
             "age_seconds": age,
