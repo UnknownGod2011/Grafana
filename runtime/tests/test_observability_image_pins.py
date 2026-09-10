@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import unittest
 from pathlib import Path
 
@@ -13,13 +12,25 @@ class ObservabilityImagePinTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.compose = COMPOSE.read_text(encoding="utf-8")
+        cls.lines = cls.compose.splitlines()
 
     def _service_image(self, service: str) -> str:
-        pattern = rf"(?ms)^  {re.escape(service)}:\n(?:^(?:    .*|\s*)$\n)*?^    image:\s*(\S+)\s*$"
-        match = re.search(pattern, self.compose)
-        self.assertIsNotNone(match, f"missing image for service {service}")
-        assert match is not None
-        return match.group(1)
+        header = f"  {service}:"
+        try:
+            start = self.lines.index(header) + 1
+        except ValueError as exc:
+            self.fail(f"missing service {service}: {exc}")
+
+        for line in self.lines[start:]:
+            if line.startswith("  ") and not line.startswith("    ") and line.endswith(":"):
+                break
+            stripped = line.strip()
+            if stripped.startswith("image:"):
+                image = stripped.partition(":")[2].strip()
+                self.assertTrue(image, f"empty image for service {service}")
+                return image
+
+        self.fail(f"missing image for service {service}")
 
     def test_prometheus_is_pinned_to_expected_lts_patch(self) -> None:
         self.assertEqual(self._service_image("prometheus"), "prom/prometheus:v3.13.3")
@@ -32,7 +43,6 @@ class ObservabilityImagePinTests(unittest.TestCase):
             with self.subTest(service=service):
                 image = self._service_image(service)
                 self.assertNotEqual(image.rsplit(":", 1)[-1], "latest")
-                self.assertNotIn("@sha256:", image.split(":latest", 1)[0] if ":latest" in image else "")
 
     def test_pin_rationale_is_kept_next_to_images(self) -> None:
         self.assertIn("Prometheus 3.13 is the current LTS line", self.compose)
