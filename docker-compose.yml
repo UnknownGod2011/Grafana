@@ -35,6 +35,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./runtime/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./runtime/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3000:3000"
     depends_on:
