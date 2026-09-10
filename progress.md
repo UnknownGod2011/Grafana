@@ -12,66 +12,107 @@ Core invariants remain unchanged:
 - Local credentials/state remain under gitignored `.stageguard/` and `runtime/.secrets/` paths.
 - Authenticated checkpointing, audit integrity, execution reconciliation, and no-replay protections remain implemented.
 
-## Run log — 2026-09-10 — strict Cloud Run Gemini feature-flag parsing
+## Run log — 2026-09-10 — authenticated durable Cloud Run checkpoints
 
 ### Inspected at start
 
-Read `progress.md` completely before choosing work, then inspected the current repository tree, recent commits, `runtime/cloudrun_entrypoint.py`, `runtime/tests/test_cloudrun_entrypoint.py`, and `scripts/deploy_cloud_run.sh`.
+Read `progress.md` completely before choosing work, then inspected the repository root and the current production boundary in:
+- `runtime/cloudrun_entrypoint.py`
+- `runtime/bootstrap.py`
+- `runtime/incident_checkpoint.py`
+- `scripts/deploy_cloud_run.sh`
+- `scripts/gcp_deploy_doctor.py`
+- `runtime/tests/test_cloudrun_entrypoint.py`
+- `runtime/tests/test_cloud_run_deploy_contract.py`
+- `runtime/tests/test_gcp_deploy_doctor.py`
+- `GOOGLE_CLOUD_DEPLOYMENT.md`
 
-The deploy helper already normalizes `ENABLE_GEMINI` strictly before forwarding it to Cloud Run, but the production runtime entrypoint independently treated every unrecognized `STAGEGUARD_ENABLE_GEMINI` value as false. A manual deployment, altered revision, or configuration drift could therefore silently disable Gemini on a typo such as `treu` instead of refusing startup.
+The runtime already had an authenticated `GoogleCloudStorageCheckpointStore` with HMAC verification and optimistic generation-based compare-and-swap. The Cloud Run entrypoint could select it if `STAGEGUARD_CHECKPOINT_BUCKET` was manually configured. However, the standard production deployment helper did not set a checkpoint bucket, object, or HMAC secret at all, so a normal Cloud Run deployment silently selected `--checkpoint-backend none` and therefore had no restart-durable authenticated incident checkpoint.
 
 ### Exact changes made
 
 Updated `runtime/cloudrun_entrypoint.py`:
-- added an explicit false-value set (`0`, `false`, `no`, `off`);
-- added `_optional_bool()` for bounded production feature-flag parsing;
-- missing/blank values retain the safe default `False`;
-- documented true/false aliases are accepted case-insensitively with surrounding whitespace;
-- every other non-empty value now raises `ValueError` and causes Cloud Run startup to fail closed;
-- `STAGEGUARD_ENABLE_GEMINI` now goes through this parser before `--enable-gemini` is added.
+- added bounded GCS bucket-name validation before runtime construction;
+- rejects uppercase/undersized/IP-like/double-dot/reserved Google-like bucket identifiers and malformed boundary characters;
+- added bounded checkpoint object-path validation;
+- rejects leading/trailing slash, empty path segments, `.`/`..` traversal segments, backslashes, commas, control characters, surrounding whitespace, and paths over 512 UTF-8 bytes;
+- changed checkpoint object behavior to always pass the validated explicit/default object when GCS is enabled;
+- validates `STAGEGUARD_CHECKPOINT_HMAC_KEY` is at least 32 UTF-8 bytes before bootstrap;
+- rejects orphan object/HMAC configuration when no checkpoint bucket is configured;
+- preserves the safe local/no-bucket fallback as `checkpoint-backend none` plus `allow_unbound_legacy`.
+
+Updated `scripts/deploy_cloud_run.sh`:
+- production deployment now requires `CHECKPOINT_BUCKET` and `CHECKPOINT_HMAC_SECRET`;
+- added optional `CHECKPOINT_OBJECT`, defaulting to `stageguard/incident-checkpoint.json`;
+- validates checkpoint bucket/object identifiers before invoking `gcloud run deploy`;
+- forwards only the bucket/object identifiers as ordinary Cloud Run environment configuration;
+- binds `STAGEGUARD_CHECKPOINT_HMAC_KEY` directly to the named Secret Manager secret via `--set-secrets`; the HMAC payload is never placed in `ENV_VARS` or shell interpolation;
+- standard Cloud Run deployment therefore activates authenticated GCS checkpointing instead of silently running without durable incident state;
+- production remediation remains disabled and no remediation credentials were added.
 
 Updated `runtime/tests/test_cloudrun_entrypoint.py`:
-- added true-alias coverage;
-- added false-alias and blank-value coverage;
-- added regression cases proving malformed values (`treu`, `enabled`, `2`, `maybe`) fail closed and identify `STAGEGUARD_ENABLE_GEMINI` in the bounded error.
+- added short-HMAC rejection;
+- added default object contract coverage;
+- added invalid bucket-name cases;
+- added path traversal/delimiter/control/backslash/object-boundary cases;
+- added orphan checkpoint configuration rejection.
+
+Updated `runtime/tests/test_cloud_run_deploy_contract.py`:
+- asserts checkpoint bucket/HMAC secret are required production inputs;
+- asserts the bucket/object are forwarded into the runtime;
+- asserts HMAC payload resolution stays in Secret Manager rather than `ENV_VARS`;
+- asserts checkpoint identifier validation occurs before `gcloud run deploy`.
 
 Commits created this run:
-- `9bd141463d66dd1e51033b21dad219065e750ce9` — fail closed on invalid Cloud Run Gemini flag
-- `2bf04c85b588aabd833472bdfdb01b2fbad085cc` — test strict Cloud Run Gemini flag parsing
+- `681b47672a3490bdde03d61f3ed3d5af74c46c9a` — harden Cloud Run checkpoint configuration
+- `b54569c9775019e46ac27e44b938420676b62b84` — test Cloud Run checkpoint boundary
+- `5e2f3275e6e70f726a71ec9488c742a0e13f50cc` — wire authenticated GCS checkpoints into Cloud Run
+- `113d4f3f982a71d1c50eaa718449a791eaaf3310` — cover durable checkpoint deployment contract
 
 ### Tests / checks / results
 
-Source-level verification through the GitHub connector confirmed the committed runtime uses `_optional_bool()` and the regression test file contains explicit accepted/rejected value sets.
+Source-level verification through the GitHub connector confirmed the committed deployment helper now requires and forwards the durable checkpoint configuration, while the runtime entrypoint validates it and the deployment contract tests assert that the HMAC payload is not placed in the ordinary environment-variable list.
 
-This automation runtime still does not provide an executable checkout of the repository, so the Python unittest module could not be empirically executed here. No green-suite claim is made for this change.
+Attempted a fresh public checkout and focused test run with:
 
-No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud resource, IAM policy, secret, Gemini endpoint, or remediation endpoint was modified.
+```text
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
+python -m unittest runtime.tests.test_cloudrun_entrypoint runtime.tests.test_cloud_run_deploy_contract
+```
+
+The execution container failed before checkout because DNS could not resolve `github.com`. Therefore the new focused tests were not empirically executed here and no green-suite claim is made.
+
+No GitHub Actions workflow was created, triggered, or rerun. No Grafana instance, MCP server, Google Cloud resource, bucket, IAM policy, Secret Manager payload, Gemini endpoint, or remediation endpoint was modified.
 
 ### Decisions made
 
-1. **Production configuration typos must fail closed.** Silently changing model availability is operationally ambiguous and can hide deployment drift.
-2. **The runtime validates independently of deployment tooling.** `deploy_cloud_run.sh` being strict is not sufficient because StageGuard can be deployed by other mechanisms.
-3. **Blank means the documented safe default; malformed non-blank does not.** This preserves opt-in Gemini behavior without accepting accidental values.
+1. **Standard production deployment should not silently lose restart durability.** The deploy helper now requires authenticated GCS checkpoint configuration rather than relying on an operator to discover optional runtime variables.
+2. **Checkpoint authenticity is independent of bucket IAM.** The HMAC secret stays in Secret Manager and the existing checkpoint store verifies checkpoint signatures before accepting restored state.
+3. **Malformed identifiers fail before incident runtime construction.** The production entrypoint does not rely only on the deployment shell because other deployment mechanisms may call the container directly.
+4. **The HMAC payload is never a literal deployment variable.** `--set-secrets` references only the Secret Manager resource name/version; the secret value is resolved by Cloud Run.
+5. **No destructive cloud setup is automated here.** The helper consumes an existing bucket/secret and does not create buckets, secrets, or IAM grants.
 
 ### Current blockers / unknowns
 
-- `runtime.tests.test_cloudrun_entrypoint`, `runtime.tests.test_command_line`, focused MCP/readiness tests, and the full unittest suite still need empirical execution from a runnable checkout.
-- `runtime.tests.test_gemini_acceptance_smoke` still needs empirical execution.
+- `scripts/gcp_deploy_doctor.py` does not yet include `CHECKPOINT_BUCKET`/`CHECKPOINT_HMAC_SECRET`, the Storage API, checkpoint bucket existence, HMAC-secret existence/access, or effective Cloud Storage object permissions. Until that is corrected, the doctor can theoretically report its older prerequisites as ready while the newly hardened deploy helper refuses to run.
+- `GOOGLE_CLOUD_DEPLOYMENT.md` still needs to be updated to document the now-required durable checkpoint inputs and GCS IAM contract.
+- The focused Cloud Run checkpoint tests and deployment-contract tests still need empirical execution from a runnable checkout.
+- `runtime.tests.test_command_line`, MCP/readiness suites, `runtime.tests.test_gemini_acceptance_smoke`, and the full unittest suite still need empirical execution.
 - `ENABLE_GEMINI=true python scripts/gcp_deploy_doctor.py --json` still needs a live authorized disposable GCP project.
 - `python scripts/gemini_acceptance_smoke.py --execute --json` still needs one real authorized Vertex AI acceptance run after the doctor passes.
 - Historical full-suite failures/errors still need systematic triage.
 
 ## Single best next step
 
-**Harden the remaining Cloud Run production configuration boundary by validating checkpoint object/bucket configuration and HMAC-secret representation against the actual bootstrap contract, then add focused regression coverage; when a runnable checkout is available, execute the Cloud Run, command-line, MCP/readiness, and full unittest suites before adding broader deployment features.**
+**Bring `scripts/gcp_deploy_doctor.py` into exact parity with the hardened production deployment contract: require/validate `CHECKPOINT_BUCKET` and `CHECKPOINT_HMAC_SECRET`, require `storage.googleapis.com`, verify the bucket and HMAC secret exist without reading payloads, and use Policy Troubleshooter to fail closed unless the runtime service account has the exact Cloud Storage object permissions needed by the generation-based GCS checkpoint store. Then update `GOOGLE_CLOUD_DEPLOYMENT.md` with the resulting least-privilege IAM contract.**
 
 ## Retained production hardening
 
-- Runtime MCP launcher parsing is now centralized and cross-platform, preserving Windows paths while failing closed on malformed quoting.
+- Runtime MCP launcher parsing is centralized and cross-platform, preserving Windows paths while failing closed on malformed quoting.
 - Readiness validates local activation/pin trust before spawning or querying Grafana MCP clients.
-- `scripts/gcp_deploy_doctor.py` validates deployment configuration, required APIs, runtime service account, Secret Manager resources/access, Cloud Logging permissions, conditional Vertex prediction permission, and image availability; offline validation cannot report deploy-ready.
+- `scripts/gcp_deploy_doctor.py` validates its existing deployment configuration, required APIs, runtime service account, Secret Manager resources/access, Cloud Logging permissions, conditional Vertex prediction permission, and image availability; offline validation cannot report deploy-ready. Its checkpoint parity is the next task.
 - `scripts/gemini_acceptance_smoke.py` defaults to validation-only and requires explicit `--execute` for one bounded synthetic Vertex request.
-- `scripts/deploy_cloud_run.sh` forwards the explicit Google Cloud project, location, Gemini model, IAP identity configuration, Secret Manager mounts, and keeps production remediation disabled.
+- `scripts/deploy_cloud_run.sh` forwards the explicit Google Cloud project, location, Gemini model, IAP identity configuration, Secret Manager mounts, authenticated GCS checkpoint configuration, and keeps production remediation disabled.
 - Operator/API safety continues to expose bounded incident/evidence/reconciliation state without raw queries or credentials.
 
 ## Validation baseline retained
