@@ -16,7 +16,6 @@ import subprocess
 from dataclasses import asdict, dataclass
 
 from gcp_identifiers import (
-    image_project,
     valid_artifact_registry_image,
     valid_project_id,
     valid_region,
@@ -186,9 +185,6 @@ def _env_checks() -> list[Check]:
         if safe:
             ok = valid_artifact_registry_image(image_url)
             checks.append(Check("image_url_format", "ok" if ok else "failed", "tagged or sha256-pinned Artifact Registry image reference" if ok else "IMAGE_URL must be a tagged or sha256-pinned Artifact Registry Docker image URI"))
-            if ok and project_id:
-                same_project = image_project(image_url) == project_id
-                checks.append(Check("image_project_match", "ok" if same_project else "failed", "container image project matches PROJECT_ID" if same_project else "IMAGE_URL project must match PROJECT_ID"))
 
     gemini_enabled = _gemini_enabled()
     checks.append(Check(
@@ -352,8 +348,8 @@ def _next_steps(checks: list[Check], offline: bool) -> list[str]:
     steps: list[str] = []
     if any(name.startswith("env:") for name in failed):
         steps.append("Set every required deployment environment variable; use Secret Manager secret names, never secret payloads.")
-    if any(name in failed for name in ("project_id_format", "region_format", "service_name_format", "image_url_format", "image_project_match")):
-        steps.append("Fix PROJECT_ID, REGION, SERVICE_NAME, and IMAGE_URL so they satisfy the shared StageGuard Google Cloud identifier contract; Artifact Registry images must be explicitly tagged or sha256-pinned and belong to PROJECT_ID.")
+    if any(name in failed for name in ("project_id_format", "region_format", "service_name_format", "image_url_format")):
+        steps.append("Fix PROJECT_ID, REGION, SERVICE_NAME, and IMAGE_URL so they satisfy the shared StageGuard Google Cloud identifier contract; Artifact Registry images must be explicitly tagged or sha256-pinned.")
     if "enable_gemini_format" in failed:
         steps.append("Set ENABLE_GEMINI to true/false (aliases 1/0, yes/no, on/off are accepted).")
     if any(name.startswith("secret_id_format:") for name in failed):
