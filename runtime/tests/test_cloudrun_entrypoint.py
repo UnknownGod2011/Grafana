@@ -45,6 +45,26 @@ class CloudRunEntrypointTests(unittest.TestCase):
         env["STAGEGUARD_ENABLE_GEMINI"] = "true"
         self.assertIn("--enable-gemini", build_bootstrap_argv(env))
 
+    def test_gemini_boolean_aliases_are_explicit(self) -> None:
+        for value in ("1", "true", "TRUE", "yes", "on", "  true  "):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_ENABLE_GEMINI"] = value
+                self.assertIn("--enable-gemini", build_bootstrap_argv(env))
+        for value in ("0", "false", "FALSE", "no", "off", "", "   "):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_ENABLE_GEMINI"] = value
+                self.assertNotIn("--enable-gemini", build_bootstrap_argv(env))
+
+    def test_invalid_gemini_flag_fails_closed(self) -> None:
+        for value in ("treu", "enabled", "2", "maybe"):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_ENABLE_GEMINI"] = value
+                with self.assertRaisesRegex(ValueError, "STAGEGUARD_ENABLE_GEMINI"):
+                    build_bootstrap_argv(env)
+
     def test_missing_required_mount_or_iap_audience_fails_closed(self) -> None:
         for name in (
             "STAGEGUARD_TELEMETRY_CONFIG",
