@@ -7,6 +7,7 @@ remediation. Evidence mappings/activations remain mounted configuration files.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -49,6 +50,18 @@ def _port(environ: Mapping[str, str]) -> int:
     if not 1 <= port <= 65535:
         raise ValueError("PORT must be between 1 and 65535")
     return port
+
+
+def _execution_max_seconds(environ: Mapping[str, str]) -> float:
+    name = "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"
+    raw = environ.get(name, str(bootstrap.DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a finite positive number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return value
 
 
 def _checkpoint_bucket(environ: Mapping[str, str]) -> str:
@@ -108,6 +121,7 @@ def build_bootstrap_argv(environ: Mapping[str, str] | None = None) -> list[str]:
         "--audit-backend", "cloud-logging",
         "--host", "0.0.0.0",
         "--port", str(_port(env)),
+        "--remediation-execution-max-seconds", str(_execution_max_seconds(env)),
     ]
 
     checkpoint_bucket = _checkpoint_bucket(env)
