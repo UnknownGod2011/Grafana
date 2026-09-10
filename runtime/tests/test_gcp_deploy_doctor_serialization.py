@@ -54,8 +54,12 @@ class GcpDeployDoctorSerializationTests(unittest.TestCase):
     def test_valid_environment_passes_offline_serialization_checks(self) -> None:
         result, checks = self._run({})
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertEqual(checks["iap_audience_format"]["status"], "ok")
+        self.assertEqual(checks["project_id_format"]["status"], "ok")
+        self.assertEqual(checks["region_format"]["status"], "ok")
+        self.assertEqual(checks["service_name_format"]["status"], "ok")
         self.assertEqual(checks["image_url_cli_safety"]["status"], "ok")
+        self.assertEqual(checks["image_url_format"]["status"], "ok")
+        self.assertEqual(checks["iap_audience_format"]["status"], "ok")
         for name in (
             "TELEMETRY_SECRET",
             "METRIC_ACTIVATION_SECRET",
@@ -84,6 +88,37 @@ class GcpDeployDoctorSerializationTests(unittest.TestCase):
         result, checks = self._run({"CHECKPOINT_HMAC_SECRET": "a" * 256})
         self.assertEqual(result.returncode, 2)
         self.assertEqual(checks["secret_id_format:CHECKPOINT_HMAC_SECRET"]["status"], "failed")
+
+    def test_invalid_project_id_fails_with_shared_validator(self) -> None:
+        result, checks = self._run({"PROJECT_ID": "StageGuard-Test"})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(checks["project_id_format"]["status"], "failed")
+
+    def test_invalid_region_fails_with_shared_validator(self) -> None:
+        result, checks = self._run({"REGION": "uscentral1"})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(checks["region_format"]["status"], "failed")
+
+    def test_invalid_service_name_fails_with_shared_validator(self) -> None:
+        result, checks = self._run({"SERVICE_NAME": "StageGuard"})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(checks["service_name_format"]["status"], "failed")
+
+    def test_unversioned_artifact_registry_image_is_required_failure(self) -> None:
+        result, checks = self._run({"IMAGE_URL": "us-central1-docker.pkg.dev/stageguard-test/stageguard/api"})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(checks["image_url_format"]["status"], "failed")
+        self.assertTrue(checks["image_url_format"]["required"])
+
+    def test_non_artifact_registry_image_is_required_failure(self) -> None:
+        result, checks = self._run({"IMAGE_URL": "docker.io/example/stageguard:test"})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(checks["image_url_format"]["status"], "failed")
+
+    def test_cross_project_artifact_registry_image_is_allowed(self) -> None:
+        result, checks = self._run({"IMAGE_URL": "us-central1-docker.pkg.dev/shared-images/stageguard/api:test"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(checks["image_url_format"]["status"], "ok")
 
 
 if __name__ == "__main__":
