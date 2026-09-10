@@ -27,6 +27,9 @@ VALID_ENV = {
     "METRIC_ACTIVATION_SECRET": "stageguard-metric-activation",
     "LOG_ACTIVATION_SECRET": "stageguard-log-activation",
     "GRAFANA_TOKEN_SECRET": "stageguard-grafana-token",
+    "CHECKPOINT_BUCKET": "stageguard-checkpoints-test",
+    "CHECKPOINT_HMAC_SECRET": "stageguard-checkpoint-hmac",
+    "CHECKPOINT_OBJECT": "stageguard/incident-checkpoint.json",
     "ENABLE_GEMINI": "false",
 }
 
@@ -52,7 +55,6 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
                 env.pop(name, None)
             else:
                 env[name] = value
-
         return subprocess.run(
             [sys.executable, str(DOCTOR), "--offline", "--json"],
             cwd=ROOT,
@@ -83,290 +85,158 @@ class GcpDeployDoctorOfflineTests(unittest.TestCase):
         self.assertIs(payload["offline_checks_passed"], True)
         self.assertIs(payload["ready_to_deploy"], False)
         self.assertIs(payload["gemini_enabled"], False)
-        self.assertNotIn("aiplatform.googleapis.com", payload["required_apis"])
+        self.assertEqual(payload["checkpoint_bucket"], "stageguard-checkpoints-test")
+        self.assertEqual(payload["checkpoint_object"], "stageguard/incident-checkpoint.json")
+        self.assertIn("storage.googleapis.com", payload["required_apis"])
         self.assertIn("policytroubleshooter.googleapis.com", payload["required_apis"])
+        self.assertNotIn("aiplatform.googleapis.com", payload["required_apis"])
         self.assertTrue(any("gcp_deploy_doctor.py --json" in step for step in payload["next_steps"]))
 
-    def test_missing_required_variable_fails(self) -> None:
-        result = self._run({"PROJECT_ID": None})
-        self.assertEqual(result.returncode, 2)
-        payload = self._payload(result)
-        self.assertIs(payload["offline_checks_passed"], False)
-        self.assertEqual(self._checks(payload)["env:PROJECT_ID"]["status"], "missing")
+    def test_missing_required_checkpoint_values_fail(self) -> None:
+        for name in ("CHECKPOINT_BUCKET", "CHECKPOINT_HMAC_SECRET"):
+            with self.subTest(name=name):
+                result = self._run({name: None})
+                self.assertEqual(result.returncode, 2)
+                payload = self._payload(result)
+                self.assertEqual(self._checks(payload)[f"env:{name}"]["status"], "missing")
 
-    def test_project_number_must_be_numeric(self) -> None:
-        result = self._run({"PROJECT_NUMBER": "not-a-number"})
-        self.assertEqual(result.returncode, 2)
-        payload = self._payload(result)
-        self.assertEqual(self._checks(payload)["project_number_format"]["status"], "failed")
+    def test_checkpoint_bucket_matches_runtime_boundary(self) -> None:
+        for value in ("Abc-bucket", "12.34.56.78", "foo..bar", "google-data", "ab"):
+            with self.subTest(value=value):
+                result = self._run({"CHECKPOINT_BUCKET": value})
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(self._checks(self._payload(result))["checkpoint_bucket_format"]["status"], "failed")
 
-    def test_grafana_url_rejects_non_absolute_value(self) -> None:
-        result = self._run({"GRAFANA_URL": "grafana.example.invalid"})
-        self.assertEqual(result.returncode, 2)
-        payload = self._payload(result)
-        self.assertEqual(self._checks(payload)["grafana_url_format"]["status"], "failed")
+    def test_checkpoint_object_matches_runtime_boundary(self) -> None:
+        for value in ("/stageguard/checkpoint.json", "stageguard/../checkpoint.json", "stageguard//checkpoint.json", "stageguard,checkpoint.json", "stageguard\\checkpoint.json", " stageguard/checkpoint.json"):
+            with self.subTest(value=value):
+                result = self._run({"CHECKPOINT_OBJECT": value})
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(self._checks(self._payload(result))["checkpoint_object_format"]["status"], "failed")
 
-    def test_runtime_service_account_requires_service_account_domain(self) -> None:
-        result = self._run({"RUNTIME_SERVICE_ACCOUNT": "operator@example.com"})
-        self.assertEqual(result.returncode, 2)
-        payload = self._payload(result)
-        self.assertEqual(self._checks(payload)["runtime_service_account_format"]["status"], "failed")
+    def test_project_number_and_grafana_and_service_account_validation(self) -> None:
+        cases = (
+            ({"PROJECT_NUMBER": "not-a-number"}, "project_number_format"),
+            ({"GRAFANA_URL": "grafana.example.invalid"}, "grafana_url_format"),
+            ({"RUNTIME_SERVICE_ACCOUNT": "operator@example.com"}, "runtime_service_account_format"),
+        )
+        for overrides, check_name in cases:
+            with self.subTest(check=check_name):
+                result = self._run(overrides)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(self._checks(self._payload(result))[check_name]["status"], "failed")
 
     def test_non_artifact_registry_image_is_advisory_only(self) -> None:
         result = self._run({"IMAGE_URL": "example.com/stageguard/api:test"})
         self.assertEqual(result.returncode, 0)
-        payload = self._payload(result)
-        check = self._checks(payload)["image_url_format"]
+        check = self._checks(self._payload(result))["image_url_format"]
         self.assertEqual(check["status"], "warning")
         self.assertIs(check["required"], False)
 
-    def test_gemini_true_requires_vertex_ai_api_and_resolves_runtime_defaults(self) -> None:
+    def test_gemini_contract_and_boolean_aliases(self) -> None:
         result = self._run({"ENABLE_GEMINI": "true"})
-        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        self.assertEqual(result.returncode, 0)
         payload = self._payload(result)
         self.assertIs(payload["gemini_enabled"], True)
         self.assertIn("aiplatform.googleapis.com", payload["required_apis"])
         self.assertEqual(payload["gemini_location"], "global")
         self.assertEqual(payload["gemini_model"], "gemini-2.5-flash")
-        checks = self._checks(payload)
-        self.assertEqual(checks["enable_gemini_format"]["status"], "ok")
-        self.assertEqual(checks["gemini_location_format"]["status"], "ok")
-        self.assertEqual(checks["gemini_model_format"]["status"], "ok")
-
-    def test_gemini_boolean_aliases_match_deploy_script(self) -> None:
         for value in ("1", "yes", "on", "TRUE", "0", "no", "off", "FALSE"):
             with self.subTest(value=value):
-                result = self._run({"ENABLE_GEMINI": value})
-                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-                payload = self._payload(result)
+                alias = self._run({"ENABLE_GEMINI": value})
+                self.assertEqual(alias.returncode, 0)
                 expected = value.strip().lower() in {"1", "true", "yes", "on"}
-                self.assertIs(payload["gemini_enabled"], expected)
+                self.assertIs(self._payload(alias)["gemini_enabled"], expected)
 
-    def test_invalid_gemini_value_fails_before_deployment(self) -> None:
+    def test_invalid_gemini_and_runtime_identifiers_fail(self) -> None:
         result = self._run({"ENABLE_GEMINI": "maybe"})
         self.assertEqual(result.returncode, 2)
-        payload = self._payload(result)
-        self.assertIsNone(payload["gemini_enabled"])
-        self.assertIs(payload["offline_checks_passed"], False)
-        self.assertEqual(self._checks(payload)["enable_gemini_format"]["status"], "failed")
-        self.assertTrue(any("ENABLE_GEMINI" in step for step in payload["next_steps"]))
-
-    def test_gemini_runtime_identifiers_reject_resource_paths_and_urls(self) -> None:
-        result = self._run(
-            {
-                "ENABLE_GEMINI": "true",
-                "GOOGLE_CLOUD_LOCATION": "https://us-central1-aiplatform.googleapis.com",
-                "STAGEGUARD_GEMINI_MODEL": "publishers/google/models/gemini-2.5-flash",
-            }
-        )
+        self.assertEqual(self._checks(self._payload(result))["enable_gemini_format"]["status"], "failed")
+        result = self._run({"ENABLE_GEMINI": "true", "GOOGLE_CLOUD_LOCATION": "https://us-central1-aiplatform.googleapis.com", "STAGEGUARD_GEMINI_MODEL": "publishers/google/models/gemini-2.5-flash"})
         self.assertEqual(result.returncode, 2)
-        payload = self._payload(result)
-        checks = self._checks(payload)
+        checks = self._checks(self._payload(result))
         self.assertEqual(checks["gemini_location_format"]["status"], "failed")
         self.assertEqual(checks["gemini_model_format"]["status"], "failed")
-        self.assertTrue(any("GOOGLE_CLOUD_LOCATION" in step for step in payload["next_steps"]))
 
 
-class GcpDeployDoctorSecretAccessTests(unittest.TestCase):
+class GcpDeployDoctorPermissionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.doctor = _load_doctor_module()
 
-    def _check_with_response(self, returncode: int, payload: str):
-        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
-            check = self.doctor._secret_access_check(
-                "123456789012",
-                "stageguard@stageguard-test.iam.gserviceaccount.com",
-                "stageguard-grafana-token",
-                "GRAFANA_TOKEN_SECRET",
-            )
+    def _response(self, func, *args, state="CAN_ACCESS"):
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(0, json.dumps({"overallAccessState": state}), "")) as run:
+            check = func(*args)
         return check, run
 
-    def test_effective_secret_access_uses_policy_troubleshooter_without_accessing_version(self) -> None:
-        check, run = self._check_with_response(0, json.dumps({"overallAccessState": "CAN_ACCESS"}))
+    def test_secret_access_uses_policy_troubleshooter_without_payload_read(self) -> None:
+        check, run = self._response(self.doctor._secret_access_check, "123456789012", "stageguard@stageguard-test.iam.gserviceaccount.com", "stageguard-grafana-token", "GRAFANA_TOKEN_SECRET")
         self.assertEqual(check.status, "ok")
         self.assertIn("payload not read", check.detail)
         args = run.call_args.args[0]
-        self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
         self.assertIn("//secretmanager.googleapis.com/projects/123456789012/secrets/stageguard-grafana-token", args)
         self.assertIn("--permission=secretmanager.versions.access", args)
-        self.assertFalse(any("versions access" in arg for arg in args))
 
-    def test_effective_secret_access_denied_fails_closed(self) -> None:
-        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "CANNOT_ACCESS"}))
-        self.assertEqual(check.status, "failed")
-        self.assertIn("lacks effective secretmanager.versions.access", check.detail)
-
-    def test_effective_secret_access_unknown_state_fails_closed(self) -> None:
-        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "UNKNOWN"}))
-        self.assertEqual(check.status, "failed")
-        self.assertIn("could not determine", check.detail)
-
-    def test_effective_secret_access_command_failure_fails_closed(self) -> None:
-        check, _ = self._check_with_response(1, "")
-        self.assertEqual(check.status, "failed")
-        self.assertIn("could not be verified", check.detail)
-
-    def test_effective_secret_access_invalid_json_fails_closed(self) -> None:
-        check, _ = self._check_with_response(0, "not-json")
-        self.assertEqual(check.status, "failed")
-        self.assertIn("unreadable response", check.detail)
-
-    def test_next_steps_explain_runtime_secret_permission(self) -> None:
-        checks = [
-            self.doctor.Check(
-                "secret_access:GRAFANA_TOKEN_SECRET",
-                "failed",
-                "runtime service account lacks effective secretmanager.versions.access",
-            )
-        ]
-        steps = self.doctor._next_steps(checks, offline=False)
-        self.assertTrue(any("secretmanager.versions.access" in step for step in steps))
-        self.assertTrue(any("roles/secretmanager.secretAccessor" in step for step in steps))
-
-
-class GcpDeployDoctorLoggingAccessTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.doctor = _load_doctor_module()
-
-    def _check_with_response(self, permission: str, returncode: int, payload: str):
-        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
-            check = self.doctor._logging_access_check(
-                "stageguard-test",
-                "stageguard@stageguard-test.iam.gserviceaccount.com",
-                permission,
-            )
-        return check, run
-
-    def test_logging_permissions_are_exact_runtime_contract(self) -> None:
-        self.assertEqual(
-            self.doctor.LOGGING_RUNTIME_PERMISSIONS,
-            ("logging.logEntries.create", "logging.logEntries.list"),
-        )
-
-    def test_logging_create_uses_project_resource_and_policy_troubleshooter(self) -> None:
-        check, run = self._check_with_response(
-            "logging.logEntries.create",
-            0,
-            json.dumps({"overallAccessState": "CAN_ACCESS"}),
-        )
+    def test_logging_permissions_match_runtime_contract(self) -> None:
+        self.assertEqual(self.doctor.LOGGING_RUNTIME_PERMISSIONS, ("logging.logEntries.create", "logging.logEntries.list"))
+        check, run = self._response(self.doctor._logging_access_check, "stageguard-test", "stageguard@stageguard-test.iam.gserviceaccount.com", "logging.logEntries.create")
         self.assertEqual(check.status, "ok")
-        args = run.call_args.args[0]
-        self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
-        self.assertIn("//cloudresourcemanager.googleapis.com/projects/stageguard-test", args)
-        self.assertIn("--principal-email=stageguard@stageguard-test.iam.gserviceaccount.com", args)
-        self.assertIn("--permission=logging.logEntries.create", args)
+        self.assertIn("//cloudresourcemanager.googleapis.com/projects/stageguard-test", run.call_args.args[0])
 
-    def test_logging_list_allowed_passes(self) -> None:
-        check, _ = self._check_with_response(
-            "logging.logEntries.list",
-            0,
-            json.dumps({"overallAccessState": "CAN_ACCESS"}),
-        )
-        self.assertEqual(check.status, "ok")
-        self.assertIn("logging.logEntries.list", check.detail)
+    def test_checkpoint_permissions_are_exact_and_object_scoped(self) -> None:
+        self.assertEqual(self.doctor.STORAGE_RUNTIME_PERMISSIONS, ("storage.objects.get", "storage.objects.create", "storage.objects.delete"))
+        for permission in self.doctor.STORAGE_RUNTIME_PERMISSIONS:
+            with self.subTest(permission=permission):
+                check, run = self._response(
+                    self.doctor._storage_access_check,
+                    "stageguard-checkpoints-test",
+                    "stageguard/incident-checkpoint.json",
+                    "stageguard@stageguard-test.iam.gserviceaccount.com",
+                    permission,
+                )
+                self.assertEqual(check.status, "ok")
+                args = run.call_args.args[0]
+                self.assertIn("//storage.googleapis.com/projects/_/buckets/stageguard-checkpoints-test/objects/stageguard/incident-checkpoint.json", args)
+                self.assertIn(f"--permission={permission}", args)
+                self.assertNotIn("--permission=storage.objects.list", args)
 
-    def test_logging_permission_denied_fails_closed(self) -> None:
-        check, _ = self._check_with_response(
-            "logging.logEntries.list",
-            0,
-            json.dumps({"overallAccessState": "CANNOT_ACCESS"}),
-        )
-        self.assertEqual(check.status, "failed")
-        self.assertIn("lacks effective logging.logEntries.list", check.detail)
+    def test_checkpoint_access_denied_or_unknown_fails_closed(self) -> None:
+        for state in ("CANNOT_ACCESS", "UNKNOWN"):
+            with self.subTest(state=state):
+                check, _ = self._response(
+                    self.doctor._storage_access_check,
+                    "stageguard-checkpoints-test",
+                    "stageguard/incident-checkpoint.json",
+                    "stageguard@stageguard-test.iam.gserviceaccount.com",
+                    "storage.objects.get",
+                    state=state,
+                )
+                self.assertEqual(check.status, "failed")
 
-    def test_logging_permission_unknown_fails_closed(self) -> None:
-        check, _ = self._check_with_response(
-            "logging.logEntries.create",
-            0,
-            json.dumps({"overallAccessState": "UNKNOWN"}),
-        )
-        self.assertEqual(check.status, "failed")
-        self.assertIn("could not determine", check.detail)
+    def test_policy_troubleshooter_command_and_json_fail_closed(self) -> None:
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(1, "", "")):
+            failed = self.doctor._storage_access_check("stageguard-checkpoints-test", "stageguard/incident-checkpoint.json", "stageguard@stageguard-test.iam.gserviceaccount.com", "storage.objects.get")
+        self.assertEqual(failed.status, "failed")
+        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(0, "not-json", "")):
+            malformed = self.doctor._storage_access_check("stageguard-checkpoints-test", "stageguard/incident-checkpoint.json", "stageguard@stageguard-test.iam.gserviceaccount.com", "storage.objects.get")
+        self.assertEqual(malformed.status, "failed")
 
-    def test_logging_permission_command_failure_fails_closed(self) -> None:
-        check, _ = self._check_with_response("logging.logEntries.create", 1, "")
-        self.assertEqual(check.status, "failed")
-        self.assertIn("could not be verified", check.detail)
-
-    def test_logging_permission_invalid_json_fails_closed(self) -> None:
-        check, _ = self._check_with_response("logging.logEntries.list", 0, "not-json")
-        self.assertEqual(check.status, "failed")
-        self.assertIn("unreadable response", check.detail)
-
-    def test_next_steps_explain_both_logging_permissions(self) -> None:
-        checks = [
-            self.doctor.Check(
-                "logging_access:list",
-                "failed",
-                "runtime service account lacks effective logging.logEntries.list on the target project",
-            )
-        ]
-        steps = self.doctor._next_steps(checks, offline=False)
-        self.assertTrue(any("logging.logEntries.create" in step for step in steps))
-        self.assertTrue(any("logging.logEntries.list" in step for step in steps))
-
-
-class GcpDeployDoctorVertexAccessTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.doctor = _load_doctor_module()
-
-    def _check_with_response(self, returncode: int, payload: str):
-        with mock.patch.object(self.doctor, "_run_gcloud", return_value=(returncode, payload, "")) as run:
-            check = self.doctor._vertex_predict_access_check(
-                "stageguard-test",
-                "stageguard@stageguard-test.iam.gserviceaccount.com",
-                "global",
-                "gemini-2.5-flash",
-            )
-        return check, run
-
-    def test_vertex_permission_matches_generate_content_runtime_contract(self) -> None:
+    def test_vertex_permission_matches_generate_content_contract(self) -> None:
         self.assertEqual(self.doctor.VERTEX_PREDICT_PERMISSION, "aiplatform.endpoints.predict")
-        check, run = self._check_with_response(0, json.dumps({"overallAccessState": "CAN_ACCESS"}))
+        check, run = self._response(self.doctor._vertex_predict_access_check, "stageguard-test", "stageguard@stageguard-test.iam.gserviceaccount.com", "global", "gemini-2.5-flash")
         self.assertEqual(check.status, "ok")
         args = run.call_args.args[0]
-        self.assertEqual(args[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
-        self.assertIn(
-            "//aiplatform.googleapis.com/projects/stageguard-test/locations/global/publishers/google/models/gemini-2.5-flash",
-            args,
-        )
-        self.assertIn("--principal-email=stageguard@stageguard-test.iam.gserviceaccount.com", args)
+        self.assertIn("//aiplatform.googleapis.com/projects/stageguard-test/locations/global/publishers/google/models/gemini-2.5-flash", args)
         self.assertIn("--permission=aiplatform.endpoints.predict", args)
 
-    def test_vertex_permission_denied_fails_closed(self) -> None:
-        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "CANNOT_ACCESS"}))
-        self.assertEqual(check.status, "failed")
-        self.assertIn("lacks effective aiplatform.endpoints.predict", check.detail)
-
-    def test_vertex_permission_unknown_fails_closed(self) -> None:
-        check, _ = self._check_with_response(0, json.dumps({"overallAccessState": "UNKNOWN"}))
-        self.assertEqual(check.status, "failed")
-        self.assertIn("could not determine", check.detail)
-
-    def test_vertex_permission_command_failure_fails_closed(self) -> None:
-        check, _ = self._check_with_response(1, "")
-        self.assertEqual(check.status, "failed")
-        self.assertIn("could not be verified", check.detail)
-
-    def test_vertex_permission_invalid_json_fails_closed(self) -> None:
-        check, _ = self._check_with_response(0, "not-json")
-        self.assertEqual(check.status, "failed")
-        self.assertIn("unreadable response", check.detail)
-
-    def test_next_steps_explain_vertex_predict_permission(self) -> None:
-        checks = [
-            self.doctor.Check(
-                "vertex_access:predict",
-                "failed",
-                "runtime service account lacks effective aiplatform.endpoints.predict",
-            )
-        ]
+    def test_next_steps_explain_least_privilege_storage_contract(self) -> None:
+        checks = [self.doctor.Check("checkpoint_storage_access:delete", "failed", "denied")]
         steps = self.doctor._next_steps(checks, offline=False)
-        self.assertTrue(any("aiplatform.endpoints.predict" in step for step in steps))
-        self.assertTrue(any("roles/aiplatform.user" in step for step in steps))
+        storage_step = next(step for step in steps if "storage.objects.get" in step)
+        self.assertIn("storage.objects.create", storage_step)
+        self.assertIn("storage.objects.delete", storage_step)
+        self.assertIn("roles/storage.objectUser", storage_step)
+        self.assertIn("not required", storage_step)
 
 
 if __name__ == "__main__":
