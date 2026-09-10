@@ -21,9 +21,26 @@ class CloudRunEntrypointTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--audit-backend") + 1], "cloud-logging")
         self.assertEqual(argv[argv.index("--host") + 1], "0.0.0.0")
         self.assertEqual(argv[argv.index("--port") + 1], "8080")
+        self.assertEqual(argv[argv.index("--remediation-execution-max-seconds") + 1], "60.0")
         self.assertEqual(argv[argv.index("--checkpoint-backend") + 1], "none")
         self.assertEqual(argv[argv.index("--audit-integrity-policy") + 1], "allow_unbound_legacy")
         self.assertNotIn("--enable-production-remediation", argv)
+
+    def test_remediation_execution_watchdog_is_configurable_and_bounded(self) -> None:
+        env = self._env()
+        env["STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"] = "17.5"
+        argv = build_bootstrap_argv(env)
+        self.assertEqual(argv[argv.index("--remediation-execution-max-seconds") + 1], "17.5")
+
+        for value in ("", "0", "-1", "nan", "inf", "-inf", "not-a-number"):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"] = value
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS",
+                ):
+                    build_bootstrap_argv(env)
 
     def test_checkpoint_bucket_requires_strong_hmac_secret_and_enables_gcs(self) -> None:
         env = self._env()
