@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, explicit stale-telemetry detection, and a credential-free metrics-outage rehearsal path.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, explicit stale-telemetry detection, a credential-free metrics-outage rehearsal path, and reproducibly pinned Grafana/Prometheus acceptance images.
 
 Core invariants remain unchanged:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -13,140 +13,92 @@ Core invariants remain unchanged:
 - A healthy watchdog value is trustworthy only while the observability path is delivering fresh samples.
 - Loss of observability must never be reclassified as a positive remediation deadline breach.
 
-## Run log — 2026-09-11 — stale telemetry end-to-end rehearsal
+## Run log — 2026-09-11 — reproducible observability image pins
 
 ### Inspected at start
 
-Read `progress.md` completely before making changes. Then inspected the current repository and specifically:
-- `runtime/watchdog_metrics_fixture.py`
-- `runtime/watchdog_observability_acceptance.py`
-- `runtime/tests/test_watchdog_metrics_fixture.py`
-- `runtime/tests/test_watchdog_observability_acceptance.py`
-- `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml`
-- `docker-compose.yml`
-- `runtime/Dockerfile`
-- `docs/runtime-metrics-ingestion.md`
+Read `progress.md` completely before making changes. Inspected the repository metadata and the current `docker-compose.yml`, `runtime/tests/test_watchdog_observability_acceptance.py`, and `docs/runtime-metrics-ingestion.md`.
 
-The previous handoff's gap was confirmed: the fixture could change watchdog values but could not independently break metrics delivery, so the stale-telemetry alert could not yet be rehearsed without conflating evidence loss with remediation state.
+Confirmed the previous handoff's reproducibility gap: the local observability rehearsal still used `prom/prometheus:latest` and `grafana/grafana:latest`, allowing upstream behavior to change between StageGuard runs without any repository diff.
+
+Checked current official release sources before choosing pins:
+- Grafana's official GitHub releases list `13.2.1` as the latest stable release, published 2026-09-02, including security fixes.
+- Prometheus's official GitHub releases list `3.13.3`, published 2026-09-07.
+- Prometheus's official release-cycle documentation identifies the 3.13 line as LTS with support through 2027-07-31.
 
 ### Exact changes made
 
-#### Independent telemetry outage injection
+#### Pinned local observability images
 
-Updated `runtime/watchdog_metrics_fixture.py` so telemetry availability is independent of the existing `idle`, `active`, and `overdue` remediation/watchdog states.
+Updated `docker-compose.yml`:
+- `prom/prometheus:latest` -> `prom/prometheus:v3.13.3`
+- `grafana/grafana:latest` -> `grafana/grafana:13.2.1`
+- retained the already-pinned official Grafana MCP image `grafana/mcp-grafana:1.3.0`
 
-New bounded control endpoints:
-- `POST /telemetry/offline`
-- `POST /telemetry/online`
+Added adjacent comments explaining why the Prometheus and Grafana versions must not float: the acceptance rehearsal depends on concrete PromQL sample aging, Grafana file-provisioned alert behavior, and the active-alert API contract.
 
-Behavior:
-- offline mode makes only `GET /metrics` return HTTP 503;
-- `/healthz`, `/state`, and the control surface remain reachable;
-- the currently selected remediation/watchdog state is preserved while metrics are offline;
-- `/state` now exposes `telemetry_available` so tests can prove this separation directly;
-- the telemetry control accepts only the two fixed modes and adds no provider/remediation capability.
+#### Added repository contract test
 
-The state object also rejects non-boolean telemetry availability internally.
+Added `runtime/tests/test_observability_image_pins.py`.
 
-#### Full stale-evidence acceptance lifecycle
+The test:
+- deterministically reads service image values from the Compose file without adding a YAML dependency;
+- requires Prometheus to remain on `prom/prometheus:v3.13.3` until an intentional upgrade;
+- requires Grafana to remain on `grafana/grafana:13.2.1` until an intentional upgrade;
+- rejects `latest` for Prometheus, Grafana, and the Grafana MCP service;
+- requires the pin rationale to remain visible next to the relevant Compose configuration.
 
-Expanded `runtime/watchdog_observability_acceptance.py` from a single deadline-alert rehearsal into two independent safety proofs.
+The initial implementation used a multiline regular expression; it was immediately replaced with a simpler line/block parser to reduce brittleness and keep the guard dependency-free.
 
-The existing deadline path still proves:
-`idle -> overdue -> critical alert active -> idle -> critical alert resolved`
+#### Documented upgrade/rehearsal policy
 
-The new metrics-outage path proves:
-`fresh healthy sample -> /metrics unavailable -> Prometheus sample age >45s -> stale warning active -> metrics restored -> fresh sample -> stale warning resolved`
-
-Critical safety assertions during the outage:
-- remediation state remains `idle`;
-- the critical remediation-deadline alert must remain inactive before and while the stale warning is active;
-- Prometheus must directly show the freshness expression crossing the 45-second threshold;
-- after telemetry resumes, freshness must fall back below 45 seconds;
-- the stale warning must resolve;
-- the critical deadline alert must still remain inactive after evidence recovery.
-
-The acceptance script now gives the two Grafana rules separate title/summary identities instead of treating every StageGuard alert as the deadline rule. Unexpected active-alert API shapes continue to fail closed.
-
-Added `--stale-timeout` with a 95-second default so the bounded rehearsal has enough room for the 45-second sample-age threshold plus the stale rule's 30-second pending period and Grafana's evaluation interval.
-
-All timeout arguments are now validated as finite positive numbers; zero, negative, boolean, NaN, and infinities fail before network work begins.
-
-The `finally` path restores both telemetry online and remediation/watchdog state to idle.
-
-#### Regression coverage
-
-Expanded `runtime/tests/test_watchdog_metrics_fixture.py` to cover:
-- telemetry availability remaining independent of active remediation state;
-- `/metrics` returning 503 while `/state` still reports the unchanged active state;
-- telemetry restoration resuming the same state's metrics;
-- rejection of non-boolean telemetry availability;
-- existing bounded scenario controls remaining intact.
-
-Expanded `runtime/tests/test_watchdog_observability_acceptance.py` to cover:
-- separate deadline and stale-alert identities;
-- stale alerts not being mistaken for deadline alerts;
-- the freshness PromQL contract containing both `timestamp(...)` and `absent(...)` branches;
-- the fixed 45-second freshness threshold;
-- telemetry-mode type validation before HTTP work;
-- finite-positive timeout validation;
-- existing loopback-only URL protections and malformed Grafana response fail-closed behavior.
-
-#### Documentation
-
-Updated `docs/runtime-metrics-ingestion.md` with:
-- the new `/telemetry/offline` and `/telemetry/online` controls;
-- the explicit statement that metrics failure does not change remediation state;
-- the complete two-alert acceptance lifecycle;
-- the requirement that the critical deadline alert remain inactive during stale evidence;
-- recovery requirements for Prometheus freshness and Grafana alert resolution;
-- the bounded `--stale-timeout` behavior.
+Updated `docs/runtime-metrics-ingestion.md` with a new reproducibility section documenting:
+- the three concrete observability image pins;
+- the release/LTS rationale;
+- official release reference URLs;
+- the policy that an image upgrade is an explicit repository change that must be accompanied by upstream release-note review and rerunning the complete watchdog deadline + stale-telemetry acceptance rehearsal.
 
 ### Commits this run
 
-- `d350f5261800d6f27bab41c32ebef4db71f9a04c` — add watchdog telemetry outage injection
-- `cf493de7cb4053c810ac8a06c1e144e980f5aa75` — test independent watchdog telemetry outage
-- `57d144a0cb318dd59c77a1cfdb320dc9e3b7b6a9` — rehearse stale watchdog telemetry lifecycle
-- `db3808a239ecb23916987eb1daae0c231c2d8477` — test stale telemetry acceptance helpers
-- `5070bcbad3e71132b8a566c0541d0fc56900200a` — document stale telemetry outage rehearsal
-- `f093e2dea1d011be49411e926d0b349f0b69e93d` — fail closed on invalid watchdog rehearsal timeouts
-- `2567a3c6e844bdaa2cc0170e15167a94126d5ae0` — cover bounded rehearsal timeout validation
+- `d908babf47caf2ed88c2b36c45b7f793db89b66f` — pin Grafana and Prometheus observability images
+- `68ad224be2ab8160859ce314731374bb2950274d` — add observability image pin regression guard
+- `71ae90e078aeb4249fd86f0582852f267d303b73` — make image pin guard deterministic
+- `174784e0e8147de6dd6400d7934c4cf6aadd167f` — document reproducible observability image pins
 
 ### Tests / checks / results
 
-- Re-fetched and inspected the committed `runtime/watchdog_metrics_fixture.py`; the telemetry switch is independent from remediation state and only `/metrics` becomes unavailable.
-- Re-fetched and inspected the committed `runtime/watchdog_observability_acceptance.py`; deadline and stale-alert identities, freshness threshold checks, false-critical-alert guards, recovery checks, cleanup, and finite-positive timeout validation are present.
-- Confirmed `docker-compose.yml` already builds the fixture from `runtime/` and publishes port 9111 loopback-only, and `runtime/Dockerfile` already copies `watchdog_metrics_fixture.py`; no Compose/Dockerfile mutation was needed for the new outage control.
-- Attempted a fresh checkout and focused run with `python -m unittest runtime.tests.test_watchdog_metrics_fixture runtime.tests.test_watchdog_observability_acceptance`. The environment again failed before checkout because `github.com` DNS resolution is unavailable (`Could not resolve host: github.com`). The committed unit tests and Docker acceptance are therefore not claimed green.
+- Re-fetched the committed `docker-compose.yml` and confirmed the exact pins are present on the default branch.
+- Performed a local parser sanity check against the contract-test parsing logic; Prometheus, Grafana, and MCP image extraction all returned the expected fixed image values.
+- The full committed unittest cannot be executed from a repository checkout in the current execution environment because direct `github.com` checkout/DNS remains unavailable. No green claim is made for the exact committed test module.
+- The Docker acceptance rehearsal also remains unexecuted in this environment because a runnable checkout/container stack is unavailable here.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
 - No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Telemetry outage is modeled as transport/evidence failure, not as another remediation scenario. This prevents tests from accidentally coupling observability health to incident state.
-2. The fixture returns HTTP 503 instead of stale synthetic metrics. Prometheus therefore exercises its real failed-scrape/sample-aging behavior.
-3. The acceptance explicitly checks the critical deadline rule remains inactive during stale evidence; a stale warning alone is not sufficient proof because a rule-wiring bug could otherwise fire both.
-4. Recovery requires both data-plane freshness and alert-plane resolution. Merely making `/metrics` return 200 again is insufficient.
-5. Failure-injection controls remain local, fixed-purpose, credential-free, and incapable of performing remediation.
-6. Acceptance timeouts fail closed on non-finite values so `NaN`/infinite command-line values cannot accidentally create unbounded or nonsensical waits.
+1. Use explicit stable version tags now rather than keep `latest`; deterministic version pins eliminate the immediate upstream-drift failure mode without introducing an unverifiable digest value.
+2. Prefer Prometheus 3.13.3 because 3.13 is the current documented LTS line, which better matches StageGuard's production-readiness objective than chasing an RC or short-lived minor.
+3. Pin Grafana 13.2.1 because it is the current stable patch from the official release feed and includes current security fixes.
+4. Keep the pin contract dependency-free so checking Compose image invariants does not itself require installing PyYAML or bringing up Docker.
+5. Treat future upgrades as explicit acceptance events: update the pin, review upstream changes, then rerun both the deadline and stale-evidence lifecycles before accepting the new version.
 
 ### Blockers / unknowns
 
 - The focused unit tests still need execution from a runnable checkout.
-- The full Docker rehearsal now needs to run against the committed Prometheus/Grafana images to confirm actual sample aging, the 30-second pending interval, active-alert API behavior, and warning resolution.
-- `docker-compose.yml` currently uses `prom/prometheus:latest` and `grafana/grafana:latest`; this makes the local acceptance environment non-reproducible and permits upstream API/config drift between runs.
+- The full Docker watchdog rehearsal now needs to run against the newly pinned Prometheus 3.13.3 and Grafana 13.2.1 images to confirm actual sample aging, alert pending timing, active-alert API behavior, firing, and resolution.
+- Container digests have not been committed because an authoritative registry digest was not available through the current execution path; explicit immutable version intent is materially better than `latest`, but digest pinning can be considered after direct registry verification.
 - The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity.
 - Cloud Storage Policy Troubleshooter and live Gemini/Vertex acceptance still require authorized disposable-project credentials.
 
 ## Single best next step
 
-**Make the local observability rehearsal reproducible: replace the `latest` Prometheus and Grafana Compose tags with explicitly documented, current stable versions/digests after checking official release sources, add a lightweight configuration/contract test for those pins, and then run the complete deadline + telemetry-outage acceptance on the first environment where Docker and repository checkout are available. This prevents upstream `latest` drift from invalidating the Grafana Alertmanager and PromQL behavior StageGuard now depends on.**
+**Run the complete credential-free Docker observability rehearsal against the newly pinned Prometheus 3.13.3 + Grafana 13.2.1 stack on the first environment with a runnable checkout. If it passes, capture that exact acceptance baseline; if the Grafana active-alert API or PromQL behavior differs, fix the acceptance/parser/provisioning contract against these pinned versions rather than changing the pins blindly.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog freshness acceptance path.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog freshness acceptance path and the new explicit image pins.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
