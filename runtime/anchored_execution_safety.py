@@ -13,11 +13,17 @@ flight, and all state promotion/checkpoint/audit work remains lock protected.
 """
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
+
 from anchored_incident_service import AnchoredIncidentService
 from execution_safety import ExecutionSafeIncidentService
 from incident_checkpoint import CheckpointConflictError
 from incident_service import IncidentSnapshot
 from remediation import remediate_and_verify, remediation_operation_id
+
+
+DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS = 60.0
 
 
 class AnchoredExecutionSafeIncidentService(
@@ -37,8 +43,19 @@ class AnchoredExecutionSafeIncidentService(
     gate. Immutable incident snapshots remain readable during the wait.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        execution_max_seconds: float = DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS,
+        monotonic: Callable[[], float] | None = None,
+        **kwargs,
+    ) -> None:
+        if isinstance(execution_max_seconds, bool) or execution_max_seconds <= 0:
+            raise ValueError("execution_max_seconds must be positive")
         self._execution_in_flight = False
+        self._execution_started_monotonic: float | None = None
+        self._execution_max_seconds = float(execution_max_seconds)
+        self._execution_monotonic = monotonic or time.monotonic
         super().__init__(*args, **kwargs)
 
     def _require_checkpoint_consistency(self) -> None:
@@ -52,6 +69,23 @@ class AnchoredExecutionSafeIncidentService(
             if self._execution_in_flight:
                 return "dispatching"
             return super().execution_checkpoint_phase()
+
+    def remediation_execution_observability(self) -> dict[str, float | bool]:
+        """Return fixed-cardinality execution watchdog state with no provider details."""
+        with self._lock:
+            active = self._execution_in_flight
+            started = self._execution_started_monotonic
+            maximum = self._execution_max_seconds
+        if not active or started is None:
+            age = 0.0
+        else:
+            age = max(0.0, float(self._execution_monotonic()) - started)
+        return {
+            "active": active,
+            "age_seconds": age,
+            "max_seconds": maximum,
+            "deadline_exceeded": bool(active and age > maximum),
+        }
 
     def _mark_execution_uncertain(self, *, operation_id: str, dispatch_barrier: bool, reloaded: bool) -> None:
         """Preserve the parent execution-uncertainty semantics after provider contact."""
@@ -84,6 +118,7 @@ class AnchoredExecutionSafeIncidentService(
 
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
             dispatch_barrier = self._persist_dispatching_barrier(snapshot)
+            self._execution_started_monotonic = float(self._execution_monotonic())
             self._execution_in_flight = True
 
         try:
@@ -98,6 +133,7 @@ class AnchoredExecutionSafeIncidentService(
         except Exception:
             with self._lock:
                 self._execution_in_flight = False
+                self._execution_started_monotonic = None
                 self._mark_execution_uncertain(
                     operation_id=operation_id,
                     dispatch_barrier=dispatch_barrier,
@@ -155,3 +191,4 @@ class AnchoredExecutionSafeIncidentService(
                 raise
             finally:
                 self._execution_in_flight = False
+                self._execution_started_monotonic = None
