@@ -9,3 +9,15 @@ scrape_configs:
       - targets: ["simulator:9108"]
         labels:
           environment: demo
+
+  # Local-only StageGuard runtime safety rehearsal. Production deployments
+  # should scrape the real authenticated StageGuard /metrics endpoint through
+  # cloud_run_metrics_bridge.py (or an equivalent trusted identity-aware
+  # collector), not expose Cloud Run publicly.
+  - job_name: stageguard-runtime-watchdog
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["watchdog-fixture:9111"]
+        labels:
+          environment: demo
+          component: stageguard-runtime
