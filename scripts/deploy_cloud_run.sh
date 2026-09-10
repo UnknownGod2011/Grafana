@@ -97,6 +97,28 @@ for name in GOOGLE_CLOUD_LOCATION STAGEGUARD_GEMINI_MODEL; do
   fi
 done
 
+# Bound the time a live remediation may remain in flight before StageGuard
+# withdraws readiness. This setting does not enable remediation; it only tunes
+# the watchdog used if a write-capable composition is deployed separately.
+STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS="${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS:-60}"
+if [[ ! "${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+  echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be a finite positive decimal number" >&2
+  exit 2
+fi
+if ! "${PYTHON_BIN}" - "${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS}" <<'PY'
+import math
+import sys
+try:
+    value = float(sys.argv[1])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
+PY
+then
+  echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be a finite positive decimal number" >&2
+  exit 2
+fi
+
 # Production Cloud Run deployments always use authenticated durable checkpoint
 # state. The HMAC payload itself is never put in this shell command or ENV_VARS;
 # Cloud Run resolves it directly from Secret Manager at container start.
@@ -133,7 +155,7 @@ if [[ ! "${CHECKPOINT_OBJECT_BYTES}" =~ ^[0-9]+$ ]] || (( CHECKPOINT_OBJECT_BYTE
   exit 2
 fi
 
-ENV_VARS="STAGEGUARD_TELEMETRY_CONFIG=/config/telemetry.json,STAGEGUARD_METRIC_ACTIVATION=/config/activation.json,STAGEGUARD_LOG_ACTIVATION=/config/log-activation.json,STAGEGUARD_IAP_AUDIENCE=${IAP_AUDIENCE},STAGEGUARD_ENABLE_GEMINI=${ENABLE_GEMINI},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION},STAGEGUARD_GEMINI_MODEL=${STAGEGUARD_GEMINI_MODEL},GRAFANA_URL=${GRAFANA_URL},GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token,STAGEGUARD_CHECKPOINT_BUCKET=${CHECKPOINT_BUCKET},STAGEGUARD_CHECKPOINT_OBJECT=${CHECKPOINT_OBJECT}"
+ENV_VARS="STAGEGUARD_TELEMETRY_CONFIG=/config/telemetry.json,STAGEGUARD_METRIC_ACTIVATION=/config/activation.json,STAGEGUARD_LOG_ACTIVATION=/config/log-activation.json,STAGEGUARD_IAP_AUDIENCE=${IAP_AUDIENCE},STAGEGUARD_ENABLE_GEMINI=${ENABLE_GEMINI},STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS=${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION},STAGEGUARD_GEMINI_MODEL=${STAGEGUARD_GEMINI_MODEL},GRAFANA_URL=${GRAFANA_URL},GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE=/secrets/grafana-token,STAGEGUARD_CHECKPOINT_BUCKET=${CHECKPOINT_BUCKET},STAGEGUARD_CHECKPOINT_OBJECT=${CHECKPOINT_OBJECT}"
 SECRETS="/config/telemetry.json=${TELEMETRY_SECRET}:latest,/config/activation.json=${METRIC_ACTIVATION_SECRET}:latest,/config/log-activation.json=${LOG_ACTIVATION_SECRET}:latest,/secrets/grafana-token=${GRAFANA_TOKEN_SECRET}:latest,STAGEGUARD_CHECKPOINT_HMAC_KEY=${CHECKPOINT_HMAC_SECRET}:latest"
 
 gcloud run deploy "${SERVICE_NAME}" \
