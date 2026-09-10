@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, and production deployment hardening.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, and authenticated Cloud Run metrics ingestion.
 
 Core invariants remain unchanged:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -11,135 +11,104 @@ Core invariants remain unchanged:
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove it.
 - Durable checkpoint/audit integrity failures fail closed.
 
-## Run log — 2026-09-10 — authenticated runtime metrics ingestion and watchdog rehearsal
+## Run log — 2026-09-11 — watchdog alert recovery acceptance
 
 ### Inspected at start
 
-Read `progress.md` completely, then inspected `docker-compose.yml`, `runtime/prometheus.yml`, `runtime/api.py`, `runtime/Dockerfile`, `Dockerfile.api`, `runtime/requirements-cloudrun.txt`, the provisioned watchdog alert/dashboard path, observability tests, runtime docs, and repository tree.
+Read `progress.md` completely first, then inspected `runtime/watchdog_observability_acceptance.py`, `runtime/tests/test_grafana_runtime_observability.py`, `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml`, and `docs/runtime-metrics-ingestion.md`.
 
-The concrete gap was that Grafana had a source-controlled StageGuard watchdog dashboard and alert, but local Prometheus still scraped only the broadcast simulator. Production also needed a secure way for Prometheus-compatible collectors to reach an authenticated Cloud Run `/metrics` endpoint without making the Cloud Run service public.
+The previous run's strongest unblocked gap was confirmed: the local observability acceptance utility proved `idle -> overdue -> alert firing`, but returned the fixture to idle only as cleanup. It did not prove that Prometheus ingested recovery or that Grafana actually cleared the StageGuard watchdog alert. A stuck/latched alert could therefore pass the rehearsal.
 
 ### Research / attribution
 
-Used current official documentation:
-- Google Cloud Run service-to-service authentication: https://cloud.google.com/run/docs/authenticating/service-to-service
-- Google Cloud ID tokens: https://cloud.google.com/docs/authentication/get-id-token
-- Prometheus scrape/auth configuration: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
-- Grafana Alerting provisioning: https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/
+Checked current official Grafana material before changing the acceptance contract:
+- Grafana — View active notifications: https://grafana.com/docs/grafana/latest/alerting/monitor-status/view-active-notifications/
+- Grafana — Configure notifications / Alertmanager architecture: https://grafana.com/docs/grafana/latest/alerting/configure-notifications/
+- Grafana Labs 2026 note confirming the Alertmanager API remains available while the legacy UI changes: https://grafana.com/whats-new/2026-05-15-alerting--the-legacy-alertmanager-ui-is-no-longer-available-in-grafana-cloud/
 
-The bridge follows Google's documented Application Default Credentials + short-lived ID-token pattern. No third-party implementation was copied.
+The acceptance tool continues to use the Grafana Alertmanager v2 active-alert endpoint already used by the project. No third-party code was copied.
 
 ### Exact changes made
 
-#### Production/private metrics ingestion
+#### Full watchdog alert lifecycle acceptance
 
-Added `runtime/cloud_run_metrics_bridge.py`:
-- accepts exactly one trimmed HTTPS service origin and derives only `/metrics`;
-- rejects user info, arbitrary paths, query strings, fragments, and non-HTTPS targets;
-- obtains a short-lived Google-signed ID token through the already-present `google-auth` production dependency;
-- creates its own upstream Authorization header and does not forward caller headers;
-- bounds upstream responses to 2 MiB;
-- validates scrape timeout as finite and strictly positive, rejecting booleans, zero/negative values, NaN, infinity, and malformed numerics;
-- sanitizes upstream/token failures to a generic 502 without returning token, ADC, URL, provider body, or exception details;
-- exposes only `/metrics` and `/healthz` and therefore cannot become an arbitrary authenticated proxy;
-- binds loopback by default; non-loopback bind requires explicit `--allow-network-bind` for a trusted private network.
+Updated `runtime/watchdog_observability_acceptance.py` so a PASS now requires the complete bounded lifecycle:
 
-#### Credential-free local watchdog ingestion
+1. set fixture `idle` and observe `deadline_exceeded=0` in Prometheus;
+2. set fixture `overdue` and observe `deadline_exceeded=1`;
+3. observe the StageGuard watchdog alert as active in Grafana;
+4. explicitly set fixture back to `idle`;
+5. observe `deadline_exceeded=0` again in Prometheus;
+6. require the StageGuard watchdog alert to disappear from a valid Grafana active-alert response before declaring PASS.
 
-Added `runtime/watchdog_metrics_fixture.py`:
-- emits exactly the four runtime watchdog series consumed by Grafana;
-- supports only deterministic `idle`, `active`, and `overdue` states;
-- has no remediation/provider/lifecycle/arbitrary-action endpoint;
-- protects concurrent state access with a lock.
+Added `--resolve-timeout` with a bounded 35-second default. The existing `finally` cleanup remains, so failure anywhere still attempts to return the fixture to idle.
 
-Updated `runtime/Dockerfile` to package the fixture.
+#### Fail-closed Grafana response parser
 
-Updated `docker-compose.yml`:
-- adds `watchdog-fixture` using the tiny local runtime image;
-- exposes it only on `127.0.0.1:9111`;
-- adds health checking;
-- makes Prometheus wait for both the broadcast simulator and watchdog fixture;
-- does not auto-start MCP, Gemini, or remediation.
+Added a testable `grafana_alert_active_from_payload()` boundary:
+- only a JSON list is accepted as an active-alert response;
+- each alert must be an object;
+- `labels` and `annotations` must be objects when present;
+- the StageGuard alert can be matched by the committed alert title or committed summary annotation;
+- unrelated active alerts do not prevent StageGuard from being considered resolved;
+- malformed/unexpected API shapes raise instead of being interpreted as `False`/resolved.
 
-Updated `runtime/prometheus.yml`:
-- adds `stageguard-runtime-watchdog` scraping `watchdog-fixture:9111`;
-- uses fixed `environment=demo` and `component=stageguard-runtime` labels;
-- preserves the existing simulator scrape.
+This matters specifically on the recovery edge: an HTML error body, object-shaped API response, or malformed alert entry must never create a false recovery PASS.
 
-#### Acceptance tooling
+#### Regression tests
 
-Added `runtime/watchdog_observability_acceptance.py`:
-- moves the fixture to idle and waits for Prometheus to observe `deadline_exceeded=0`;
-- moves the fixture to overdue and waits for Prometheus to observe `1`;
-- waits for the Grafana-managed watchdog alert via Grafana's Alertmanager API;
-- resets the fixture to idle in `finally`;
-- requires fixture, Prometheus, and Grafana endpoints to be loopback HTTP origins before sending any request, preventing the local default Grafana credentials from being sent remotely by mistake.
+Added `runtime/tests/test_watchdog_observability_acceptance.py` covering:
+- title-based active alert recognition;
+- summary-based recognition;
+- unrelated active alerts;
+- empty active-alert list as resolved;
+- fail-closed handling for invalid root response shapes;
+- fail-closed handling for malformed alert entries;
+- rejection of remote, credentialed, path-bearing, query-bearing, and HTTPS endpoints by the local acceptance loopback guard;
+- acceptance of `127.0.0.1` and `localhost` development origins.
 
-Added `docs/runtime-metrics-ingestion.md` describing local rehearsal, the acceptance command, authenticated Cloud Run bridge topology, `roles/run.invoker`, attached workload identity, Workload Identity Federation for off-cloud collectors, and Grafana Cloud/remote Prometheus trust separation. No tenant URL, Grafana token, notification destination, Cloud Run credential, or remediation credential is committed.
+#### Documentation
 
-#### Tests
-
-Added/updated:
-- `runtime/tests/test_cloud_run_metrics_bridge.py` — target/audience restrictions, bridge-owned auth header, finite-positive timeout validation, explicit non-loopback opt-in, sanitized upstream failures;
-- `runtime/tests/test_watchdog_metrics_fixture.py` — exact idle/active/overdue series and bounded HTTP control surface;
-- `runtime/tests/test_grafana_runtime_observability.py` — Compose packaging/loopback fixture exposure and Prometheus runtime-watchdog scrape contract.
+Updated `docs/runtime-metrics-ingestion.md` to document the full healthy -> firing -> resolved acceptance lifecycle, the fail-closed response-shape rule, the bounded resolution timeout, and the fact that unrelated active Grafana alerts do not block this rule-specific recovery check.
 
 ### Commits this run
 
-- `bf2b571aafed8691f706ef79735789bb663b65ce` — authenticated Cloud Run metrics bridge
-- `b35d86997192891224474f6d21afa551f8d4885e` — local watchdog metrics fixture
-- `3d71c6038ca22623f94aae9d66e04c8190ac54e8` — initial bridge safety tests
-- `35b1d4f83cd5bcbce8c8cc65e675fb7c548fa609` — package fixture in local runtime image
-- `adcd836460afebeac70b63294fe92ae93f1b9351` — wire fixture into Compose
-- `fd0f70a8dd086c51c449b55729539d372456a440` — scrape watchdog fixture from Prometheus
-- `35b7785925153d25ad0966b1599851c8e80ba341` — fixture regression tests
-- `5a7aae4dd28ef6e9934ff29600baefd240803b9a` — bridge test import correction
-- `c14c08e1670ad074bba7179a0d52f2304c499621` — runtime metrics ingestion documentation
-- `86e59920d6289b8535c476b4cdcaef279b837038` — local ingestion contract coverage
-- `035c030957c5a633836ba76a1b815ebe90781df1` — watchdog observability acceptance tool
-- `75c70eb293751b315a158c993ba9d18fa80d1311` — loopback-only acceptance safety
-- `7af88871b000e6eb58c7fbd901a574698df4f8fe` — acceptance documentation
-- `c3fa473c49c344288711ed4831c89811a1e236cf` — initial run handoff
-- `2073e2c6551f0fb3b6dbb392ba336c3cc71d078e` — finite/positive bridge timeout hardening
-- `5c78242f9fb4808eaef3afc721a12b175c3e4532` — timeout regression coverage
+- `8efe14640e4529de0f04efc2fa6915809fa57faa` — verify watchdog alert recovery in acceptance rehearsal
+- `a377ba2ea8ca150f7bce0eaf7e9056c1b57521c9` — test watchdog acceptance alert lifecycle parsing
+- `a12d65d461525bdcda06a3e4c1b70c630a2d6925` — document watchdog alert resolution acceptance
 
 ### Tests / checks / results
 
-- Re-fetched the committed bridge and inspected the final HTTPS-origin boundary, ID-token injection, fixed upstream path, response bound, sanitized failure path, loopback default, and explicit network-bind guard.
-- Re-fetched the provisioned Grafana alert and confirmed it still evaluates `max(stageguard_remediation_execution_deadline_exceeded)` with `for: 10s` and `noDataState: NoData`.
-- Re-fetched the ingestion documentation and checked commands/ports against the committed files.
-- Attempted a fresh checkout and focused run:
-  `python -m unittest runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_watchdog_metrics_fixture runtime.tests.test_grafana_runtime_observability -v`
-- The execution container still failed before checkout with `Could not resolve host: github.com`. Therefore no new green-suite claim is made.
+- Re-fetched the committed acceptance script and manually inspected the final recovery sequence and parser boundary.
+- Ran credential-free parser micro-checks locally for empty/resolved, title match, summary match, unrelated alerts, invalid root shapes, malformed entries: PASS.
+- The repository checkout/Docker environment is still unavailable to this run, so the exact committed unittest module and Docker Compose acceptance could not be executed end-to-end. No green-suite claim is made.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
 - No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Production metrics ingestion preserves authenticated Cloud Run; observability is not a reason to enable unauthenticated invocation.
-2. The bridge is intentionally a fixed-purpose identity-aware `/metrics` fetcher rather than a generic proxy.
-3. Prometheus YAML does not contain a static Cloud Run ID token; the bridge obtains short-lived identity from ADC.
-4. The local fixture models observability state only and cannot execute remediation.
-5. The acceptance utility is local-only because it uses local development Grafana credentials.
-6. Missing Grafana watchdog telemetry remains NoData, distinct from a confirmed deadline breach.
-7. No CI is used merely to work around this automation environment's DNS limitation.
+1. Recovery is an observable contract, not cleanup: the acceptance rehearsal must prove both Prometheus recovery ingestion and Grafana alert resolution.
+2. A malformed Grafana active-alert response fails closed and cannot count as resolution.
+3. Alert resolution is scoped to the StageGuard watchdog rule; unrelated alerts may legitimately remain active.
+4. The acceptance utility remains loopback-only because it uses local-development Grafana credentials.
+5. No CI is triggered merely to obtain test signal while direct repository execution remains unavailable.
 
 ### Blockers / unknowns
 
-- The new tests and Docker acceptance utility need execution from a runnable checkout/Docker host.
-- The exact active-alert response shape from the currently pulled Grafana image should be confirmed during that rehearsal; the acceptance parser currently accepts either the committed alert title label or committed summary annotation.
-- The authenticated bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service using an attached invoker identity.
+- The new exact unittest module still needs execution from a runnable checkout.
+- The Docker acceptance rehearsal still needs a real local stack run against the currently pinned Grafana image to verify firing and resolution timing/API shape together.
+- The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity.
 - Cloud Storage Policy Troubleshooter and live Gemini/Vertex acceptance still require authorized disposable-project credentials.
 
 ## Single best next step
 
-**On the first runnable Docker checkout, execute `python runtime/watchdog_observability_acceptance.py`, verify the Grafana Alertmanager response shape, then extend the acceptance utility to prove the watchdog alert resolves after the fixture returns to `idle`. If the current Grafana API shape differs, adapt only the response parser; keep the alert semantics and authentication boundaries unchanged.**
+**On the first runnable Docker checkout, run the focused observability unit tests and `python runtime/watchdog_observability_acceptance.py` against the default Compose stack. If that passes, move to the next production gap: add scrape-freshness/staleness observability so StageGuard can distinguish a healthy `deadline_exceeded=0` sample from a metrics pipeline that has silently stopped delivering fresh runtime telemetry.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates this new fixture/acceptance path.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog fixture/acceptance path.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
