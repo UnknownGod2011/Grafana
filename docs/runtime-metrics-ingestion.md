@@ -36,7 +36,17 @@ After `docker compose up --build -d`, run the bounded acceptance rehearsal:
 python runtime/watchdog_observability_acceptance.py
 ```
 
-The script starts from `idle`, waits until Prometheus reports `deadline_exceeded=0`, moves the fixture to `overdue`, waits for Prometheus to ingest `1`, and then waits for the Grafana-managed alert to appear through Grafana's Alertmanager API. It resets the fixture to `idle` in a `finally` block. All three service endpoints are required to be loopback HTTP origins so the local default Grafana credentials cannot be sent to a remote host by mistake.
+The script proves the complete watchdog alert lifecycle rather than only the firing edge:
+
+1. force the fixture to `idle` and wait until Prometheus reports `deadline_exceeded=0`;
+2. move the fixture to `overdue` and wait for Prometheus to ingest `1`;
+3. wait for the Grafana-managed watchdog alert to appear in Grafana's active Alertmanager v2 alerts response;
+4. return the fixture to `idle` and wait for Prometheus to report `0` again;
+5. require that the StageGuard watchdog alert disappears from the valid active-alert response, proving resolution rather than merely assuming it from the metric transition.
+
+Unexpected Grafana response shapes are never interpreted as recovery. The parser accepts only an active-alert list and fails closed on malformed alert entries, so an API/schema failure cannot produce a false PASS. Unrelated active alerts may remain present; only the StageGuard watchdog rule is required to resolve. The fixture is also reset to `idle` in a `finally` block.
+
+All three service endpoints are required to be loopback HTTP origins so the local default Grafana credentials cannot be sent to a remote host by mistake. The default firing and resolution waits are bounded and can be adjusted with `--alert-timeout` and `--resolve-timeout` when testing a deliberately slower local evaluation interval.
 
 ## Authenticated Cloud Run scrape bridge
 
@@ -88,6 +98,7 @@ References:
 - Google Cloud — Get an ID token: https://cloud.google.com/docs/authentication/get-id-token
 - Prometheus — scrape configuration / authorization: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
 - Grafana — Alerting provisioning: https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/
+- Grafana — View active notifications: https://grafana.com/docs/grafana/latest/alerting/monitor-status/view-active-notifications/
 
 ## Grafana Cloud / remote Prometheus
 
