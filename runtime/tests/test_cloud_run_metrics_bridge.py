@@ -4,6 +4,7 @@ import io
 import sys
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
