@@ -30,6 +30,14 @@ stageguard_remediation_execution_deadline_exceeded
 
 The Grafana-managed `stageguard-remediation-deadline` rule evaluates the last series. It intentionally treats missing telemetry as `NoData`, not as a synthetic deadline breach.
 
+After `docker compose up --build -d`, run the bounded acceptance rehearsal:
+
+```bash
+python runtime/watchdog_observability_acceptance.py
+```
+
+The script starts from `idle`, waits until Prometheus reports `deadline_exceeded=0`, moves the fixture to `overdue`, waits for Prometheus to ingest `1`, and then waits for the Grafana-managed alert to appear through Grafana's Alertmanager API. It resets the fixture to `idle` in a `finally` block. All three service endpoints are required to be loopback HTTP origins so the local default Grafana credentials cannot be sent to a remote host by mistake.
+
 ## Authenticated Cloud Run scrape bridge
 
 `runtime/cloud_run_metrics_bridge.py` is a narrow identity-aware bridge for Prometheus-compatible collectors. It obtains a short-lived Google-signed ID token with Application Default Credentials and forwards **only** `GET /metrics` to one configured HTTPS service origin.
@@ -79,6 +87,7 @@ References:
 - Google Cloud — Authenticate service-to-service requests: https://cloud.google.com/run/docs/authenticating/service-to-service
 - Google Cloud — Get an ID token: https://cloud.google.com/docs/authentication/get-id-token
 - Prometheus — scrape configuration / authorization: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+- Grafana — Alerting provisioning: https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/
 
 ## Grafana Cloud / remote Prometheus
 
