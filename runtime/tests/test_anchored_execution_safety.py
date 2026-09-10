@@ -92,16 +92,18 @@ class AnchoredExecutionSafetyCompositionTests(unittest.TestCase):
             self.assertEqual("clear", service.execution_reconciliation_state())
             self.assertEqual("synchronized", service.checkpoint_state())
 
-    def test_execution_watchdog_configuration_must_be_positive(self):
+    def test_execution_watchdog_configuration_must_be_finite_and_positive(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaisesRegex(ValueError, "execution_max_seconds must be positive"):
-                self.service(
-                    diagnosed(),
-                    root / "audit.jsonl",
-                    JsonCheckpointStore(root / "checkpoint.json"),
-                    execution_max_seconds=0,
-                )
+            for invalid in (0, -1, float("inf"), float("nan"), True, "not-a-number"):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, "finite positive number"):
+                        self.service(
+                            diagnosed(),
+                            root / "audit.jsonl",
+                            JsonCheckpointStore(root / "checkpoint.json"),
+                            execution_max_seconds=invalid,
+                        )
 
     def test_execution_safe_composition_emits_v4_and_restarts_from_compacted_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
