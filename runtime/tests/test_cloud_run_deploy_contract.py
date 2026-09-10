@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "deploy_cloud_run.sh"
 GEMINI = ROOT / "runtime" / "gemini_commander.py"
+ENTRYPOINT = ROOT / "runtime" / "cloudrun_entrypoint.py"
+DOCTOR = ROOT / "scripts" / "gcp_deploy_doctor.py"
 
 
 class CloudRunDeployContractTests(unittest.TestCase):
@@ -15,6 +17,8 @@ class CloudRunDeployContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.deploy = DEPLOY.read_text(encoding="utf-8")
         cls.gemini = GEMINI.read_text(encoding="utf-8")
+        cls.entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+        cls.doctor = DOCTOR.read_text(encoding="utf-8")
 
     def test_deploy_forwards_project_required_by_vertex_commander(self) -> None:
         self.assertIn('GOOGLE_CLOUD_PROJECT=${PROJECT_ID}', self.deploy)
@@ -70,6 +74,25 @@ class CloudRunDeployContractTests(unittest.TestCase):
         deploy_index = self.deploy.index('gcloud run deploy')
         self.assertLess(self.deploy.index('CHECKPOINT_BUCKET is not a valid bounded GCS bucket name'), deploy_index)
         self.assertLess(self.deploy.index('CHECKPOINT_OBJECT is not a valid bounded object path'), deploy_index)
+
+    def test_checkpoint_object_limit_is_utf8_bytes_across_deploy_doctor_and_runtime(self) -> None:
+        self.assertIn("CHECKPOINT_OBJECT_BYTES", self.deploy)
+        self.assertIn("LC_ALL=C", self.deploy)
+        self.assertIn("wc -c", self.deploy)
+        self.assertIn("at most 512 UTF-8 bytes", self.deploy)
+        self.assertIn('len(name.encode("utf-8")) > 512', self.entrypoint)
+        self.assertIn('len(name.encode("utf-8")) <= 512', self.doctor)
+        self.assertNotIn('(( ${#CHECKPOINT_OBJECT} > 512 ))', self.deploy)
+
+    def test_checkpoint_object_leading_and_trailing_whitespace_fail_before_deploy(self) -> None:
+        deploy_index = self.deploy.index('gcloud run deploy')
+        leading_guard = '"${CHECKPOINT_OBJECT}" =~ ^[[:space:]]'
+        trailing_guard = '"${CHECKPOINT_OBJECT}" =~ [[:space:]]$'
+        self.assertIn(leading_guard, self.deploy)
+        self.assertIn(trailing_guard, self.deploy)
+        self.assertLess(self.deploy.index(leading_guard), deploy_index)
+        self.assertLess(self.deploy.index(trailing_guard), deploy_index)
+        self.assertIn('name != raw', self.entrypoint)
 
 
 if __name__ == "__main__":
