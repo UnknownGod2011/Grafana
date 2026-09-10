@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import math
 import os
 import urllib.error
 import urllib.request
@@ -95,9 +96,15 @@ class CloudRunMetricsClient:
     ) -> None:
         self.metrics_url, default_audience = normalize_target(target)
         self.audience = normalize_audience(audience) if audience else default_audience
-        if isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
-            raise BridgeConfigurationError("timeout must be positive")
-        self.timeout_seconds = float(timeout_seconds)
+        if isinstance(timeout_seconds, bool):
+            raise BridgeConfigurationError("timeout must be finite and positive")
+        try:
+            timeout_value = float(timeout_seconds)
+        except (TypeError, ValueError) as exc:
+            raise BridgeConfigurationError("timeout must be finite and positive") from exc
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            raise BridgeConfigurationError("timeout must be finite and positive")
+        self.timeout_seconds = timeout_value
         self._token_supplier = token_supplier
         self._opener = opener
 
