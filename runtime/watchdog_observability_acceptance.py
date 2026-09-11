@@ -95,6 +95,46 @@ def grafana_runtime_version_from_payload(payload: Any) -> str:
     return version.strip()
 
 
+def prometheus_query_value_from_payload(payload: Any) -> float | None:
+    """Parse one scalar-like Prometheus instant-vector sample, failing closed.
+
+    StageGuard's acceptance expressions are deliberately expected to collapse to
+    zero or one float sample. Prometheus does not guarantee vector ordering, so
+    selecting result[0] from a multi-series response could make a duplicated or
+    unexpectedly labeled safety metric appear healthy. Likewise, Prometheus may
+    encode NaN/Inf sample values as strings. Treat both ambiguity and non-finite
+    values as invalid evidence rather than acceptance success.
+    """
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise ValueError("Prometheus query response must be a successful object")
+    data = payload.get("data")
+    if not isinstance(data, dict) or data.get("resultType") != "vector":
+        raise ValueError("Prometheus query result must be an instant vector")
+    results = data.get("result")
+    if not isinstance(results, list):
+        raise ValueError("Prometheus query result must be a list")
+    if not results:
+        return None
+    if len(results) != 1:
+        raise ValueError("Prometheus safety query must return exactly one series")
+    entry = results[0]
+    if not isinstance(entry, dict):
+        raise ValueError("Prometheus query series must be an object")
+    value = entry.get("value")
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError("Prometheus query sample must be a two-element value")
+    sample = value[1]
+    if isinstance(sample, bool) or not isinstance(sample, (str, int, float)):
+        raise ValueError("Prometheus query sample must be numeric")
+    try:
+        parsed = float(sample)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Prometheus query sample must be numeric") from exc
+    if not math.isfinite(parsed):
+        raise ValueError("Prometheus query sample must be finite")
+    return parsed
+
+
 def prometheus_runtime_version(base: str) -> str:
     payload = json.loads(_request(f"{base}/api/v1/status/buildinfo").decode("utf-8"))
     return prometheus_runtime_version_from_payload(payload)
@@ -121,18 +161,7 @@ def set_telemetry(base: str, available: bool) -> None:
 def prometheus_query_value(base: str, expression: str) -> float | None:
     query = urllib.parse.urlencode({"query": expression})
     payload = json.loads(_request(f"{base}/api/v1/query?{query}").decode("utf-8"))
-    if payload.get("status") != "success":
-        return None
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return None
-    results = data.get("result", [])
-    if not isinstance(results, list) or not results:
-        return None
-    value = results[0].get("value") if isinstance(results[0], dict) else None
-    if not isinstance(value, list) or len(value) < 2:
-        return None
-    return float(value[1])
+    return prometheus_query_value_from_payload(payload)
 
 
 def prometheus_value(base: str) -> float | None:
