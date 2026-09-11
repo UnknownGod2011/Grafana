@@ -17,122 +17,102 @@ Core invariants:
 - Partial, missing, or unavailable evidence must never reach infrastructure mutation.
 - The browser must never turn evidence unavailability into an actionable diagnosis or expose provider failure detail.
 - An authenticated HTTP 200 alone is not sufficient bridge readiness; the body must prove it is an unambiguous StageGuard runtime-safety exposition.
+- The runtime-safety sentinel is label-free by contract; any additional labeled series in that metric family makes the payload ambiguous and must fail closed.
 - Cloud Run metrics acceptance must never grant IAM, print credentials, mutate incidents, or require making StageGuard public.
 - Recovery acceptance may interrupt only the local metrics bridge; it must not mutate Cloud Run, IAM, or StageGuard lifecycle state.
 
-## Run log — 2026-09-11 — local metrics bridge failure/recovery acceptance
+## Run log — 2026-09-11 — sentinel-family ambiguity hardening
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Inspected:
-- `runtime/cloud_run_metrics_acceptance.py`
-- `runtime/tests/test_cloud_run_metrics_acceptance.py`
 - `runtime/cloud_run_metrics_bridge.py`
+- `runtime/cloud_run_metrics_acceptance.py`
+- `runtime/tests/test_cloud_run_metrics_bridge.py`
+- `runtime/tests/test_cloud_run_metrics_acceptance.py`
 - `docs/cloud-run-metrics-bridge-safety.md`
 
-The previous handoff identified the highest-value safe next step as extending the private Cloud Run acceptance path with a bounded local bridge outage/recovery proof. That work does not require changing Cloud Run, IAM, incident state, or remediation state.
+The previous handoff identified real private Cloud Run acceptance as the strongest validation step. That still requires a runnable checkout plus external ADC/Cloud Run credentials, so this run inspected the trust boundary for useful credential-free hardening rather than stopping.
+
+### Finding
+
+`validate_stageguard_metrics()` correctly rejected a payload whose only deadline sentinel was labeled, but it ignored labeled sentinel-family samples whenever a valid bare sentinel was also present. Example:
+
+```text
+stageguard_remediation_execution_deadline_exceeded 0
+stageguard_remediation_execution_deadline_exceeded{source="shadow"} 1
+```
+
+Because the validator only collected a first token exactly equal to the bare metric name, this body could pass readiness validation even though the forwarded Prometheus exposition contained two semantically conflicting series in the safety-critical metric family. The bridge contract says the sentinel is authoritative and label-free, so accepting an additional labeled series is unnecessarily ambiguous.
 
 ### Exact changes made
 
-#### Extended private Cloud Run acceptance to prove `up: 1 -> 0 -> 1`
+#### Hardened the private Cloud Run metrics payload validator
 
-Updated `runtime/cloud_run_metrics_acceptance.py`.
+Updated `runtime/cloud_run_metrics_bridge.py`.
 
-The acceptance path is now:
-
-```text
-anonymous Cloud Run /metrics rejection
-  -> ADC-authenticated Cloud Run /metrics + StageGuard sentinel validation
-  -> local authenticated bridge ready
-  -> disposable Prometheus observes up == 1
-  -> stop only the local bridge
-  -> Prometheus observes the same target as up == 0
-  -> same authenticated CloudRunMetricsClient successfully fetches upstream /metrics while bridge is down
-  -> restart bridge on the exact same port
-  -> Prometheus observes up == 1 again
-```
-
-Implementation details:
-- generalized Prometheus target-state waiting into `wait_for_prometheus_up(..., expected=0|1, ...)`;
-- rejects non-binary expected states at the acceptance helper boundary;
-- retained `fetch_prometheus_up()` as the focused `up == 1` wrapper used by existing regressions;
-- added `_start_bridge()` and `_stop_bridge()` helpers so the bridge lifecycle is explicit and cleanup remains centralized;
-- after initial `up == 1`, shuts down and closes only the local bridge server;
-- requires Prometheus to observe exactly one finite `up == 0` sample before recovery is attempted;
-- calls the same production `CloudRunMetricsClient.fetch()` while the local bridge is down, proving the private Cloud Run + ADC/IAM path remains valid and the acceptance did not mutate upstream state;
-- restarts the bridge on the exact original port so Prometheus cannot recover by accidentally scraping a different target;
-- requires Prometheus to observe exactly one finite `up == 1` sample after restart;
-- reports initial, outage, and recovered `up` values separately;
-- preserves `finally` cleanup for both Prometheus and whichever bridge instance is currently active.
+Changes:
+- added `_is_sentinel_family_token()` to recognize either the exact label-free sentinel token or the same metric name followed by a Prometheus label set;
+- retained the exact bare sentinel as the only authorized sample form;
+- now rejects any labeled sentinel-family series immediately with a sanitized `RuntimeError`;
+- rejects the labeled family series even if a valid bare sentinel is also present before or after it;
+- does not confuse similarly prefixed metrics such as `stageguard_remediation_execution_deadline_exceeded_total` with the sentinel family;
+- updated module/docstring comments to state that one finite label-free boolean sentinel **and no additional sentinel-family series** is required.
 
 Commit:
-- `54c5634a3a512d2c41198c5df1a99900ed446429` — add bounded bridge failure recovery acceptance
+- `f9f2d5edb118a43e1701a00a515f907733558fc2` — harden metrics sentinel family validation
 
-#### Added credential-free recovery regressions
+#### Added focused credential-free regression coverage
 
-Updated `runtime/tests/test_cloud_run_metrics_acceptance.py`.
+Added `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py`.
 
-New coverage proves:
-- `wait_for_prometheus_up()` can require an exact single `up == 0` sample;
-- expected target state is restricted to binary `0/1`;
-- the complete acceptance orchestration requests Prometheus states in the exact order `[1, 0, 1]`;
-- upstream `client.fetch()` is called twice: once before exposing the bridge and once while the bridge is intentionally down;
-- the recovered bridge is started on the exact original port;
-- ordering is fail-closed: Prometheus must observe bridge-down before the upstream continuity fetch and before recovery;
-- existing Docker safety, ambiguity/non-finite rejection, anonymous privacy check, and CLI sanitization contracts remain represented.
+Coverage proves:
+- exactly one bare `0` or `1` sentinel is accepted;
+- a valid bare sentinel plus a labeled family series is rejected for either labeled value;
+- ordering does not matter: labeled-before-bare is also rejected;
+- a labeled-only sentinel fails closed;
+- a similarly prefixed but different metric name does not create a false-positive ambiguity.
 
 Commit:
-- `5b0c7c11d264c0cbf50e3bab827fb5548741dd3c` — test metrics bridge outage recovery lifecycle
-
-#### Updated operational safety documentation
-
-Updated `docs/cloud-run-metrics-bridge-safety.md` so a passing disposable-project run now explicitly proves ten ordered conditions rather than stopping at initial `up == 1`.
-
-The documentation now states that:
-- only the local bridge is interrupted;
-- Cloud Run is never stopped/restarted/reconfigured;
-- IAM is never changed;
-- the private upstream is revalidated during the local outage;
-- recovery must occur on the same bridge port;
-- credential-free tests cover the ordered `1 -> 0 -> 1` contract.
-
-Commit:
-- `43c54732dc381e87ac49222ba90876f44e3055cf` — document local bridge failure recovery acceptance
+- `89bf1a163dd3137910e427b99d9df9f2efe29450` — test metrics sentinel family ambiguity
 
 ### Checks / results
+
+Re-read the updated validator from the repository after the write and confirmed the expected family-detection and fail-closed branches are present.
 
 Attempted a fresh executable checkout and focused test run:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
 cd /tmp/stageguard
-python -m unittest runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_cloud_run_metrics_bridge
+python -m unittest \
+  runtime.tests.test_cloud_run_metrics_bridge \
+  runtime.tests.test_cloud_run_metrics_bridge_sentinel_family \
+  runtime.tests.test_cloud_run_metrics_acceptance
 ```
 
-The execution container again failed before checkout with:
+The execution container failed before checkout with:
 
 ```text
 Could not resolve host: github.com
 ```
 
-Therefore no claim is made that the updated acceptance regression module, existing bridge tests, browser acceptance, full unittest suite, or Docker rehearsal is green in this run.
-
-A local Python runtime check confirmed `ThreadingHTTPServer.allow_reuse_address == 1`, so the same-port bridge restart design is compatible with Python's shipped HTTP server behavior.
+Therefore no claim is made that the new regression, existing bridge tests, acceptance tests, browser acceptance, full unittest suite, or Docker rehearsal is green in this run.
 
 Repository writes succeeded through the connected GitHub integration. No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
 
 ### Decisions
 
-1. Interruption is scoped to the local authenticated metrics bridge only; acceptance must never simulate failure by revoking IAM or stopping Cloud Run.
-2. Prometheus must observe `up == 0` before any restart, otherwise the test would not prove scraper-visible failure detection.
-3. The authenticated upstream is rechecked while the bridge is down to prove the Cloud Run service and invocation path remained intact.
-4. Recovery must use the same local port because Prometheus's target is fixed; this prevents a different accidental target from satisfying recovery.
-5. The target-state helper accepts only `0` or `1` and still requires a single finite series, preserving the existing ambiguity fail-closed rule.
-6. No CI wiring was added; real Cloud Run acceptance remains opt-in to avoid credentials, cloud cost, and noisy Actions usage.
+1. Treat the deadline sentinel as an exact label-free metric contract, not merely as one valid sample somewhere in a larger same-name family.
+2. Fail closed on any labeled sample using the safety sentinel metric name, because forwarding ambiguous safety semantics is worse than surfacing scrape/evidence unavailability.
+3. Keep the validator intentionally narrow rather than implementing a general Prometheus parser.
+4. Keep similarly prefixed but distinct metric names valid so the family check does not accidentally reject legitimate future metrics.
+5. Do not add CI just to compensate for the current execution environment's DNS failure.
 
 ### Blockers / unknowns
 
-- The updated `runtime/tests/test_cloud_run_metrics_acceptance.py` still needs execution in a runnable checkout.
+- The new `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py` still needs execution in a runnable checkout.
+- The updated focused bridge/acceptance suite still needs execution.
 - The real acceptance harness requires an existing private StageGuard Cloud Run test service, working ADC for a least-privilege invoker identity, and Docker.
 - The Playwright evidence-unavailable browser acceptance still needs execution with Chromium.
 - The complete pinned Prometheus 3.13.3 + Grafana 13.2.1 watchdog rehearsal still needs a current run after the latest hardening.
@@ -140,13 +120,13 @@ Repository writes succeeded through the connected GitHub integration. No GitHub 
 
 ## Single best next step
 
-**Execute the focused bridge/acceptance tests and then run `python runtime/cloud_run_metrics_acceptance.py` against a disposable private StageGuard Cloud Run service with a dedicated least-privilege `roles/run.invoker` identity, capturing whether the real path completes `up: 1 -> 0 -> 1` while the authenticated upstream remains valid during the local outage.**
+**In the first runnable environment, execute the focused bridge/sentinel-family/acceptance tests, then run `python runtime/cloud_run_metrics_acceptance.py` against a disposable private StageGuard Cloud Run service using a dedicated least-privilege `roles/run.invoker` identity. Confirm the real ADC -> private `/metrics` -> validated bridge -> Prometheus path completes `up: 1 -> 0 -> 1` and that the new sentinel-family ambiguity regression is green.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance and sentinel-family hardening.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
