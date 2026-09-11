@@ -31,6 +31,22 @@ class _Response:
         return self._body.read(size)
 
 
+class _FakeServer:
+    def __init__(self, port: int) -> None:
+        self.server_address = ("0.0.0.0", port)
+
+    def shutdown(self) -> None:
+        return None
+
+    def server_close(self) -> None:
+        return None
+
+
+class _FakeThread:
+    def join(self, timeout: float | None = None) -> None:
+        return None
+
+
 class CloudRunMetricsAcceptanceTests(unittest.TestCase):
     def test_unauthorized_upstream_requires_401_or_403(self) -> None:
         for status in (401, 403):
@@ -71,6 +87,38 @@ class CloudRunMetricsAcceptanceTests(unittest.TestCase):
             self.assertEqual(
                 acceptance.fetch_prometheus_up("http://127.0.0.1:9090", acceptance.DEFAULT_JOB_NAME, 0.1),
                 1.0,
+            )
+
+    def test_prometheus_query_can_require_exactly_one_down_sample(self) -> None:
+        down = {
+            "status": "success",
+            "data": {
+                "result": [
+                    {
+                        "metric": {"job": acceptance.DEFAULT_JOB_NAME},
+                        "value": [1234, "0"],
+                    }
+                ]
+            },
+        }
+        with mock.patch.object(acceptance.urllib.request, "urlopen", return_value=_Response(json.dumps(down).encode())):
+            self.assertEqual(
+                acceptance.wait_for_prometheus_up(
+                    "http://127.0.0.1:9090",
+                    acceptance.DEFAULT_JOB_NAME,
+                    0.0,
+                    0.1,
+                ),
+                0.0,
+            )
+
+    def test_prometheus_expected_state_is_binary(self) -> None:
+        with self.assertRaises(ValueError):
+            acceptance.wait_for_prometheus_up(
+                "http://127.0.0.1:9090",
+                acceptance.DEFAULT_JOB_NAME,
+                0.5,
+                0.1,
             )
 
     def test_prometheus_query_rejects_ambiguous_target_set(self) -> None:
@@ -134,6 +182,109 @@ class CloudRunMetricsAcceptanceTests(unittest.TestCase):
         self.assertTrue(volume.endswith(":/etc/prometheus/prometheus.yml:ro"))
         self.assertNotIn("--privileged", command)
         self.assertNotIn("--network", command)
+
+    def test_acceptance_proves_up_down_up_without_mutating_upstream(self) -> None:
+        client = mock.Mock()
+        first_server = _FakeServer(49123)
+        recovered_server = _FakeServer(49123)
+        starts = [
+            (first_server, _FakeThread()),
+            (recovered_server, _FakeThread()),
+        ]
+        observed_states: list[float] = []
+
+        def observe(_url: str, _job: str, expected: float, _timeout: float) -> float:
+            observed_states.append(expected)
+            return expected
+
+        with mock.patch.object(acceptance, "verify_unauthorized_upstream", return_value=403):
+            with mock.patch.object(acceptance, "_docker_available", return_value=None):
+                with mock.patch.object(acceptance, "_start_bridge", side_effect=starts) as start_bridge:
+                    with mock.patch.object(acceptance, "_stop_bridge") as stop_bridge:
+                        with mock.patch.object(acceptance, "wait_for_bridge_ready", return_value=None):
+                            with mock.patch.object(
+                                acceptance,
+                                "_start_prometheus",
+                                return_value=("prometheus-container", 49090),
+                            ):
+                                with mock.patch.object(acceptance, "_stop_container"):
+                                    with mock.patch.object(
+                                        acceptance,
+                                        "wait_for_prometheus_up",
+                                        side_effect=observe,
+                                    ):
+                                        result = acceptance.run_acceptance(
+                                            "https://stageguard.example",
+                                            client_factory=mock.Mock(return_value=client),
+                                            timeout_seconds=1,
+                                            prometheus_start_timeout_seconds=1,
+                                            scrape_timeout_seconds=1,
+                                        )
+
+        self.assertEqual(observed_states, [1.0, 0.0, 1.0])
+        self.assertEqual(result.prometheus_up, 1.0)
+        self.assertEqual(result.outage_up, 0.0)
+        self.assertEqual(result.recovered_up, 1.0)
+        self.assertEqual(result.bridge_port, 49123)
+        self.assertEqual(client.fetch.call_count, 2)
+        self.assertEqual(start_bridge.call_args_list[0].args, (client,))
+        self.assertEqual(start_bridge.call_args_list[1].args, (client, 49123))
+        self.assertGreaterEqual(stop_bridge.call_count, 2)
+
+    def test_upstream_is_rechecked_only_after_prometheus_observes_bridge_down(self) -> None:
+        client = mock.Mock()
+        first_server = _FakeServer(49123)
+        recovered_server = _FakeServer(49123)
+        events: list[str] = []
+
+        def fetch() -> bytes:
+            events.append("upstream-fetch")
+            return b"stageguard_remediation_execution_deadline_exceeded 0\n"
+
+        client.fetch.side_effect = fetch
+
+        def observe(_url: str, _job: str, expected: float, _timeout: float) -> float:
+            events.append(f"prometheus-{expected:g}")
+            return expected
+
+        with mock.patch.object(acceptance, "verify_unauthorized_upstream", return_value=403):
+            with mock.patch.object(acceptance, "_docker_available", return_value=None):
+                with mock.patch.object(
+                    acceptance,
+                    "_start_bridge",
+                    side_effect=[(first_server, _FakeThread()), (recovered_server, _FakeThread())],
+                ):
+                    with mock.patch.object(acceptance, "_stop_bridge"):
+                        with mock.patch.object(acceptance, "wait_for_bridge_ready", return_value=None):
+                            with mock.patch.object(
+                                acceptance,
+                                "_start_prometheus",
+                                return_value=("prometheus-container", 49090),
+                            ):
+                                with mock.patch.object(acceptance, "_stop_container"):
+                                    with mock.patch.object(
+                                        acceptance,
+                                        "wait_for_prometheus_up",
+                                        side_effect=observe,
+                                    ):
+                                        acceptance.run_acceptance(
+                                            "https://stageguard.example",
+                                            client_factory=mock.Mock(return_value=client),
+                                            timeout_seconds=1,
+                                            prometheus_start_timeout_seconds=1,
+                                            scrape_timeout_seconds=1,
+                                        )
+
+        self.assertEqual(
+            events,
+            [
+                "upstream-fetch",
+                "prometheus-1",
+                "prometheus-0",
+                "upstream-fetch",
+                "prometheus-1",
+            ],
+        )
 
     def test_cli_failure_sanitizes_unexpected_provider_exception_text(self) -> None:
         argv = ["cloud_run_metrics_acceptance.py", "--target", "https://stageguard.example"]
