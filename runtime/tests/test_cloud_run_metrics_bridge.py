@@ -19,7 +19,15 @@ from cloud_run_metrics_bridge import (  # noqa: E402
     make_server,
     normalize_audience,
     normalize_target,
+    validate_stageguard_metrics,
 )
+
+
+VALID_METRICS = b"""# HELP stageguard_remediation_execution_deadline_exceeded Whether execution exceeded its configured window.
+# TYPE stageguard_remediation_execution_deadline_exceeded gauge
+stageguard_remediation_execution_deadline_exceeded 0
+stageguard_remediation_execution_active 0
+"""
 
 
 class _Response:
@@ -66,6 +74,27 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
                 with self.assertRaises(BridgeConfigurationError):
                     CloudRunMetricsClient("https://stageguard.example", timeout_seconds=invalid)
 
+    def test_payload_requires_one_finite_boolean_safety_sentinel(self) -> None:
+        validate_stageguard_metrics(VALID_METRICS)
+        invalid_payloads = (
+            b"",
+            b"# StageGuard metrics unavailable\n",
+            b"stageguard_remediation_execution_active 0\n",
+            b"stageguard_remediation_execution_deadline_exceeded\n",
+            b"stageguard_remediation_execution_deadline_exceeded nope\n",
+            b"stageguard_remediation_execution_deadline_exceeded NaN\n",
+            b"stageguard_remediation_execution_deadline_exceeded Inf\n",
+            b"stageguard_remediation_execution_deadline_exceeded -Inf\n",
+            b"stageguard_remediation_execution_deadline_exceeded 2\n",
+            b"stageguard_remediation_execution_deadline_exceeded 0 extra\n",
+            b"stageguard_remediation_execution_deadline_exceeded{source=\"spoofed\"} 0\n",
+            b"stageguard_remediation_execution_deadline_exceeded 0\nstageguard_remediation_execution_deadline_exceeded 1\n",
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(RuntimeError):
+                    validate_stageguard_metrics(payload)
+
     def test_fetch_adds_only_bridge_owned_authorization_header(self) -> None:
         observed = {}
 
@@ -73,7 +102,7 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
             observed["url"] = request.full_url
             observed["headers"] = dict(request.header_items())
             observed["timeout"] = timeout
-            return _Response(b"stageguard_remediation_execution_active 0\n")
+            return _Response(VALID_METRICS)
 
         client = CloudRunMetricsClient(
             "https://stageguard.example",
@@ -81,17 +110,26 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
             opener=opener,
         )
         body = client.fetch()
-        self.assertEqual(body, b"stageguard_remediation_execution_active 0\n")
+        self.assertEqual(body, VALID_METRICS)
         self.assertEqual(observed["url"], "https://stageguard.example/metrics")
         self.assertEqual(observed["headers"]["Authorization"], "Bearer short-lived-id-token")
         self.assertEqual(observed["headers"]["Accept"], "text/plain")
         self.assertEqual(observed["timeout"], 10.0)
 
+    def test_fetch_rejects_http_200_body_that_is_not_stageguard_metrics(self) -> None:
+        client = CloudRunMetricsClient(
+            "https://stageguard.example",
+            token_supplier=lambda _audience: "short-lived-id-token",
+            opener=lambda *_args, **_kwargs: _Response(b"<html>proxy is healthy</html>\n"),
+        )
+        with self.assertRaises(RuntimeError):
+            client.fetch()
+
     def test_non_loopback_bind_requires_explicit_opt_in(self) -> None:
         client = CloudRunMetricsClient(
             "https://stageguard.example",
             token_supplier=lambda _audience: "token",
-            opener=lambda *_args, **_kwargs: _Response(b"ok\n"),
+            opener=lambda *_args, **_kwargs: _Response(VALID_METRICS),
         )
         with self.assertRaises(BridgeConfigurationError):
             make_server(client, "0.0.0.0", 0)
@@ -131,7 +169,7 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
             self.assertEqual(request.full_url, "https://stageguard.example/metrics")
             self.assertEqual(dict(request.header_items())["Authorization"], "Bearer short-lived-id-token")
             self.assertEqual(timeout, 10.0)
-            return _Response(b"stageguard_remediation_execution_active 0\n")
+            return _Response(VALID_METRICS)
 
         client = CloudRunMetricsClient(
             "https://stageguard.example",
@@ -148,6 +186,31 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
                 self.assertEqual(response.read(), b'{"ok":true,"upstream":"reachable"}')
             self.assertEqual(observed["token_calls"], 1)
             self.assertEqual(observed["open_calls"], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_readyz_fails_closed_on_http_200_non_stageguard_payload(self) -> None:
+        provider_secret = b"provider-token-never-leak"
+        client = CloudRunMetricsClient(
+            "https://stageguard.example",
+            token_supplier=lambda _audience: "top-secret-token",
+            opener=lambda *_args, **_kwargs: _Response(b"# proxy comment\n" + provider_secret + b"\n"),
+        )
+        server = make_server(client, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/readyz"
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(url, timeout=2)
+            body = caught.exception.read()
+            self.assertEqual(caught.exception.code, 503)
+            self.assertEqual(body, b'{"ok":false,"upstream":"unavailable"}')
+            self.assertNotIn(provider_secret, body)
+            self.assertNotIn(b"top-secret-token", body)
+            self.assertNotIn(b"stageguard.example", body)
         finally:
             server.shutdown()
             server.server_close()
