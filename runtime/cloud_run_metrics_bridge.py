@@ -4,8 +4,8 @@
 Prometheus scrapes this tiny bridge on a trusted local/private network. The
 bridge obtains a short-lived Google-signed ID token for the configured Cloud
 Run audience and forwards only GET /metrics. It never forwards caller headers,
-never accepts an arbitrary upstream path, and never logs tokens or upstream
-error bodies.
+never accepts an arbitrary upstream path, never follows upstream redirects,
+and never logs tokens or upstream error bodies.
 
 ``/healthz`` is intentionally process-only liveness. ``/readyz`` verifies the
 complete authenticated upstream metrics path and fails closed with a sanitized
@@ -40,6 +40,25 @@ SAFETY_SENTINEL_METRIC = b"stageguard_remediation_execution_deadline_exceeded"
 
 class BridgeConfigurationError(ValueError):
     """Raised when the bridge would expose or target an unsafe endpoint."""
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every upstream redirect instead of replaying an identity token."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        return None
+
+
+def _open_without_redirects(request: urllib.request.Request, *, timeout: float):
+    """Open exactly one configured URL with redirect handling disabled.
+
+    ``urllib`` adds ordinary request headers to redirected requests by default.
+    The Cloud Run ID token is therefore also installed as an *unredirected*
+    header below, and production transport refuses redirects entirely. Both
+    controls are intentional: an authenticated scrape must terminate at the
+    configured StageGuard origin rather than trusting a provider/proxy redirect.
+    """
+    return urllib.request.build_opener(_RejectRedirectHandler()).open(request, timeout=timeout)
 
 
 def _is_loopback(host: str) -> bool:
@@ -156,7 +175,7 @@ class CloudRunMetricsClient:
         audience: str | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         token_supplier: Callable[[str], str] = google_id_token,
-        opener: Callable[..., object] = urllib.request.urlopen,
+        opener: Callable[..., object] = _open_without_redirects,
     ) -> None:
         self.metrics_url, default_audience = normalize_target(target)
         self.audience = normalize_audience(audience) if audience else default_audience
@@ -179,12 +198,15 @@ class CloudRunMetricsClient:
         request = urllib.request.Request(
             self.metrics_url,
             headers={
-                "Authorization": f"Bearer {token}",
                 "Accept": "text/plain",
                 "User-Agent": "stageguard-metrics-bridge/1",
             },
             method="GET",
         )
+        # Python documents that ordinary Request headers are copied onto
+        # redirected requests. Keep the bearer credential explicitly
+        # unredirected even though the production opener also rejects redirects.
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
         with self._opener(request, timeout=self.timeout_seconds) as response:
             body = response.read(MAX_METRICS_BYTES + 1)
         if len(body) > MAX_METRICS_BYTES:
