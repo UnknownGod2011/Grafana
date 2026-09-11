@@ -11,8 +11,9 @@ When a required Grafana MCP/Prometheus/Loki evidence read fails with the adapter
 3. `missing_evidence` remains reserved for successful evidence queries that returned no authoritative sample.
 4. Raw adapter/provider exception text is never copied into the incident report, lifecycle API, audit timeline, or operator DOM.
 5. Evidence collection stops at the first required unavailable slot; partial evidence cannot become a diagnosis.
-6. `IncidentService.approve()` rejects every report whose status is not `diagnosed` before creating an approval record.
-7. No remediation provider call is possible without a valid diagnosed report and exact revision-bound approval.
+6. `IncidentService.briefing()` rejects evidence-unavailable reports before invoking Gemini. This is a server-side lifecycle rule, not only a browser affordance.
+7. `IncidentService.approve()` rejects every report whose status is not `diagnosed` before creating an approval record.
+8. No remediation provider call is possible without a valid diagnosed report and exact revision-bound approval.
 
 ## Operator/API semantics
 
@@ -27,11 +28,13 @@ For an evidence-unavailable incident:
 
 - the displayed root cause is `Not established`;
 - confidence is presented as abstained/zero rather than as a weak diagnosis;
-- Gemini briefing is disabled;
+- Gemini briefing is disabled in the browser **and** refused by `IncidentService` if a caller bypasses the UI;
 - revision entry for approval is disabled;
 - approval remains disabled;
 - execution remains disabled;
 - the operator is instructed to restore observability and run a fresh investigation.
+
+The briefing refusal happens before model invocation and does not create `briefing_generated` or `briefing_failed` audit events. An observability outage is deterministic lifecycle state; it is not a condition that should be sent to an advisory model that lacks provider-failure detail.
 
 A fresh diagnosed revision is required before any approval or execution affordance can become available again. Existing partial evidence never becomes authorization material.
 
@@ -41,6 +44,8 @@ A fresh diagnosed revision is required before any approval or execution affordan
 
 Approval rejection is intentionally not recorded as `remediation_approved`; a rejected approval attempt must leave the incident snapshot without an approval and must not call the remediation adapter.
 
+A rejected evidence-unavailable briefing is likewise not recorded as a model failure because Gemini is intentionally never invoked. This keeps the audit trail semantically accurate: an evidence-plane outage is not a Gemini/provider error.
+
 ## Regression coverage
 
 `runtime/tests/test_evidence_unavailable_lifecycle.py` covers:
@@ -49,6 +54,7 @@ Approval rejection is intentionally not recorded as `remediation_approved`; a re
 - strict separation from `missing_evidence`;
 - first-failure collection stopping;
 - audit sanitization;
+- server-side Gemini briefing rejection before model invocation and without briefing audit events;
 - approval rejection before any approval audit record;
 - zero remediation-provider calls after rejected approval.
 
