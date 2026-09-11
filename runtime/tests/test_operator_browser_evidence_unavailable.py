@@ -2,11 +2,11 @@
 
 This suite is intentionally optional: it uses Playwright when installed, but does
 not make the core StageGuard runtime depend on a browser automation package.
-Run with:
+Run from the repository's ``runtime`` directory with:
 
     python -m pip install playwright
     python -m playwright install chromium
-    python -m unittest runtime.tests.test_operator_browser_evidence_unavailable
+    python -m unittest tests.test_operator_browser_evidence_unavailable
 
 The test starts the real authenticated StageGuard HTTP server, creates a real
 abstained incident through IncidentService, and lets the shipped operator assets
