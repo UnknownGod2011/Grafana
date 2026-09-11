@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, and an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain including local bridge failure/recovery.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain including local bridge failure/recovery, and explicit redirect isolation for Cloud Run identity-token-bearing metrics requests.
 
 Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -20,99 +20,118 @@ Core invariants:
 - The runtime-safety sentinel is label-free by contract; any additional labeled series in that metric family makes the payload ambiguous and must fail closed.
 - Cloud Run metrics acceptance must never grant IAM, print credentials, mutate incidents, or require making StageGuard public.
 - Recovery acceptance may interrupt only the local metrics bridge; it must not mutate Cloud Run, IAM, or StageGuard lifecycle state.
+- An identity-token-bearing Cloud Run metrics request must never follow an HTTP redirect; the configured service origin is the exact credential boundary.
 
-## Run log — 2026-09-11 — sentinel-family ambiguity hardening
+## Run log — 2026-09-11 — Cloud Run redirect credential-boundary hardening
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Inspected:
 - `runtime/cloud_run_metrics_bridge.py`
-- `runtime/cloud_run_metrics_acceptance.py`
 - `runtime/tests/test_cloud_run_metrics_bridge.py`
-- `runtime/tests/test_cloud_run_metrics_acceptance.py`
 - `docs/cloud-run-metrics-bridge-safety.md`
+- current `main` head and the previous sentinel-family hardening handoff
 
-The previous handoff identified real private Cloud Run acceptance as the strongest validation step. That still requires a runnable checkout plus external ADC/Cloud Run credentials, so this run inspected the trust boundary for useful credential-free hardening rather than stopping.
+Also checked current official documentation for:
+- Python `urllib.request` header/redirect semantics;
+- Google Cloud Run service-to-service authentication and ID-token audience guidance.
+
+The previous handoff's real Cloud Run acceptance remains blocked in this environment by missing external credentials plus an unrunnable checkout. Rather than stop, this run reviewed the identity-token transport boundary for credential-free production hardening.
 
 ### Finding
 
-`validate_stageguard_metrics()` correctly rejected a payload whose only deadline sentinel was labeled, but it ignored labeled sentinel-family samples whenever a valid bare sentinel was also present. Example:
+`CloudRunMetricsClient` previously used `urllib.request.urlopen` as its production opener and supplied the Cloud Run ID token as an ordinary `Request` header.
 
-```text
-stageguard_remediation_execution_deadline_exceeded 0
-stageguard_remediation_execution_deadline_exceeded{source="shadow"} 1
-```
+Python's `urllib.request` follows HTTP redirects by default. Its official documentation specifically notes that headers added normally are also added to redirected requests, and provides `Request.add_unredirected_header()` for headers that must not be added to redirected requests.
 
-Because the validator only collected a first token exactly equal to the bare metric name, this body could pass readiness validation even though the forwarded Prometheus exposition contained two semantically conflicting series in the safety-critical metric family. The bridge contract says the sentinel is authoritative and label-free, so accepting an additional labeled series is unnecessarily ambiguous.
+StageGuard does not need redirects in this path. The bridge accepts a configured HTTPS service origin and derives the exact `/metrics` URL. Therefore any upstream redirect represents routing/configuration drift or an unexpected intermediary. Following it is both unnecessary and an avoidable credential-boundary risk.
 
 ### Exact changes made
 
-#### Hardened the private Cloud Run metrics payload validator
+#### Hardened production metrics transport
 
 Updated `runtime/cloud_run_metrics_bridge.py`.
 
 Changes:
-- added `_is_sentinel_family_token()` to recognize either the exact label-free sentinel token or the same metric name followed by a Prometheus label set;
-- retained the exact bare sentinel as the only authorized sample form;
-- now rejects any labeled sentinel-family series immediately with a sanitized `RuntimeError`;
-- rejects the labeled family series even if a valid bare sentinel is also present before or after it;
-- does not confuse similarly prefixed metrics such as `stageguard_remediation_execution_deadline_exceeded_total` with the sentinel family;
-- updated module/docstring comments to state that one finite label-free boolean sentinel **and no additional sentinel-family series** is required.
+- added `_RejectRedirectHandler`, which refuses every HTTP redirect;
+- added `_open_without_redirects()` and made it the production default opener for `CloudRunMetricsClient`;
+- moved the Cloud Run bearer credential from ordinary request headers to `Request.add_unredirected_header()`;
+- retained `Accept` and `User-Agent` as ordinary non-secret request headers;
+- documented the defense-in-depth model directly in the transport code;
+- kept injected openers supported so existing credential-free tests and adapters remain modular.
 
 Commit:
-- `f9f2d5edb118a43e1701a00a515f907733558fc2` — harden metrics sentinel family validation
+- `eac204551969dcb83249baad86eb594b40133278` — harden Cloud Run metrics redirect boundary
 
-#### Added focused credential-free regression coverage
+#### Added real redirect-isolation regression
 
-Added `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py`.
+Added `runtime/tests/test_cloud_run_metrics_bridge_redirects.py`.
 
 Coverage proves:
-- exactly one bare `0` or `1` sentinel is accepted;
-- a valid bare sentinel plus a labeled family series is rejected for either labeled value;
-- ordering does not matter: labeled-before-bare is also rejected;
-- a labeled-only sentinel fails closed;
-- a similarly prefixed but different metric name does not create a false-positive ambiguity.
+- the bearer token is stored in the request's unredirected-header collection rather than its ordinary header collection;
+- a real local redirect server can return `302` pointing to a second local server;
+- the production opener raises on the redirect;
+- the redirect destination is never contacted;
+- the redirect destination therefore cannot receive the credential.
+
+The test's local HTTP servers are intentionally limited to exercising Python redirect mechanics. Production bridge target validation still requires HTTPS.
 
 Commit:
-- `89bf1a163dd3137910e427b99d9df9f2efe29450` — test metrics sentinel family ambiguity
+- `c5f062008339c75fadf16cf1213d2cb4442c56e7` — test Cloud Run metrics redirect isolation
+
+#### Documented the credential boundary
+
+Added `docs/cloud-run-metrics-redirect-safety.md` covering:
+- why redirects are invalid on the exact Cloud Run metrics path;
+- Python's redirect/header behavior;
+- the unredirected-header plus no-redirect defense in depth;
+- sanitized failure semantics;
+- credential-free regression expectations;
+- current official Python and Google Cloud references.
+
+Commit:
+- `82084c075d979ed486f8d98ab25cf8211ea7aa9e` — document metrics redirect credential boundary
 
 ### Checks / results
 
-Re-read the updated validator from the repository after the write and confirmed the expected family-detection and fail-closed branches are present.
+Re-read the updated bridge from the repository after the write and confirmed the production opener is now redirect-rejecting.
 
-Attempted a fresh executable checkout and focused test run:
+A local isolated Python probe of the same `HTTPRedirectHandler` behavior was executed successfully: a `302` raised `urllib.error.HTTPError` and the destination server observed zero requests. This validates the underlying standard-library behavior used by the regression, but it is not a substitute for running the repository test itself.
+
+Attempted the focused repository test run:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
 cd /tmp/stageguard
 python -m unittest \
   runtime.tests.test_cloud_run_metrics_bridge \
+  runtime.tests.test_cloud_run_metrics_bridge_redirects \
   runtime.tests.test_cloud_run_metrics_bridge_sentinel_family \
   runtime.tests.test_cloud_run_metrics_acceptance
 ```
 
-The execution container failed before checkout with:
+The execution container again failed before checkout with:
 
 ```text
 Could not resolve host: github.com
 ```
 
-Therefore no claim is made that the new regression, existing bridge tests, acceptance tests, browser acceptance, full unittest suite, or Docker rehearsal is green in this run.
+Therefore no claim is made that the new repository regression or the focused bridge/acceptance suites are green in this run.
 
-Repository writes succeeded through the connected GitHub integration. No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
+No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
 
 ### Decisions
 
-1. Treat the deadline sentinel as an exact label-free metric contract, not merely as one valid sample somewhere in a larger same-name family.
-2. Fail closed on any labeled sample using the safety sentinel metric name, because forwarding ambiguous safety semantics is worse than surfacing scrape/evidence unavailability.
-3. Keep the validator intentionally narrow rather than implementing a general Prometheus parser.
-4. Keep similarly prefixed but distinct metric names valid so the family check does not accidentally reject legitimate future metrics.
-5. Do not add CI just to compensate for the current execution environment's DNS failure.
+1. Treat the configured Cloud Run origin as the terminal credential boundary; redirects are invalid rather than something the bridge should normalize or follow.
+2. Use two layers: mark the bearer credential unredirected and independently disable redirects in the production opener.
+3. Keep redirect failures sanitized at the bridge boundary so routing drift becomes evidence/scrape unavailability, not provider-detail leakage.
+4. Preserve opener injection for credential-free tests and modularity.
+5. Do not trigger CI merely to work around the execution container's DNS failure.
 
 ### Blockers / unknowns
 
-- The new `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py` still needs execution in a runnable checkout.
-- The updated focused bridge/acceptance suite still needs execution.
+- `runtime/tests/test_cloud_run_metrics_bridge_redirects.py` still needs execution from a real checkout.
+- The focused bridge/sentinel-family/acceptance suite still needs execution.
 - The real acceptance harness requires an existing private StageGuard Cloud Run test service, working ADC for a least-privilege invoker identity, and Docker.
 - The Playwright evidence-unavailable browser acceptance still needs execution with Chromium.
 - The complete pinned Prometheus 3.13.3 + Grafana 13.2.1 watchdog rehearsal still needs a current run after the latest hardening.
@@ -120,13 +139,24 @@ Repository writes succeeded through the connected GitHub integration. No GitHub 
 
 ## Single best next step
 
-**In the first runnable environment, execute the focused bridge/sentinel-family/acceptance tests, then run `python runtime/cloud_run_metrics_acceptance.py` against a disposable private StageGuard Cloud Run service using a dedicated least-privilege `roles/run.invoker` identity. Confirm the real ADC -> private `/metrics` -> validated bridge -> Prometheus path completes `up: 1 -> 0 -> 1` and that the new sentinel-family ambiguity regression is green.**
+**In the first runnable environment, execute the focused bridge redirect/sentinel/acceptance tests, then run `python runtime/cloud_run_metrics_acceptance.py` against a disposable private StageGuard Cloud Run service using a dedicated least-privilege `roles/run.invoker` identity. Confirm that no redirect is required on the real authenticated `/metrics` path and that the complete ADC -> private `/metrics` -> validated bridge -> Prometheus path completes `up: 1 -> 0 -> 1`.**
+
+## Previous run — 2026-09-11 — sentinel-family ambiguity hardening
+
+The private Cloud Run metrics validator was hardened so the canonical label-free safety sentinel cannot coexist with any labeled series using the same metric name. Added `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py` to cover bare, labeled, mixed-order, labeled-only, and similarly-prefixed metric cases.
+
+Commits:
+- `f9f2d5edb118a43e1701a00a515f907733558fc2` — harden metrics sentinel family validation
+- `89bf1a163dd3137910e427b99d9df9f2efe29450` — test metrics sentinel family ambiguity
+- `6c5a8e74a949f8b398361e96fb8177fff5208dc3` — record sentinel family hardening progress
+
+That run also attempted the focused checkout/tests but hit the same `Could not resolve host: github.com` environment failure. No CI or external service mutation was performed.
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance and sentinel-family hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance, sentinel-family, and redirect hardening.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
