@@ -9,14 +9,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from command_line import split_command
+from evidence_errors import EvidenceUnavailable
 from log_evidence import LogQueryResult, LogRecord
 from mcp_smoke import DEFAULT_COMMAND, McpError, StdioClient
 
 DEFAULT_LOKI_DATASOURCE_UID = "loki"
 
 
-class McpLogError(McpError):
-    """Raised when Grafana MCP returns an unusable Loki result."""
+class McpLogError(McpError, EvidenceUnavailable):
+    """Raised when Grafana MCP cannot provide trustworthy Loki evidence."""
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ class LogQueryTrace:
 
 def _tool_payload(result: dict[str, Any]) -> Any:
     if result.get("isError"):
-        raise McpLogError(f"query_loki_logs returned isError=true: {result.get('content')}")
+        raise McpLogError("query_loki_logs returned an MCP tool error")
     structured = result.get("structuredContent")
     if structured is not None:
         return structured
@@ -67,12 +68,7 @@ def extract_log_query_result(
     requested_start: str,
     requested_end: str,
 ) -> LogQueryResult:
-    """Parse the official query_loki_logs response and detect unsafe truncation.
-
-    Newer mcp-grafana versions expose query metadata with an explicit
-    resultsTruncated flag. For older compatible payloads, exactly filling the
-    requested limit is conservatively treated as potentially truncated.
-    """
+    """Parse the official query_loki_logs response and detect unsafe truncation."""
     payload = _tool_payload(result)
     if not isinstance(payload, dict):
         raise McpLogError("query_loki_logs JSON payload must be an object")
@@ -103,7 +99,6 @@ def extract_log_query_result(
         )
 
     metadata = payload.get("metadata")
-    truncated: bool
     actual_start = requested_start
     actual_end = requested_end
     if metadata is None:
@@ -160,7 +155,12 @@ class McpLokiLogClient:
                 },
             )
             client.send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-            tools = client.request("tools/list").get("tools", [])
+            tools_response = client.request("tools/list")
+            if not isinstance(tools_response, dict):
+                raise McpLogError("Grafana MCP tools/list response must be an object")
+            tools = tools_response.get("tools", [])
+            if not isinstance(tools, list):
+                raise McpLogError("Grafana MCP tools/list response is missing tools[]")
             query_tool = next(
                 (tool for tool in tools if isinstance(tool, dict) and tool.get("name") == "query_loki_logs"),
                 None,
@@ -168,42 +168,55 @@ class McpLokiLogClient:
             if query_tool is None:
                 raise McpLogError("Grafana MCP does not expose query_loki_logs")
             annotations = query_tool.get("annotations") or {}
-            if annotations.get("readOnlyHint") is not True:
+            if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
                 raise McpLogError("query_loki_logs does not advertise readOnlyHint=true")
-        except Exception:
+        except McpLogError:
             client.close()
             raise
+        except McpError as exc:
+            client.close()
+            raise McpLogError("Grafana MCP log transport/protocol unavailable") from exc
         self._client = client
 
     def range(self, logql: str, *, start: str, end: str, limit: int) -> LogQueryResult:
+        if not isinstance(logql, str) or not logql.strip():
+            raise ValueError("LogQL must be a non-empty string")
         if not 1 <= limit <= 100:
             raise ValueError("Loki query limit must be between 1 and 100")
-        if self._client is None:
-            self.connect()
-        assert self._client is not None
-        started = time.perf_counter()
-        result = self._client.request(
-            "tools/call",
-            {
-                "name": "query_loki_logs",
-                "arguments": {
-                    "datasourceUid": self.datasource_uid,
-                    "logql": logql,
-                    "startRfc3339": start,
-                    "endRfc3339": end,
-                    "limit": limit,
-                    "direction": "backward",
-                    "queryType": "range",
-                    "format": "full",
+        try:
+            if self._client is None:
+                self.connect()
+            assert self._client is not None
+            started = time.perf_counter()
+            result = self._client.request(
+                "tools/call",
+                {
+                    "name": "query_loki_logs",
+                    "arguments": {
+                        "datasourceUid": self.datasource_uid,
+                        "logql": logql,
+                        "startRfc3339": start,
+                        "endRfc3339": end,
+                        "limit": limit,
+                        "direction": "backward",
+                        "queryType": "range",
+                        "format": "full",
+                    },
                 },
-            },
-        )
-        parsed = extract_log_query_result(
-            result,
-            requested_limit=limit,
-            requested_start=start,
-            requested_end=end,
-        )
+            )
+            if not isinstance(result, dict):
+                raise McpLogError("query_loki_logs result must be an object")
+            parsed = extract_log_query_result(
+                result,
+                requested_limit=limit,
+                requested_start=start,
+                requested_end=end,
+            )
+        except McpLogError:
+            raise
+        except McpError as exc:
+            raise McpLogError("Grafana MCP log transport/protocol unavailable") from exc
+
         self.traces.append(
             LogQueryTrace(
                 logql=logql,
