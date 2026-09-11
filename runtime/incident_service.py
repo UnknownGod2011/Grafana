@@ -335,8 +335,6 @@ class IncidentService:
                     chain.append(event)
                 if chain.checkpoint().sequence != checkpoint.sequence:
                     raise ValueError("legacy audit history is incomplete")
-                # Legacy state has no authenticated head capable of selecting a winner,
-                # so keep the pre-v3 conservative orphan-tail rule.
                 self._assert_no_audit_tail(checkpoint.incident_id, checkpoint.sequence)
             except Exception:
                 self._audit_integrity_state = "failed"
@@ -355,13 +353,9 @@ class IncidentService:
             candidates = self._read_audit_candidates(checkpoint.incident_id, expected.sequence)
             if candidates is not None:
                 committed = select_committed_audit_lineage(candidates, expected)
-                # Post-head records are append-before-CAS residue and are intentionally
-                # not read/adopted. Only the authenticated path becomes timeline state.
             else:
                 committed = self._read_audit_prefix(checkpoint.incident_id, expected.sequence)
                 verify_audit_chain(committed, expected)
-                # Readers that cannot enumerate branches cannot prove that a tail is a
-                # loser lineage, so retain the older fail-closed behavior.
                 self._assert_no_audit_tail(checkpoint.incident_id, expected.sequence)
         except Exception:
             self._audit_integrity_state = "failed"
@@ -464,8 +458,6 @@ class IncidentService:
             except Exception:
                 self._audit_integrity_state = "failed"
                 raise RuntimeError("audit integrity chain could not advance safely")
-        # The append is not lifecycle authority until checkpoint persistence succeeds.
-        # A CAS loser therefore never enters the committed in-process timeline.
         self._save_checkpoint()
         self._timeline.append(event)
         self._committed_audit_history.append(event)
@@ -542,6 +534,8 @@ class IncidentService:
                 raise RuntimeError("no incident has been investigated")
             if incident_id != snapshot.incident_id or revision != snapshot.revision:
                 raise ValueError("briefing request does not match the current incident evidence revision")
+            if snapshot.report.unavailable_evidence:
+                raise ValueError("Gemini briefing is disabled while required incident evidence is unavailable")
             if self._commander is None:
                 raise RuntimeError("Gemini briefing is not configured")
             normalized_actor = actor.strip() or "stageguard"
