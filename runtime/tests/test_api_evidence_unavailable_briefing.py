@@ -100,7 +100,7 @@ class EvidenceUnavailableBriefingApiTests(unittest.TestCase):
 
         self.assertEqual(400, status)
         self.assertEqual("invalid_request", body["error"])
-        self.assertEqual("briefing disabled while required incident evidence is unavailable", body["detail"])
+        self.assertEqual("Gemini briefing is disabled while required incident evidence is unavailable", body["detail"])
         self.assertEqual("no-store", headers.get("Cache-Control"))
         self.assertNotIn("SENSITIVE_SENTINEL", raw)
         self.assertNotIn("PRIVATE_ENDPOINT_SENTINEL", raw)
