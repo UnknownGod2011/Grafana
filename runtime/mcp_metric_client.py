@@ -8,6 +8,7 @@ which PromQL queries are allowed and how evidence is interpreted.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ class QueryTrace:
 def _tool_payload(result: dict[str, Any]) -> Any:
     """Extract the JSON payload returned by a successful MCP tool call.
 
-    mcp-grafana v1.1.0 serializes ordinary tool return values as JSON text in
+    mcp-grafana serializes ordinary tool return values as JSON text in
     CallToolResult.content. We also accept structuredContent defensively so the
     adapter remains compatible with servers that expose the same payload using
     newer MCP result conventions.
@@ -63,19 +64,23 @@ def _tool_payload(result: dict[str, Any]) -> Any:
 
 def _coerce_number(value: Any) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError) as exc:
         raise McpMetricError(f"Prometheus sample value is not numeric: {value!r}") from exc
+    if not math.isfinite(number):
+        raise McpMetricError(f"Prometheus sample value is non-finite: {value!r}")
+    return number
 
 
 def extract_instant_value(result: dict[str, Any]) -> float | None:
-    """Return exactly one numeric sample from an MCP query_prometheus result.
+    """Return exactly one finite numeric sample from an MCP query result.
 
     Prometheus model.Value JSON encodes vectors as a list of sample objects and
     scalars as ``[timestamp, value]``. Empty vectors are legitimate missing
     evidence and therefore map to ``None``. Multiple vector samples are rejected
     rather than guessed because StageGuard's bounded queries are expected to
-    resolve to one scalar observation each.
+    resolve to one scalar observation each. NaN and infinities are rejected:
+    they are numeric encodings but are not trustworthy incident evidence.
     """
     payload = _tool_payload(result)
     if not isinstance(payload, dict) or "data" not in payload:
@@ -115,6 +120,8 @@ class McpPrometheusMetricClient:
         self.datasource_uid = datasource_uid or os.getenv(
             "STAGEGUARD_DATASOURCE_UID", DATASOURCE_UID
         )
+        if not self.datasource_uid.strip():
+            raise ValueError("Prometheus datasource UID must be non-empty")
         self._client: StdioClient | None = None
         self.traces: list[QueryTrace] = []
 
@@ -136,7 +143,12 @@ class McpPrometheusMetricClient:
             client.send(
                 {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
             )
-            tools = client.request("tools/list").get("tools", [])
+            tools_response = client.request("tools/list")
+            if not isinstance(tools_response, dict):
+                raise McpMetricError("Grafana MCP tools/list response must be an object")
+            tools = tools_response.get("tools", [])
+            if not isinstance(tools, list):
+                raise McpMetricError("Grafana MCP tools/list response is missing tools[]")
             query_tool = next(
                 (
                     tool
@@ -148,7 +160,7 @@ class McpPrometheusMetricClient:
             if query_tool is None:
                 raise McpMetricError("Grafana MCP does not expose query_prometheus")
             annotations = query_tool.get("annotations") or {}
-            if annotations.get("readOnlyHint") is not True:
+            if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
                 raise McpMetricError("query_prometheus does not advertise readOnlyHint=true")
         except Exception:
             client.close()
@@ -156,6 +168,8 @@ class McpPrometheusMetricClient:
         self._client = client
 
     def instant(self, promql: str) -> float | None:
+        if not isinstance(promql, str) or not promql.strip():
+            raise ValueError("PromQL must be a non-empty string")
         if self._client is None:
             self.connect()
         assert self._client is not None
@@ -173,6 +187,8 @@ class McpPrometheusMetricClient:
                 },
             },
         )
+        if not isinstance(result, dict):
+            raise McpMetricError("query_prometheus result must be an object")
         value = extract_instant_value(result)
         self.traces.append(
             QueryTrace(
