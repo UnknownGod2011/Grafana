@@ -11,6 +11,12 @@ error bodies.
 complete authenticated upstream metrics path and fails closed with a sanitized
 response when ADC, IAM, network, or the StageGuard metrics endpoint is broken.
 
+A successful HTTP response is not sufficient evidence that the bridge reached
+a healthy StageGuard metrics endpoint. Every accepted payload must contain
+exactly one finite, boolean-valued remediation-deadline sentinel. This prevents
+an authenticated proxy/login/error page, empty/comment-only exposition, or
+ambiguous duplicate safety series from being reported as bridge readiness.
+
 The production dependency set already includes ``google-auth``. Tests inject a
 token supplier and opener, so they remain credential-free.
 """
@@ -28,6 +34,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 MAX_METRICS_BYTES = 2 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 10.0
+SAFETY_SENTINEL_METRIC = b"stageguard_remediation_execution_deadline_exceeded"
 
 
 class BridgeConfigurationError(ValueError):
@@ -72,6 +79,39 @@ def normalize_audience(value: str) -> str:
     if parsed.path not in {"", "/"}:
         raise BridgeConfigurationError("metrics audience must be a service origin")
     return urlunsplit(("https", parsed.netloc, "", "", ""))
+
+
+def validate_stageguard_metrics(body: bytes) -> None:
+    """Require one authoritative finite StageGuard deadline sentinel sample.
+
+    The sentinel is intentionally a label-free 0/1 gauge emitted by StageGuard's
+    own ``/metrics`` implementation. The bridge does not attempt to become a
+    general Prometheus parser; it establishes only the minimum identity/integrity
+    property needed before forwarding an authenticated scrape response.
+    """
+    if not isinstance(body, bytes):
+        raise RuntimeError("upstream metrics response was not bytes")
+
+    samples: list[bytes] = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(b"#"):
+            continue
+        fields = line.split()
+        if fields and fields[0] == SAFETY_SENTINEL_METRIC:
+            if len(fields) != 2:
+                raise RuntimeError("upstream StageGuard safety sentinel was malformed")
+            samples.append(fields[1])
+
+    if len(samples) != 1:
+        raise RuntimeError("upstream StageGuard safety sentinel was missing or ambiguous")
+
+    try:
+        value = float(samples[0].decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError("upstream StageGuard safety sentinel was nonnumeric") from exc
+    if not math.isfinite(value) or value not in {0.0, 1.0}:
+        raise RuntimeError("upstream StageGuard safety sentinel was invalid")
 
 
 def google_id_token(audience: str) -> str:
@@ -129,6 +169,7 @@ class CloudRunMetricsClient:
             body = response.read(MAX_METRICS_BYTES + 1)
         if len(body) > MAX_METRICS_BYTES:
             raise RuntimeError("upstream metrics response exceeded the configured limit")
+        validate_stageguard_metrics(body)
         return body
 
 
