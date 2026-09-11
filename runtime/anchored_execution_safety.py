@@ -122,7 +122,9 @@ class AnchoredExecutionSafeIncidentService(
         bounded Grafana recovery polling then run outside the lock, allowing
         status/readiness/metrics requests to observe the active ``dispatching``
         phase. Final outcome promotion, audit append, and checkpoint CAS happen
-        under the lock again.
+        under the lock again. A losing or failed final commit restores the
+        pre-execution snapshot for reads while execution uncertainty keeps the
+        already-dispatched provider action from being replayed.
         """
         with self._lock:
             snapshot = self._snapshot
@@ -169,7 +171,7 @@ class AnchoredExecutionSafeIncidentService(
                 ):
                     raise RuntimeError("incident state changed during remediation execution")
 
-                self._snapshot = IncidentSnapshot(
+                candidate = IncidentSnapshot(
                     snapshot.incident_id,
                     snapshot.revision,
                     snapshot.report,
@@ -184,13 +186,12 @@ class AnchoredExecutionSafeIncidentService(
                 }
                 if outcome.action_result is not None and outcome.action_result.metadata:
                     payload["action_metadata"] = dict(outcome.action_result.metadata)
-                self._record(
-                    snapshot.incident_id,
+                return self._record_snapshot_transition(
+                    candidate,
                     "remediation_completed",
                     actor.strip() or "stageguard",
                     payload,
                 )
-                return self._snapshot
             except CheckpointConflictError:
                 self._mark_execution_uncertain(
                     operation_id=operation_id,
@@ -199,6 +200,9 @@ class AnchoredExecutionSafeIncidentService(
                 )
                 raise
             except Exception:
+                # Provider contact has already happened, but a failed lifecycle
+                # commit is not authority for exposing the candidate outcome.
+                self._snapshot = snapshot
                 self._mark_execution_uncertain(
                     operation_id=operation_id,
                     dispatch_barrier=dispatch_barrier,
