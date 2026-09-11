@@ -176,9 +176,16 @@ class CloudRunMetricsClient:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         token_supplier: Callable[[str], str] = google_id_token,
         opener: Callable[..., object] = _open_without_redirects,
+        allow_cross_origin_audience: bool = False,
     ) -> None:
-        self.metrics_url, default_audience = normalize_target(target)
-        self.audience = normalize_audience(audience) if audience else default_audience
+        self.metrics_url, target_origin = normalize_target(target)
+        self.audience = normalize_audience(audience) if audience else target_origin
+        if not isinstance(allow_cross_origin_audience, bool):
+            raise BridgeConfigurationError("allow_cross_origin_audience must be boolean")
+        if self.audience != target_origin and not allow_cross_origin_audience:
+            raise BridgeConfigurationError(
+                "metrics audience differs from target origin; explicit cross-origin audience opt-in is required"
+            )
         if isinstance(timeout_seconds, bool):
             raise BridgeConfigurationError("timeout must be finite and positive")
         try:
@@ -293,10 +300,20 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=9112)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--allow-network-bind", action="store_true")
+    parser.add_argument(
+        "--allow-cross-origin-audience",
+        action="store_true",
+        help="allow an ID-token audience that differs from the metrics target origin",
+    )
     args = parser.parse_args()
     if not args.target:
         parser.error("--target or STAGEGUARD_METRICS_TARGET is required")
-    client = CloudRunMetricsClient(args.target, audience=args.audience, timeout_seconds=args.timeout_seconds)
+    client = CloudRunMetricsClient(
+        args.target,
+        audience=args.audience,
+        timeout_seconds=args.timeout_seconds,
+        allow_cross_origin_audience=args.allow_cross_origin_audience,
+    )
     server = make_server(client, args.host, args.port, allow_network_bind=args.allow_network_bind)
     try:
         server.serve_forever()
