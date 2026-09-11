@@ -62,11 +62,7 @@ def _string_map(value: Any, field: str) -> dict[str, str]:
 
 
 def extract_log_query_result(
-    result: dict[str, Any],
-    *,
-    requested_limit: int,
-    requested_start: str,
-    requested_end: str,
+    result: dict[str, Any], *, requested_limit: int, requested_start: str, requested_end: str
 ) -> LogQueryResult:
     """Parse the official query_loki_logs response and detect unsafe truncation."""
     payload = _tool_payload(result)
@@ -88,15 +84,7 @@ def extract_log_query_result(
             raise McpLogError("Loki log entry is missing timestamp")
         if not isinstance(line, str):
             raise McpLogError("Loki log entry is missing line")
-        records.append(
-            LogRecord(
-                timestamp=timestamp,
-                line=line,
-                labels=_string_map(entry.get("labels"), "labels"),
-                structured_metadata=_string_map(entry.get("structuredMetadata"), "structuredMetadata"),
-                parsed=_string_map(entry.get("parsed"), "parsed"),
-            )
-        )
+        records.append(LogRecord(timestamp, line, _string_map(entry.get("labels"), "labels"), _string_map(entry.get("structuredMetadata"), "structuredMetadata"), _string_map(entry.get("parsed"), "parsed")))
 
     metadata = payload.get("metadata")
     actual_start = requested_start
@@ -127,15 +115,9 @@ def extract_log_query_result(
 class McpLokiLogClient:
     """LogQueryClient backed by official Grafana MCP stdio."""
 
-    def __init__(
-        self,
-        command: list[str] | None = None,
-        datasource_uid: str | None = None,
-    ) -> None:
+    def __init__(self, command: list[str] | None = None, datasource_uid: str | None = None) -> None:
         self.command = command or split_command(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
-        self.datasource_uid = datasource_uid or os.getenv(
-            "STAGEGUARD_LOKI_DATASOURCE_UID", DEFAULT_LOKI_DATASOURCE_UID
-        )
+        self.datasource_uid = datasource_uid or os.getenv("STAGEGUARD_LOKI_DATASOURCE_UID", DEFAULT_LOKI_DATASOURCE_UID)
         if not self.datasource_uid.strip():
             raise ValueError("Loki datasource UID must be non-empty")
         self._client: StdioClient | None = None
@@ -144,7 +126,10 @@ class McpLokiLogClient:
     def connect(self) -> None:
         if self._client is not None:
             return
-        client = StdioClient(self.command)
+        try:
+            client = StdioClient(self.command)
+        except OSError as exc:
+            raise McpLogError("Grafana MCP log process unavailable") from exc
         try:
             client.request(
                 "initialize",
@@ -161,10 +146,7 @@ class McpLokiLogClient:
             tools = tools_response.get("tools", [])
             if not isinstance(tools, list):
                 raise McpLogError("Grafana MCP tools/list response is missing tools[]")
-            query_tool = next(
-                (tool for tool in tools if isinstance(tool, dict) and tool.get("name") == "query_loki_logs"),
-                None,
-            )
+            query_tool = next((tool for tool in tools if isinstance(tool, dict) and tool.get("name") == "query_loki_logs"), None)
             if query_tool is None:
                 raise McpLogError("Grafana MCP does not expose query_loki_logs")
             annotations = query_tool.get("annotations") or {}
@@ -173,7 +155,7 @@ class McpLokiLogClient:
         except McpLogError:
             client.close()
             raise
-        except McpError as exc:
+        except (McpError, OSError) as exc:
             client.close()
             raise McpLogError("Grafana MCP log transport/protocol unavailable") from exc
         self._client = client
@@ -206,28 +188,12 @@ class McpLokiLogClient:
             )
             if not isinstance(result, dict):
                 raise McpLogError("query_loki_logs result must be an object")
-            parsed = extract_log_query_result(
-                result,
-                requested_limit=limit,
-                requested_start=start,
-                requested_end=end,
-            )
+            parsed = extract_log_query_result(result, requested_limit=limit, requested_start=start, requested_end=end)
         except McpLogError:
             raise
-        except McpError as exc:
+        except (McpError, OSError) as exc:
             raise McpLogError("Grafana MCP log transport/protocol unavailable") from exc
-
-        self.traces.append(
-            LogQueryTrace(
-                logql=logql,
-                start=parsed.start,
-                end=parsed.end,
-                limit=limit,
-                latency_ms=(time.perf_counter() - started) * 1000.0,
-                line_count=len(parsed.records),
-                truncated=parsed.truncated,
-            )
-        )
+        self.traces.append(LogQueryTrace(logql, parsed.start, parsed.end, limit, (time.perf_counter() - started) * 1000.0, len(parsed.records), parsed.truncated))
         return parsed
 
     def close(self) -> None:
