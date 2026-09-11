@@ -609,10 +609,14 @@ class IncidentService:
                 raise RuntimeError("this approval has already been consumed")
             outcome = remediate_and_verify(snapshot.report, snapshot.approval, self._remediation, self._metrics,
                                            profile=self._profile, sleep=self._recovery_sleep)
-            self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, outcome)
+            candidate = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, outcome)
             payload = {"revision": snapshot.revision, "status": outcome.status, "sample_count": len(outcome.samples),
                        "action_accepted": bool(outcome.action_result and outcome.action_result.accepted)}
             if outcome.action_result is not None and outcome.action_result.metadata:
                 payload["action_metadata"] = dict(outcome.action_result.metadata)
-            self._record(snapshot.incident_id, "remediation_completed", actor.strip() or "stageguard", payload)
-            return self._snapshot
+            return self._record_snapshot_transition(
+                candidate,
+                "remediation_completed",
+                actor.strip() or "stageguard",
+                payload,
+            )
