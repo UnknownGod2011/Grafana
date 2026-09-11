@@ -31,6 +31,12 @@ class WatchdogObservabilityAcceptanceTests(unittest.TestCase):
             summary=summary or self.module.DEADLINE_ALERT_SUMMARY,
         )
 
+    def _query_payload(self, results):
+        return {
+            "status": "success",
+            "data": {"resultType": "vector", "result": results},
+        }
+
     def test_expected_runtime_versions_match_compose_contract(self) -> None:
         self.assertEqual(self.module.EXPECTED_PROMETHEUS_VERSION, "3.13.3")
         self.assertEqual(self.module.EXPECTED_GRAFANA_VERSION, "13.2.1")
@@ -75,6 +81,49 @@ class WatchdogObservabilityAcceptanceTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
                     self.module.grafana_runtime_version_from_payload(payload)
+
+    def test_prometheus_query_parser_accepts_exactly_one_finite_sample(self) -> None:
+        payload = self._query_payload(
+            [{"metric": {"job": "watchdog-fixture"}, "value": [1720000000.0, "1"]}]
+        )
+        self.assertEqual(self.module.prometheus_query_value_from_payload(payload), 1.0)
+
+    def test_prometheus_query_parser_returns_none_for_empty_vector(self) -> None:
+        self.assertIsNone(self.module.prometheus_query_value_from_payload(self._query_payload([])))
+
+    def test_prometheus_query_parser_rejects_ambiguous_multiple_series(self) -> None:
+        payload = self._query_payload(
+            [
+                {"metric": {"instance": "a"}, "value": [1720000000.0, "0"]},
+                {"metric": {"instance": "b"}, "value": [1720000000.0, "1"]},
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one series"):
+            self.module.prometheus_query_value_from_payload(payload)
+
+    def test_prometheus_query_parser_rejects_non_finite_samples(self) -> None:
+        for value in ("NaN", "Inf", "+Inf", "-Inf"):
+            with self.subTest(value=value):
+                payload = self._query_payload([{"metric": {}, "value": [1720000000.0, value]}])
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    self.module.prometheus_query_value_from_payload(payload)
+
+    def test_prometheus_query_parser_rejects_malformed_shapes(self) -> None:
+        invalid = (
+            None,
+            {},
+            {"status": "error", "data": {"resultType": "vector", "result": []}},
+            {"status": "success", "data": None},
+            {"status": "success", "data": {"resultType": "scalar", "result": [1, "0"]}},
+            {"status": "success", "data": {"resultType": "vector", "result": {}}},
+            self._query_payload([None]),
+            self._query_payload([{"metric": {}, "value": [1720000000.0]}]),
+            self._query_payload([{"metric": {}, "value": [1720000000.0, "not-a-number"]}]),
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    self.module.prometheus_query_value_from_payload(payload)
 
     def test_deadline_alert_title_match_is_active(self) -> None:
         payload = [{"labels": {"alertname": self.module.DEADLINE_ALERT_TITLE}, "annotations": {}}]
