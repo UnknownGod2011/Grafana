@@ -10,9 +10,10 @@ It accepts one configured HTTPS StageGuard service origin, obtains a short-lived
 
 Google's current Cloud Run service-to-service guidance uses an ID token whose audience identifies the receiving Cloud Run service. The Python example uses `google.oauth2.id_token.fetch_id_token` with Application Default Credentials and sends the resulting token as a bearer credential. StageGuard follows that model rather than storing a long-lived service-account key or static bearer token in Prometheus configuration.
 
-Official reference:
+Official references:
 
 - https://cloud.google.com/run/docs/authenticating/service-to-service
+- https://cloud.google.com/docs/authentication/get-id-token
 
 ## HTTP 200 is not sufficient readiness
 
@@ -66,9 +67,10 @@ This is important to the watchdog alert model. A transport or payload-integrity 
 
 Prometheus configuration supports treating scrape failures as target failures and exposes target health through its generated `up` series. StageGuard's Grafana runtime-safety rules keep scrape health, telemetry freshness, and positive remediation-deadline evidence as separate signals.
 
-Official Prometheus configuration reference:
+Official Prometheus references:
 
 - https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+- https://prometheus.io/docs/prometheus/latest/querying/api/
 
 ## Least privilege
 
@@ -78,7 +80,7 @@ For workloads on Google Cloud, prefer an attached service account. For workloads
 
 ## Credential-free regression coverage
 
-`runtime/tests/test_cloud_run_metrics_bridge.py` injects a token supplier and HTTP opener so the safety contract can be tested without Google credentials. Coverage includes:
+`runtime/tests/test_cloud_run_metrics_bridge.py` injects a token supplier and HTTP opener so the bridge safety contract can be tested without Google credentials. Coverage includes:
 
 - HTTPS target/audience restrictions;
 - finite positive timeout validation;
@@ -90,13 +92,70 @@ For workloads on Google Cloud, prefer an attached service account. For workloads
 - rejection of missing, malformed, duplicate, non-finite, labeled, and non-boolean safety sentinels;
 - sanitized failure bodies that do not echo provider/token/target details.
 
-A real disposable-project acceptance is still required before calling the production path fully validated. That rehearsal should prove:
+`runtime/tests/test_cloud_run_metrics_acceptance.py` covers the disposable acceptance harness without credentials or Docker side effects. It verifies the anonymous-access negative contract, exact Prometheus `up == 1` interpretation, ambiguity/non-finite rejection, ephemeral/read-only container flags, and CLI error sanitization.
 
-1. private StageGuard Cloud Run service;
-2. dedicated invoker service account with only the required invocation permission;
-3. ADC ID-token acquisition for the exact service audience;
-4. bridge `/readyz` succeeds;
-5. bridge `/metrics` returns the StageGuard exposition with the required sentinel;
-6. Prometheus reports the bridge target `up == 1`;
-7. revoking/removing invocation permission makes `/readyz` fail and Prometheus `up == 0` without exposing credential details;
-8. restoring permission recovers scraping without restarting or changing StageGuard lifecycle state.
+## Disposable-project acceptance harness
+
+`runtime/cloud_run_metrics_acceptance.py` validates an **already provisioned** private StageGuard Cloud Run service. It is intentionally opt-in and is not wired into CI.
+
+Prerequisites:
+
+1. A StageGuard Cloud Run service deployed with unauthenticated invocation disabled.
+2. The identity represented by local ADC can mint an ID token and has the minimum Cloud Run invocation permission required for that service. `roles/run.invoker` is the normal service-level grant.
+3. `google-auth` is installed as required by the runtime bridge.
+4. Docker is installed and the daemon is running. The harness starts only a disposable Prometheus container.
+5. The StageGuard `/metrics` endpoint exposes the canonical deadline sentinel described above.
+
+Run from the repository root:
+
+```bash
+export STAGEGUARD_METRICS_TARGET='https://YOUR-SERVICE-URL'
+python runtime/cloud_run_metrics_acceptance.py
+```
+
+If the ID-token audience differs from the service origin, set it explicitly:
+
+```bash
+export STAGEGUARD_METRICS_AUDIENCE='https://EXPECTED-AUDIENCE'
+python runtime/cloud_run_metrics_acceptance.py
+```
+
+The default disposable image is pinned to `prom/prometheus:v3.13.3`. Override it explicitly when testing another approved Prometheus build:
+
+```bash
+STAGEGUARD_ACCEPTANCE_PROMETHEUS_IMAGE='prom/prometheus:YOUR_VERSION' \
+  python runtime/cloud_run_metrics_acceptance.py
+```
+
+A passing run proves, in order:
+
+1. an anonymous/no-token `GET /metrics` receives HTTP `401` or `403`;
+2. ADC can mint an ID token for the configured audience;
+3. that identity can invoke private Cloud Run `/metrics`;
+4. the returned payload passes StageGuard's sentinel identity/integrity check;
+5. bridge `/readyz` succeeds using the same authenticated path;
+6. bridge `/metrics` forwards only a validated StageGuard exposition;
+7. disposable Prometheus scrapes the bridge and returns exactly one `up{job="stageguard-cloud-run-acceptance"} == 1` target.
+
+The anonymous check is deliberately used instead of temporarily revoking IAM. The harness therefore does not mutate service IAM, cannot accidentally remove production access, and remains safe to use against a disposable/private test deployment.
+
+### What the harness does not do
+
+It never:
+
+- creates or changes IAM bindings;
+- deploys or modifies Cloud Run services;
+- changes ingress or public-access settings;
+- prints or persists ID tokens;
+- writes a bearer token into Prometheus configuration;
+- calls incident, approval, execution, recovery, or remediation endpoints;
+- starts GitHub Actions;
+- leaves the disposable Prometheus container running after normal completion.
+
+The bridge binds to `0.0.0.0` only for the duration of the acceptance so the isolated Docker container can reach it through Docker's `host.docker.internal` host-gateway mapping. Prometheus's published API port is bound to `127.0.0.1` only, and its generated configuration is mounted read-only. The bridge and container are torn down in `finally` cleanup.
+
+### Interpreting failures
+
+The command intentionally avoids printing token values, upstream response bodies, ADC exception messages, or provider-error text. Expected operator-facing failures are summarized by acceptance stage. Unexpected exceptions report only the exception class.
+
+A failure should be treated as an observability-path failure, not evidence that a remediation deadline was exceeded. Restore the private metrics path and rerun acceptance; do not bypass the bridge by making StageGuard public.
