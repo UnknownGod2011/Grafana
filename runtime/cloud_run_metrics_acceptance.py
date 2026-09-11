@@ -10,6 +10,9 @@ Acceptance path:
 
     ADC ID token -> private Cloud Run /metrics -> local authenticated bridge
     -> bridge /readyz -> bridge /metrics -> disposable Prometheus -> up == 1
+    -> stop only local bridge -> Prometheus up == 0
+    -> authenticated Cloud Run /metrics still valid
+    -> restart bridge on same port -> Prometheus up == 1
 
 It also performs a non-destructive negative request to the upstream ``/metrics``
 endpoint without a token and requires Cloud Run to reject it.
@@ -56,6 +59,8 @@ class AcceptanceResult:
     unauthorized_status: int
     bridge_port: int
     prometheus_up: float
+    outage_up: float
+    recovered_up: float
 
 
 def _request_status_without_redirects(url: str, timeout_seconds: float) -> int:
@@ -105,7 +110,20 @@ def wait_for_bridge_ready(base_url: str, timeout_seconds: float) -> None:
     raise AcceptanceError(f"authenticated metrics bridge did not become ready{suffix}")
 
 
-def fetch_prometheus_up(prometheus_url: str, job_name: str, timeout_seconds: float) -> float:
+def wait_for_prometheus_up(
+    prometheus_url: str,
+    job_name: str,
+    expected: float,
+    timeout_seconds: float,
+) -> float:
+    """Wait for one finite Prometheus ``up`` sample equal to ``expected``.
+
+    The acceptance target is intentionally singular. Duplicate series are an
+    acceptance failure because they make outage/recovery evidence ambiguous.
+    """
+    if expected not in (0.0, 1.0):
+        raise ValueError("expected Prometheus up value must be 0 or 1")
+
     query = urllib.parse.urlencode({"query": f'up{{job="{job_name}"}}'})
     url = f"{prometheus_url}/api/v1/query?{query}"
     deadline = time.monotonic() + timeout_seconds
@@ -130,13 +148,20 @@ def fetch_prometheus_up(prometheus_url: str, job_name: str, timeout_seconds: flo
                         except (TypeError, ValueError):
                             last_error = "Prometheus returned a nonnumeric up sample"
                         else:
-                            if math.isfinite(value) and value == 1.0:
+                            if math.isfinite(value) and value == expected:
                                 return value
                             last_error = f"Prometheus up sample was {value!r}"
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             last_error = exc.__class__.__name__
         time.sleep(1.0)
-    raise AcceptanceError(f"Prometheus never observed the StageGuard bridge as up=1 ({last_error})")
+    raise AcceptanceError(
+        f"Prometheus never observed the StageGuard bridge as up={expected:g} ({last_error})"
+    )
+
+
+def fetch_prometheus_up(prometheus_url: str, job_name: str, timeout_seconds: float) -> float:
+    """Backward-compatible success helper used by focused regressions."""
+    return wait_for_prometheus_up(prometheus_url, job_name, 1.0, timeout_seconds)
 
 
 def _prometheus_config(bridge_port: int, job_name: str) -> str:
@@ -227,6 +252,25 @@ def _stop_container(container_id: str) -> None:
     )
 
 
+def _start_bridge(
+    client: CloudRunMetricsClient,
+    port: int = 0,
+) -> tuple[ThreadingHTTPServer, threading.Thread]:
+    server = make_server(client, "0.0.0.0", port, allow_network_bind=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def _stop_bridge(server: ThreadingHTTPServer | None, thread: threading.Thread | None) -> None:
+    if server is None:
+        return
+    server.shutdown()
+    server.server_close()
+    if thread is not None:
+        thread.join(timeout=5)
+
+
 def run_acceptance(
     target: str,
     *,
@@ -249,11 +293,11 @@ def run_acceptance(
     client.fetch()
 
     _docker_available()
-    server: ThreadingHTTPServer = make_server(client, "0.0.0.0", 0, allow_network_bind=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server: ThreadingHTTPServer | None = None
+    thread: threading.Thread | None = None
     container_id = ""
     try:
+        server, thread = _start_bridge(client)
         bridge_port = int(server.server_address[1])
         wait_for_bridge_ready(f"http://127.0.0.1:{bridge_port}", timeout_seconds)
 
@@ -266,19 +310,54 @@ def run_acceptance(
             # The query loop also serves as bounded Prometheus startup waiting;
             # no separate health endpoint is required for acceptance.
             effective_timeout = max(prometheus_start_timeout_seconds, scrape_timeout_seconds)
-            prometheus_up = fetch_prometheus_up(prometheus_url, job_name, effective_timeout)
+            prometheus_up = wait_for_prometheus_up(
+                prometheus_url,
+                job_name,
+                1.0,
+                effective_timeout,
+            )
+
+            # Failure/recovery is deliberately isolated to the local bridge.
+            # Cloud Run and IAM remain untouched. Prometheus must observe the
+            # transport loss as up=0 before any restart occurs.
+            _stop_bridge(server, thread)
+            server = None
+            thread = None
+            outage_up = wait_for_prometheus_up(
+                prometheus_url,
+                job_name,
+                0.0,
+                scrape_timeout_seconds,
+            )
+
+            # While the bridge is down, prove the authoritative private Cloud
+            # Run endpoint is still reachable through the same authenticated
+            # production client. This guards against an acceptance test that
+            # accidentally changed upstream service/IAM state.
+            client.fetch()
+
+            # Prometheus keeps scraping the original fixed target, so recovery
+            # must occur on the exact same bridge port.
+            server, thread = _start_bridge(client, bridge_port)
+            wait_for_bridge_ready(f"http://127.0.0.1:{bridge_port}", timeout_seconds)
+            recovered_up = wait_for_prometheus_up(
+                prometheus_url,
+                job_name,
+                1.0,
+                scrape_timeout_seconds,
+            )
 
         return AcceptanceResult(
             target_origin=target_origin,
             unauthorized_status=unauthorized_status,
             bridge_port=bridge_port,
             prometheus_up=prometheus_up,
+            outage_up=outage_up,
+            recovered_up=recovered_up,
         )
     finally:
         _stop_container(container_id)
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        _stop_bridge(server, thread)
 
 
 def _positive_finite(value: str) -> float:
@@ -340,7 +419,10 @@ def main() -> int:
     print("  ADC-authenticated /metrics: valid StageGuard sentinel")
     print("  bridge /readyz: healthy")
     print("  bridge /metrics: validated")
-    print(f"  Prometheus {DEFAULT_JOB_NAME} up: {result.prometheus_up:g}")
+    print(f"  Prometheus {DEFAULT_JOB_NAME} initial up: {result.prometheus_up:g}")
+    print(f"  local bridge outage up: {result.outage_up:g}")
+    print("  upstream remained authenticated and valid during local outage")
+    print(f"  local bridge recovered up: {result.recovered_up:g}")
     return 0
 
 
