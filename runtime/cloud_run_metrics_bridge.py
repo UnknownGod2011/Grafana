@@ -13,9 +13,10 @@ response when ADC, IAM, network, or the StageGuard metrics endpoint is broken.
 
 A successful HTTP response is not sufficient evidence that the bridge reached
 a healthy StageGuard metrics endpoint. Every accepted payload must contain
-exactly one finite, boolean-valued remediation-deadline sentinel. This prevents
-an authenticated proxy/login/error page, empty/comment-only exposition, or
-ambiguous duplicate safety series from being reported as bridge readiness.
+exactly one finite, boolean-valued, label-free remediation-deadline sentinel
+and no additional series in that sentinel metric family. This prevents an
+authenticated proxy/login/error page, empty/comment-only exposition, or
+ambiguous/spoofed safety series from being reported as bridge readiness.
 
 The production dependency set already includes ``google-auth``. Tests inject a
 token supplier and opener, so they remain credential-free.
@@ -81,6 +82,18 @@ def normalize_audience(value: str) -> str:
     return urlunsplit(("https", parsed.netloc, "", "", ""))
 
 
+def _is_sentinel_family_token(token: bytes) -> bool:
+    """Return whether an exposition token belongs to the safety sentinel family.
+
+    Prometheus text samples place the metric name, optionally followed by a
+    label set, in the first whitespace-delimited token. StageGuard's sentinel
+    is intentionally label-free. A token such as ``metric{source=\"x\"}``
+    therefore represents an additional, unauthorized series and must make the
+    payload ambiguous rather than being ignored.
+    """
+    return token == SAFETY_SENTINEL_METRIC or token.startswith(SAFETY_SENTINEL_METRIC + b"{")
+
+
 def validate_stageguard_metrics(body: bytes) -> None:
     """Require one authoritative finite StageGuard deadline sentinel sample.
 
@@ -88,6 +101,10 @@ def validate_stageguard_metrics(body: bytes) -> None:
     own ``/metrics`` implementation. The bridge does not attempt to become a
     general Prometheus parser; it establishes only the minimum identity/integrity
     property needed before forwarding an authenticated scrape response.
+
+    Any additional labeled series in the same sentinel metric family is rejected
+    even when one valid bare sample is also present. Ignoring such a series would
+    let a semantically ambiguous safety exposition pass readiness validation.
     """
     if not isinstance(body, bytes):
         raise RuntimeError("upstream metrics response was not bytes")
@@ -98,10 +115,13 @@ def validate_stageguard_metrics(body: bytes) -> None:
         if not line or line.startswith(b"#"):
             continue
         fields = line.split()
-        if fields and fields[0] == SAFETY_SENTINEL_METRIC:
-            if len(fields) != 2:
-                raise RuntimeError("upstream StageGuard safety sentinel was malformed")
-            samples.append(fields[1])
+        if not fields or not _is_sentinel_family_token(fields[0]):
+            continue
+        if fields[0] != SAFETY_SENTINEL_METRIC:
+            raise RuntimeError("upstream StageGuard safety sentinel contained unauthorized labels")
+        if len(fields) != 2:
+            raise RuntimeError("upstream StageGuard safety sentinel was malformed")
+        samples.append(fields[1])
 
     if len(samples) != 1:
         raise RuntimeError("upstream StageGuard safety sentinel was missing or ambiguous")
