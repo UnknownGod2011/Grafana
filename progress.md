@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, and payload-integrity validation on the private Cloud Run metrics bridge.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, and an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain.
 
 Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -17,126 +17,143 @@ Core invariants:
 - Partial, missing, or unavailable evidence must never reach infrastructure mutation.
 - The browser must never turn evidence unavailability into an actionable diagnosis or expose provider failure detail.
 - An authenticated HTTP 200 alone is not sufficient bridge readiness; the body must prove it is an unambiguous StageGuard runtime-safety exposition.
+- Cloud Run metrics acceptance must never grant IAM, print credentials, mutate incidents, or require making StageGuard public.
 
-## Run log — 2026-09-11 — Cloud Run metrics bridge payload integrity
+## Run log — 2026-09-11 — private Cloud Run metrics acceptance harness
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Inspected:
 - `runtime/cloud_run_metrics_bridge.py`
 - `runtime/tests/test_cloud_run_metrics_bridge.py`
-- `runtime/api.py`, including `_service_metrics()` and `/metrics`
-- `runtime/tests/test_api.py`
-- `runtime/tests/test_api_execution_watchdog.py`
-- `docs/runtime-metrics-ingestion.md`
-- current `docs/` layout
+- `docs/cloud-run-metrics-bridge-safety.md`
+- repository runtime/root layout and current acceptance/testing conventions
 
-Also rechecked current official Google Cloud Run service-to-service authentication guidance and current Prometheus configuration documentation. Google continues to document service-to-service Cloud Run authentication using a Google-signed ID token for the receiving service audience, and StageGuard continues to follow that model through ADC rather than storing a static scrape credential.
+Rechecked current official Google Cloud documentation for Cloud Run service-to-service authentication and ID-token generation, plus current Prometheus startup/query documentation. The documented model remains a Google-signed ID token for the receiving Cloud Run service audience, with the caller holding the minimum invocation role. Prometheus continues to expose target health through the generated `up` series and its HTTP query API.
+
+Official references reviewed:
+- https://cloud.google.com/run/docs/authenticating/service-to-service
+- https://cloud.google.com/docs/authentication/get-id-token
+- https://prometheus.io/docs/prometheus/latest/querying/api/
+- https://prometheus.io/docs/prometheus/latest/configuration/configuration/
 
 ### Exact changes made
 
-#### Hardened the authenticated metrics bridge against false readiness
+#### Added opt-in private Cloud Run acceptance harness
 
-Updated `runtime/cloud_run_metrics_bridge.py`.
+Created `runtime/cloud_run_metrics_acceptance.py`.
 
-Previously, `CloudRunMetricsClient.fetch()` treated any bounded HTTP-200 body as a successful StageGuard metrics fetch. That meant an authenticated proxy/login page, comment-only exporter failure, wrong service, or other non-StageGuard body could make bridge `/readyz` report healthy and could be forwarded to Prometheus.
-
-Added `validate_stageguard_metrics()` and a fixed safety sentinel contract:
+The harness validates an already-provisioned private StageGuard Cloud Run service through the exact observability path:
 
 ```text
-stageguard_remediation_execution_deadline_exceeded <0|1>
+anonymous negative check
+  -> ADC ID token
+  -> private Cloud Run /metrics
+  -> StageGuard sentinel validation
+  -> local authenticated metrics bridge
+  -> bridge /readyz
+  -> bridge /metrics
+  -> disposable Prometheus
+  -> up{job="stageguard-cloud-run-acceptance"} == 1
 ```
 
-An accepted upstream payload must now contain exactly one label-free sample for that metric. Its value must be numeric, finite, and exactly `0` or `1`.
+Safety properties:
+- accepts only an HTTPS service origin through the existing bridge normalizer;
+- first performs a no-token request and requires HTTP 401 or 403, proving the test service is not anonymously exposing `/metrics`;
+- reuses `CloudRunMetricsClient`, so ADC token minting, audience handling, authenticated invocation, response-size limits, and StageGuard sentinel validation are the production code path rather than a parallel implementation;
+- starts the bridge only after an authenticated upstream fetch succeeds;
+- exposes the bridge on `0.0.0.0` only for the bounded lifetime needed by Docker host-gateway access;
+- writes a temporary Prometheus config containing only the local bridge target and no credentials;
+- starts a disposable `--rm` Prometheus container with a read-only config mount and a loopback-only published query port;
+- requires exactly one Prometheus `up` sample and requires it to be finite and exactly `1`;
+- tears down Prometheus and the bridge in `finally` cleanup;
+- never creates IAM grants, changes Cloud Run, invokes StageGuard lifecycle/remediation endpoints, or triggers CI;
+- never prints ID tokens, provider response bodies, ADC exception messages, or unexpected provider exception text.
 
-The bridge now rejects:
-- empty or comment-only bodies;
-- HTML/wrong-service HTTP-200 bodies;
-- missing sentinel metrics;
-- malformed sentinel lines;
-- labeled/spoofed variants instead of the canonical label-free sentinel;
-- duplicate/ambiguous sentinel samples;
-- nonnumeric values;
-- `NaN`, `Inf`, and `-Inf`;
-- values outside the boolean gauge domain such as `2`.
-
-Failure still remains sanitized: `/readyz` returns HTTP 503 and bridge `/metrics` returns HTTP 502 without exposing the upstream body, target URL, ID token, ADC detail, or IAM/provider exception.
-
-Commit:
-- `ef3e09478121fcf694149e314e683233de1efaee` — harden Cloud Run metrics bridge payload validation
-
-#### Expanded credential-free bridge regressions
-
-Updated `runtime/tests/test_cloud_run_metrics_bridge.py`.
-
-Added coverage for:
-- one valid StageGuard sentinel exposition;
-- missing/malformed/duplicate/labeled/non-finite/out-of-domain sentinels;
-- an HTTP-200 HTML body that must fail client fetch;
-- an HTTP-200 non-StageGuard body that must make `/readyz` fail closed;
-- continued secret/target sanitization on payload-integrity failure.
-
-Existing target/audience restrictions, timeout validation, bridge-owned authorization, loopback bind safety, liveness/readiness distinction, and upstream-error sanitization remain covered.
+Default disposable image remains aligned to the repository acceptance pin: `prom/prometheus:v3.13.3`.
 
 Commit:
-- `441b20f33ca8258d0ad4d79f31d15a47c5083b31` — add fail-closed metrics bridge payload regressions
+- `1d9a6b2810cd505d51ecc5ffd764178511f253d1` — add private Cloud Run metrics acceptance harness
 
-#### Added a dedicated production safety contract document
+#### Added credential-free harness regressions
 
-Created `docs/cloud-run-metrics-bridge-safety.md` documenting:
-- the Cloud Run/ADC trust model;
-- why HTTP 200 is insufficient evidence-plane readiness;
-- the exact StageGuard safety sentinel contract;
-- fail-closed bridge behavior;
-- least-privilege invoker guidance;
-- credential-free test coverage;
-- the required disposable-project production acceptance sequence.
+Created `runtime/tests/test_cloud_run_metrics_acceptance.py`.
 
-The doc records official references to Google Cloud Run service-to-service authentication and Prometheus configuration behavior.
+Coverage includes:
+- anonymous upstream acceptance only for HTTP 401/403;
+- Prometheus config contains only the local bridge target and no auth material;
+- exact single-series `up == 1` success contract;
+- ambiguous target rejection;
+- `0`, nonnumeric, `NaN`, `Inf`, and `-Inf` rejection;
+- Docker preflight error sanitization;
+- disposable `--rm` container behavior;
+- loopback-only Prometheus port publishing;
+- read-only config mount;
+- absence of privileged/container-network escalation flags;
+- CLI sanitization of unexpected provider exception text.
 
 Commit:
-- `aa83fc21e991400a799fda3d14f005b019b08968` — document authenticated metrics bridge payload safety
+- `43841d15945d2e0b04a6ea7cf6951ef0fefbecf1` — add credential-free metrics acceptance regressions
+
+#### Documented the real disposable-project procedure
+
+Expanded `docs/cloud-run-metrics-bridge-safety.md` with:
+- exact prerequisites;
+- one-command usage through `STAGEGUARD_METRICS_TARGET`;
+- optional explicit audience/image overrides;
+- ordered pass criteria;
+- explanation of why the safe negative test is an anonymous request rather than temporary IAM revocation;
+- explicit list of operations the harness never performs;
+- Docker bridge exposure/cleanup rationale;
+- sanitized failure interpretation.
+
+The previous future-tense acceptance checklist is now backed by an implementation rather than remaining documentation-only.
+
+Commit:
+- `1b14fb5badf6530113d33545cc9e7df01d98791e` — document disposable Cloud Run metrics acceptance
 
 ### Checks / results
 
-Attempted a fresh executable checkout before making changes:
+Attempted a fresh executable checkout and focused test run:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
+cd /tmp/stageguard
+python -m unittest runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_cloud_run_metrics_acceptance
 ```
 
-The execution container again failed at DNS resolution with:
+The execution container again failed before checkout with:
 
 ```text
 Could not resolve host: github.com
 ```
 
-Therefore no claim is made that the updated unittest module, Playwright acceptance, full unittest suite, or Docker rehearsal is green in this run.
+Therefore no claim is made that the new acceptance regression module, existing bridge tests, Playwright acceptance, full unittest suite, or Docker rehearsal is green in this run.
 
-Post-write inspection through the connected GitHub integration succeeded and confirmed the new validator is present in the committed bridge implementation.
-
-No GitHub Actions workflow was created, triggered, rerun, or modified. No Grafana Cloud, GCP/IAM/Cloud Run, Gemini, checkpoint, audit, or remediation resource was changed.
+Repository writes and post-write persistence succeeded through the connected GitHub integration. No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
 
 ### Decisions
 
-1. Treat reachability and payload identity/integrity as separate requirements. An authenticated HTTP 200 is not sufficient readiness.
-2. Validate one existing safety-critical StageGuard metric instead of inventing a bridge-only heartbeat that could remain healthy while the real watchdog exposition is broken.
-3. Require the canonical label-free sentinel exactly once so duplicate or spoofed/labeled variants fail closed.
-4. Keep the validator intentionally narrow rather than reimplementing the Prometheus exposition parser in the bridge.
-5. Keep all provider/body details out of bridge failures; payload-validation errors follow the same sanitized boundary as ADC/IAM/network errors.
-6. Do not use GitHub Actions merely to compensate for the current container DNS failure.
+1. Reuse the production `CloudRunMetricsClient` instead of implementing a second token/request path in the harness.
+2. Prove privacy with an anonymous/no-token negative request rather than temporarily revoking IAM; acceptance must be non-destructive.
+3. Keep tokens entirely inside the bridge client and never place bearer credentials in generated Prometheus configuration.
+4. Use disposable Prometheus because target `up == 1` is the final behavior being validated; an HTTP-only bridge check is insufficient.
+5. Require one unambiguous `up` result so accidental duplicate acceptance targets fail rather than being silently accepted.
+6. Bind Prometheus's host port to loopback and mount generated config read-only; do not use privileged Docker or host networking.
+7. Keep the harness completely opt-in and outside CI to avoid GCP charges, credential coupling, noisy workflows, and unsafe implicit cloud operations.
+8. Preserve failure sanitization at the CLI boundary; unexpected exceptions expose only their class, not provider text.
 
 ### Blockers / unknowns
 
-- The updated `runtime/tests/test_cloud_run_metrics_bridge.py` still needs execution in a runnable checkout.
+- The new `runtime/tests/test_cloud_run_metrics_acceptance.py` still needs execution in a runnable checkout.
+- The real acceptance harness requires an existing private StageGuard Cloud Run test service, working ADC for a least-privilege invoker identity, and Docker.
 - The Playwright evidence-unavailable browser acceptance still needs execution with Chromium.
 - The complete pinned Prometheus 3.13.3 + Grafana 13.2.1 watchdog rehearsal still needs a current run after the latest hardening.
-- The authenticated metrics bridge still needs disposable-project acceptance against a private Cloud Run StageGuard service using a dedicated least-privilege invoker identity.
 - Historical full-suite failures/errors have not yet been re-triaged; no full-suite green claim exists.
 
 ## Single best next step
 
-**Add a bounded, opt-in disposable-project acceptance harness for the private Cloud Run metrics path. It should take an existing service URL and dedicated invoker identity from explicit environment/configuration, verify ADC ID-token acquisition, bridge `/readyz`, bridge `/metrics` sentinel validation, and Prometheus `up == 1`, then provide a non-destructive negative mode that proves an unauthorized/no-token request is rejected. It must never create broad IAM grants, print tokens, mutate StageGuard lifecycle state, or run automatically in CI.**
+**Run `python runtime/cloud_run_metrics_acceptance.py` against a disposable private StageGuard Cloud Run deployment using a dedicated `roles/run.invoker` identity. If that passes, capture the exact acceptance output and then extend the harness with a bounded recovery check that temporarily stops only the local bridge (not IAM or Cloud Run), proves disposable Prometheus transitions `up: 1 -> 0 -> 1`, and confirms the Cloud Run service itself remains untouched throughout.**
 
 ## Retained validation baseline
 
