@@ -62,6 +62,17 @@
       "targets": [{"editorMode": "code", "expr": "max(time() - timestamp(stageguard_remediation_execution_deadline_exceeded)) or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)", "legendFormat": "sample age", "range": true, "refId": "A"}],
       "title": "Watchdog telemetry freshness",
       "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Prometheus transport health for the runtime watchdog scrape. A zero identifies scrape/bridge/IAM/network failure before metric freshness ages out; it does not itself prove a remediation deadline breach.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "SCRAPE FAILING"}, "1": {"text": "scrape healthy"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 14},
+      "id": 6,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "min(up{job=\"stageguard-runtime-watchdog\"})", "legendFormat": "scrape health", "range": true, "refId": "A"}],
+      "title": "Watchdog scrape health",
+      "type": "stat"
     }
   ],
   "refresh": "5s",
@@ -73,5 +84,5 @@
   "timezone": "browser",
   "title": "StageGuard Runtime Safety",
   "uid": "stageguard-runtime-safety",
-  "version": 2
+  "version": 3
 }
