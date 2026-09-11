@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain including local bridge failure/recovery, and explicit redirect isolation for Cloud Run identity-token-bearing metrics requests.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain including local bridge failure/recovery, redirect isolation for identity-token-bearing metrics requests, and a same-origin-by-default audience/target credential boundary.
 
 Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -20,94 +20,94 @@ Core invariants:
 - The runtime-safety sentinel is label-free by contract; any additional labeled series in that metric family makes the payload ambiguous and must fail closed.
 - Cloud Run metrics acceptance must never grant IAM, print credentials, mutate incidents, or require making StageGuard public.
 - Recovery acceptance may interrupt only the local metrics bridge; it must not mutate Cloud Run, IAM, or StageGuard lifecycle state.
-- An identity-token-bearing Cloud Run metrics request must never follow an HTTP redirect; the configured service origin is the exact credential boundary.
+- An identity-token-bearing Cloud Run metrics request must never follow an HTTP redirect; the configured service origin is the exact network credential boundary.
+- The ID-token audience must match the metrics target origin by default; a different audience is an explicit operator opt-in and must never be accepted silently.
 
-## Run log — 2026-09-11 — Cloud Run redirect credential-boundary hardening
+## Run log — 2026-09-11 — Cloud Run audience/target credential-boundary hardening
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Inspected:
 - `runtime/cloud_run_metrics_bridge.py`
 - `runtime/tests/test_cloud_run_metrics_bridge.py`
+- `runtime/cloud_run_metrics_acceptance.py`
 - `docs/cloud-run-metrics-bridge-safety.md`
-- current `main` head and the previous sentinel-family hardening handoff
+- the previous redirect/sentinel hardening handoff on `main`
 
-Also checked current official documentation for:
-- Python `urllib.request` header/redirect semantics;
-- Google Cloud Run service-to-service authentication and ID-token audience guidance.
+Also checked current official Google Cloud documentation for Cloud Run service identity, service-to-service authentication, configured custom audiences, and ID-token audience semantics.
 
-The previous handoff's real Cloud Run acceptance remains blocked in this environment by missing external credentials plus an unrunnable checkout. Rather than stop, this run reviewed the identity-token transport boundary for credential-free production hardening.
+The previous handoff's disposable Cloud Run acceptance remains blocked here by missing external credentials and an unrunnable checkout. Rather than stop, this run reviewed the pre-request credential configuration boundary.
 
 ### Finding
 
-`CloudRunMetricsClient` previously used `urllib.request.urlopen` as its production opener and supplied the Cloud Run ID token as an ordinary `Request` header.
+`CloudRunMetricsClient` accepted an explicit `audience` independently from the configured HTTPS metrics target. That allowed a configuration such as:
 
-Python's `urllib.request` follows HTTP redirects by default. Its official documentation specifically notes that headers added normally are also added to redirected requests, and provides `Request.add_unredirected_header()` for headers that must not be added to redirected requests.
+```text
+target   = https://metrics-target.example
+audience = https://different-audience.example
+```
 
-StageGuard does not need redirects in this path. The bridge accepts a configured HTTPS service origin and derives the exact `/metrics` URL. Therefore any upstream redirect represents routing/configuration drift or an unexpected intermediary. Following it is both unnecessary and an avoidable credential-boundary risk.
+The client would mint a Google-signed ID token for the second origin and send the bearer credential to the first origin. The token is audience-bound, but silently delivering a freshly minted identity credential to a different network origin is still an unnecessary credential-boundary risk and makes configuration mistakes harder to detect.
+
+Google's current Cloud Run guidance states that the ID-token audience should identify the service being invoked or a configured custom audience. Cloud Run also supports configured custom audiences, including URL-style custom-domain values. Therefore StageGuard can safely prefer target-origin/audience equality and make exceptional cross-origin delivery explicit.
 
 ### Exact changes made
 
-#### Hardened production metrics transport
+#### Hardened `CloudRunMetricsClient`
 
 Updated `runtime/cloud_run_metrics_bridge.py`.
 
 Changes:
-- added `_RejectRedirectHandler`, which refuses every HTTP redirect;
-- added `_open_without_redirects()` and made it the production default opener for `CloudRunMetricsClient`;
-- moved the Cloud Run bearer credential from ordinary request headers to `Request.add_unredirected_header()`;
-- retained `Accept` and `User-Agent` as ordinary non-secret request headers;
-- documented the defense-in-depth model directly in the transport code;
-- kept injected openers supported so existing credential-free tests and adapters remain modular.
+- the normalized target origin is now retained as the default and expected audience;
+- an explicit audience that differs from the target origin raises `BridgeConfigurationError` by default;
+- this failure occurs during client construction, before the token supplier can mint a credential;
+- added strict boolean `allow_cross_origin_audience=False` escape hatch for intentionally verified deployments;
+- added CLI flag `--allow-cross-origin-audience` so the exception requires an explicit operator acknowledgement;
+- preserved all previous HTTPS-origin validation, fixed `/metrics` path, unredirected bearer header, no-redirect transport, bounded body, sentinel validation, and sanitized failure behavior.
 
 Commit:
-- `eac204551969dcb83249baad86eb594b40133278` — harden Cloud Run metrics redirect boundary
+- `07953ce84a62bc545afda77fe1b5b2af89c093bf` — harden metrics audience credential boundary
 
-#### Added real redirect-isolation regression
+#### Added credential-free regression coverage
 
-Added `runtime/tests/test_cloud_run_metrics_bridge_redirects.py`.
+Added `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py`.
 
 Coverage proves:
-- the bearer token is stored in the request's unredirected-header collection rather than its ordinary header collection;
-- a real local redirect server can return `302` pointing to a second local server;
-- the production opener raises on the redirect;
-- the redirect destination is never contacted;
-- the redirect destination therefore cannot receive the credential.
-
-The test's local HTTP servers are intentionally limited to exercising Python redirect mechanics. Production bridge target validation still requires HTTPS.
+- default audience equals target origin;
+- explicit same-origin audience works without an escape hatch;
+- cross-origin audience is rejected by default before `token_supplier()` is called;
+- explicit opt-in permits an intentionally different audience while preserving the exact configured target URL;
+- the opt-in parameter must be a real boolean rather than a truthy configuration value.
 
 Commit:
-- `c5f062008339c75fadf16cf1213d2cb4442c56e7` — test Cloud Run metrics redirect isolation
+- `24828fa273e9b4390f30b7f7c142ac6143455bc5` — test metrics audience credential boundary
 
-#### Documented the credential boundary
+#### Documented the boundary
 
-Added `docs/cloud-run-metrics-redirect-safety.md` covering:
-- why redirects are invalid on the exact Cloud Run metrics path;
-- Python's redirect/header behavior;
-- the unredirected-header plus no-redirect defense in depth;
-- sanitized failure semantics;
-- credential-free regression expectations;
-- current official Python and Google Cloud references.
+Added `docs/cloud-run-metrics-audience-safety.md` documenting:
+- why audience and destination are one credential-delivery trust decision;
+- same-origin default behavior;
+- fail-before-token-minting semantics;
+- when the explicit cross-origin escape hatch may be appropriate;
+- preference for a configured Cloud Run custom audience matching the actual target origin;
+- interaction with the existing redirect isolation and sentinel-integrity controls;
+- official Google Cloud references.
 
 Commit:
-- `82084c075d979ed486f8d98ab25cf8211ea7aa9e` — document metrics redirect credential boundary
+- `d89224bfeabc0dd39f7f45a6c765f81b01f05b3a` — document metrics audience credential boundary
 
 ### Checks / results
 
-Re-read the updated bridge from the repository after the write and confirmed the production opener is now redirect-rejecting.
-
-A local isolated Python probe of the same `HTTPRedirectHandler` behavior was executed successfully: a `302` raised `urllib.error.HTTPError` and the destination server observed zero requests. This validates the underlying standard-library behavior used by the regression, but it is not a substitute for running the repository test itself.
-
-Attempted the focused repository test run:
+Attempted a clean checkout and focused test run:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
 cd /tmp/stageguard
 python -m unittest \
-  runtime.tests.test_cloud_run_metrics_bridge \
+  runtime.tests.test_cloud_run_metrics_bridge_audience_boundary \
   runtime.tests.test_cloud_run_metrics_bridge_redirects \
   runtime.tests.test_cloud_run_metrics_bridge_sentinel_family \
-  runtime.tests.test_cloud_run_metrics_acceptance
+  runtime.tests.test_cloud_run_metrics_bridge
 ```
 
 The execution container again failed before checkout with:
@@ -116,47 +116,57 @@ The execution container again failed before checkout with:
 Could not resolve host: github.com
 ```
 
-Therefore no claim is made that the new repository regression or the focused bridge/acceptance suites are green in this run.
+Therefore no claim is made that the new regression or focused bridge suites are green in this run.
 
 No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
 
 ### Decisions
 
-1. Treat the configured Cloud Run origin as the terminal credential boundary; redirects are invalid rather than something the bridge should normalize or follow.
-2. Use two layers: mark the bearer credential unredirected and independently disable redirects in the production opener.
-3. Keep redirect failures sanitized at the bridge boundary so routing drift becomes evidence/scrape unavailability, not provider-detail leakage.
-4. Preserve opener injection for credential-free tests and modularity.
-5. Do not trigger CI merely to work around the execution container's DNS failure.
+1. Treat audience/target equality as the safe default because the token's intended recipient and its network recipient should normally be the same origin.
+2. Reject a mismatch before token acquisition so an invalid configuration cannot mint a credential as a side effect.
+3. Preserve a narrowly named explicit opt-in for legacy or intentionally verified cross-origin deployments rather than banning them outright.
+4. Prefer a configured Cloud Run custom audience matching the actual target origin where possible.
+5. Keep the disposable acceptance harness fail-closed under the new client rule; it must not silently normalize or bypass an audience mismatch.
+6. Do not trigger CI merely to work around the execution container's DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime/tests/test_cloud_run_metrics_bridge_redirects.py` still needs execution from a real checkout.
-- The focused bridge/sentinel-family/acceptance suite still needs execution.
+- `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py` still needs execution from a real checkout.
+- The redirect/sentinel-family/bridge/acceptance suites still need a current executable run.
 - The real acceptance harness requires an existing private StageGuard Cloud Run test service, working ADC for a least-privilege invoker identity, and Docker.
+- A deployment that intentionally uses a target origin different from its configured Cloud Run audience now requires explicit `allow_cross_origin_audience=True` / `--allow-cross-origin-audience`; the disposable acceptance harness intentionally does not bypass this automatically.
 - The Playwright evidence-unavailable browser acceptance still needs execution with Chromium.
 - The complete pinned Prometheus 3.13.3 + Grafana 13.2.1 watchdog rehearsal still needs a current run after the latest hardening.
 - Historical full-suite failures/errors have not yet been re-triaged; no full-suite green claim exists.
 
 ## Single best next step
 
-**In the first runnable environment, execute the focused bridge redirect/sentinel/acceptance tests, then run `python runtime/cloud_run_metrics_acceptance.py` against a disposable private StageGuard Cloud Run service using a dedicated least-privilege `roles/run.invoker` identity. Confirm that no redirect is required on the real authenticated `/metrics` path and that the complete ADC -> private `/metrics` -> validated bridge -> Prometheus path completes `up: 1 -> 0 -> 1`.**
+**In the first runnable environment, execute the focused audience-boundary + redirect + sentinel + bridge acceptance tests. Then run the disposable private Cloud Run harness with a least-privilege `roles/run.invoker` identity using a target and configured Cloud Run audience that intentionally match. Confirm the complete ADC -> private `/metrics` -> validated bridge -> Prometheus `up: 1 -> 0 -> 1` path remains green without redirect or cross-origin credential delivery.**
 
-## Previous run — 2026-09-11 — sentinel-family ambiguity hardening
+## Previous hardening retained
 
-The private Cloud Run metrics validator was hardened so the canonical label-free safety sentinel cannot coexist with any labeled series using the same metric name. Added `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py` to cover bare, labeled, mixed-order, labeled-only, and similarly-prefixed metric cases.
+### Cloud Run redirect credential boundary
+
+The bridge installs the bearer credential as an unredirected header and its production opener rejects HTTP redirects. A real local regression requires a redirect destination to receive zero requests and zero credentials.
+
+Commits:
+- `eac204551969dcb83249baad86eb594b40133278` — harden Cloud Run metrics redirect boundary
+- `c5f062008339c75fadf16cf1213d2cb4442c56e7` — test Cloud Run metrics redirect isolation
+- `82084c075d979ed486f8d98ab25cf8211ea7aa9e` — document metrics redirect credential boundary
+
+### Sentinel-family ambiguity hardening
+
+The private Cloud Run metrics validator requires exactly one label-free `stageguard_remediation_execution_deadline_exceeded` sample and rejects any labeled sibling series in that metric family.
 
 Commits:
 - `f9f2d5edb118a43e1701a00a515f907733558fc2` — harden metrics sentinel family validation
 - `89bf1a163dd3137910e427b99d9df9f2efe29450` — test metrics sentinel family ambiguity
-- `6c5a8e74a949f8b398361e96fb8177fff5208dc3` — record sentinel family hardening progress
-
-That run also attempted the focused checkout/tests but hit the same `Could not resolve host: github.com` environment failure. No CI or external service mutation was performed.
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance, sentinel-family, and redirect hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance, sentinel-family, redirect, and audience-boundary hardening.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
