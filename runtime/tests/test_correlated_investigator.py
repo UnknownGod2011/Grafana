@@ -4,6 +4,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from evidence_errors import EvidenceUnavailable
 from investigator import QUERIES, investigate_with_log_corroboration
 from log_evidence import LogQueryResult, LogRecord
 
@@ -29,6 +30,16 @@ class Logs:
     def range(self, logql, *, start, end, limit):
         self.calls.append((logql, start, end, limit))
         return self.result
+
+
+class FailingLogs:
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = []
+
+    def range(self, logql, *, start, end, limit):
+        self.calls.append((logql, start, end, limit))
+        raise self.exc
 
 
 def metric_fault():
@@ -59,6 +70,7 @@ class CorrelatedInvestigatorTests(unittest.TestCase):
         report = investigate_with_log_corroboration(metrics, logs)
         self.assertEqual("diagnosed", report.status)
         self.assertEqual("corroborated", report.log_corroboration.status)
+        self.assertEqual((), report.unavailable_evidence)
         self.assertEqual(6, len(metrics.calls))
         self.assertEqual(1, len(logs.calls))
 
@@ -81,6 +93,25 @@ class CorrelatedInvestigatorTests(unittest.TestCase):
         report = investigate_with_log_corroboration(Metrics(values), logs)
         self.assertEqual("abstain", report.status)
         self.assertEqual([], logs.calls)
+
+    def test_loki_transport_failure_returns_sanitized_abstention(self):
+        secret = "https://grafana.example/?token=secret"
+        logs = FailingLogs(EvidenceUnavailable(secret))
+        report = investigate_with_log_corroboration(Metrics(metric_fault()), logs)
+        self.assertEqual("abstain", report.status)
+        self.assertIsNone(report.hypothesis)
+        self.assertEqual(0.0, report.confidence)
+        self.assertEqual(("causal_log",), report.unavailable_evidence)
+        self.assertIsNone(report.log_corroboration)
+        self.assertNotIn(secret, report.summary)
+        self.assertNotIn(secret, str(report.to_dict()))
+        self.assertEqual(1, len(logs.calls))
+
+    def test_loki_programming_error_is_not_swallowed(self):
+        with self.assertRaisesRegex(TypeError, "adapter bug"):
+            investigate_with_log_corroboration(
+                Metrics(metric_fault()), FailingLogs(TypeError("adapter bug"))
+            )
 
 
 if __name__ == "__main__":
