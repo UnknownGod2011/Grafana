@@ -1,11 +1,11 @@
 # Operator browser safety acceptance
 
-StageGuard has an optional real-browser acceptance test for the fail-closed evidence-plane-unavailable state:
+StageGuard has an optional real-browser acceptance test for the fail-closed evidence-plane-unavailable state. Run it from the repository's `runtime` directory:
 
 ```bash
 python -m pip install playwright
 python -m playwright install chromium
-python -m unittest runtime.tests.test_operator_browser_evidence_unavailable
+python -m unittest tests.test_operator_browser_evidence_unavailable
 ```
 
 The Playwright dependency is deliberately **not** a runtime dependency. Production StageGuard remains dependency-free at the browser layer; Playwright is only needed by contributors who want to execute this browser acceptance locally or in a disposable validation environment.
