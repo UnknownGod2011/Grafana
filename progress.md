@@ -12,104 +12,112 @@ Core invariants retained:
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
 - Durable checkpoint/audit integrity failures fail closed.
 - Append-before-CAS audit residue is not lifecycle authority until a checkpoint transition wins.
-- A losing optimistic-concurrency writer must not remain visible through `status()` as if its incident revision or approval were committed.
+- A losing optimistic-concurrency writer must not remain visible through `status()` as if its incident revision, approval, or remediation outcome were committed.
+- Once a provider action may have been dispatched, checkpoint uncertainty blocks replay until durable reload/reconciliation.
 - The browser and HTTP API must not expose provider failure detail or turn evidence loss into actionable state.
 - Private Cloud Run metrics requests must not follow redirects and must keep token audience/target boundaries explicit.
 - Runtime metrics readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 
-## Run log — 2026-09-12 — checkpoint-conflict snapshot authority
+## Run log — 2026-09-12 — remediation outcome checkpoint authority
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
-- `runtime/incident_service.py`, especially `_record()`, `_save_checkpoint()`, `investigate()`, `approve()`, `status()`, and conflict reload behavior;
-- `runtime/incident_checkpoint.py`, including `CheckpointConflictError`, checkpoint schema, and `CheckpointStore` semantics;
-- `runtime/tests/test_evidence_unavailable_lifecycle.py` and `runtime/tests/test_api.py` for existing service fixtures and diagnosed telemetry values;
-- the runtime tests inventory for existing checkpoint/audit/concurrency coverage.
-
-A clean executable checkout was attempted with:
-
-```bash
-git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
-```
-
-The execution container again failed with `Could not resolve host: github.com`. The connected GitHub integration itself was available for reads and writes, so implementation continued there without triggering CI.
+- `runtime/incident_service.py`, especially `_record()`, `_record_snapshot_transition()`, checkpoint persistence, and `execute_approved()`;
+- `runtime/incident_checkpoint.py`, including the authenticated `execution_phase` state machine (`approved`, `dispatching`, `resolved`);
+- `runtime/execution_safety.py`, including the pre-provider `dispatching` barrier, conflict reload, and provider reconciliation semantics;
+- `runtime/anchored_execution_safety.py`, the production composition that releases the lifecycle lock during provider/recovery I/O;
+- `runtime/tests/test_execution_safety.py` and `runtime/tests/test_anchored_execution_safety.py` for existing no-replay and watchdog coverage;
+- `runtime/remediation.py` to confirm stable idempotency operation IDs and recovery verification behavior.
 
 ### Finding
 
-`IncidentService.investigate()` and `IncidentService.approve()` assigned their candidate `IncidentSnapshot` to `self._snapshot` before `_record()` attempted durable checkpoint persistence. `_record()` correctly treats checkpoint persistence as lifecycle authority and marks a `CheckpointConflictError` as conflicted, but the pre-assigned candidate remained visible through `status()` after the CAS loss.
+The production `AnchoredExecutionSafeIncidentService.execute_approved()` correctly persisted a `dispatching` checkpoint before provider contact and correctly entered `execution_uncertain` when the final checkpoint CAS failed. However, after provider execution and Grafana recovery verification succeeded, it assigned the candidate outcome directly to `self._snapshot` before appending `remediation_completed` and persisting the final checkpoint.
 
-That creates a split-brain presentation problem: the durable checkpoint winner can still represent the previous incident/approval state while the losing process temporarily exposes an uncommitted revision or approval in memory. The service blocks further lifecycle mutations until explicit reload, but read paths should not portray a losing transition as authoritative during that interval.
+If that final CAS lost, the service correctly blocked further mutations, but `status()` could still expose the losing/uncommitted outcome until an explicit durable reload. This is the same lifecycle-authority hazard previously fixed for investigation and approval, with an additional constraint: the provider side effect is irreversible, so the solution must restore read authority without ever making the action eligible for replay.
 
 ### Exact changes made
 
-#### Non-authoritative loser snapshots
+#### Production outcome publication is now checkpoint-authoritative
 
-Updated `runtime/incident_service.py` with `_record_snapshot_transition(...)`.
+Updated `runtime/anchored_execution_safety.py`.
 
-The helper:
-1. remembers the previous committed in-process snapshot;
-2. temporarily installs the candidate only because checkpoint serialization needs the candidate state;
-3. calls the existing append-before-CAS `_record()` path;
-4. on `CheckpointConflictError`, restores the previous snapshot and re-raises;
-5. on success, leaves the candidate published.
+The final remediation transition now:
+1. creates an immutable candidate `IncidentSnapshot` containing the outcome;
+2. publishes it through the existing `_record_snapshot_transition(...)` helper;
+3. lets that helper temporarily install the candidate only while serializing/persisting the checkpoint;
+4. restores the pre-execution approved snapshot automatically on `CheckpointConflictError`;
+5. still marks execution as uncertain with the stable provider operation ID and durable `dispatching` semantics, so the already-contacted provider cannot be replayed;
+6. also restores the pre-execution snapshot on other final-commit failures after provider contact, while preserving the fail-closed execution-uncertainty barrier.
 
-`investigate()` and `approve()` now use this helper. No checkpoint-store policy was duplicated, the existing explicit reload requirement remains intact, and append-before-CAS audit residue remains available for durable lineage selection.
-
-Commit:
-- `f97f2bb635ca8e0e0ca88d05a88f73cf4cc7d5c4` — keep conflicted lifecycle snapshots non-authoritative.
-
-The commit diff was reviewed after writing. Functional changes are limited to the new transition helper and routing `investigate()` / `approve()` through it. Three explanatory comments in `_restore_audit_integrity()` were removed while replacing the full file through the GitHub contents API; behavior in those branches is unchanged. Restoring those comments is cleanup-only and not required for correctness.
-
-#### Focused regression coverage
-
-Added `runtime/tests/test_checkpoint_conflict_snapshot_authority.py`.
-
-It uses a deterministic checkpoint store that keeps the previous durable winner and raises `CheckpointConflictError` on a selected save. It covers:
-
-1. **losing re-investigation**
-   - first investigation commits successfully;
-   - second investigation loses CAS;
-   - service enters `checkpoint_state == "conflicted"`;
-   - `status()` still equals the first committed snapshot;
-   - append-before-CAS loser audit residue exists in the raw audit sink but does not enter the authoritative in-process timeline;
-   - further lifecycle mutation is blocked pending explicit reload;
-   - `reload_checkpoint_after_conflict()` restores the durable winner and returns to `synchronized`.
-
-2. **losing approval**
-   - diagnosed investigation commits successfully;
-   - approval loses CAS;
-   - `status()` remains the pre-approval snapshot with `approval is None`;
-   - durable winner also has no approval;
-   - raw loser audit residue is present but not exposed as committed timeline state;
-   - explicit reload keeps the unapproved durable winner authoritative.
+This separates two facts that must not be conflated:
+- the provider may already have acted, therefore execution is uncertain and replay is forbidden;
+- the outcome checkpoint did not win, therefore the candidate outcome is not lifecycle read authority.
 
 Commit:
-- `d95205e57645d5d1bef997ad7d496580ea425221` — test checkpoint conflict snapshot authority.
+- `1ffb1ca37c09ce50092ee7dfd8f25196b668447c` — keep losing remediation outcomes non-authoritative.
+
+The commit diff was reviewed after writing. The executable change is limited to replacing direct outcome assignment/recording with checkpoint-authoritative candidate publication and restoring the prior snapshot on non-CAS finalization failures.
+
+#### Deterministic regression for post-dispatch CAS loss
+
+Added `runtime/tests/test_execution_outcome_checkpoint_authority.py`.
+
+The test uses:
+- a phase-capable checkpoint store that accepts the pre-provider `dispatching` barrier but rejects the first checkpoint containing a remediation outcome;
+- a production-style remediation fake with `requires_operation_reconciliation = True` and idempotent execution;
+- deterministic diagnosed and recovery telemetry;
+- the real `AnchoredExecutionSafeIncidentService` and anchored JSONL audit sink.
+
+It proves that after the provider was called exactly once and the final outcome CAS loses:
+- `status().outcome` remains `None`;
+- the approved snapshot remains the visible lifecycle state;
+- durable checkpoint state remains `execution_phase == "dispatching"` with no outcome;
+- service readiness/lifecycle state becomes `execution_uncertain`;
+- reconciliation state is `reload_required`;
+- operator execution phase remains `dispatching`;
+- append-before-CAS `remediation_completed` loser residue does not enter committed operator history;
+- a second execution attempt is blocked and does not call the provider again;
+- after explicit conflict reload, the durable no-outcome winner remains authoritative;
+- reload alone still does not permit provider replay.
+
+Commit:
+- `a21290e188af6a22d7662919eb59d9358e5146f9` — test remediation outcome checkpoint authority.
 
 ### Checks / results
 
-- Reviewed the actual commit diff from GitHub after updating `incident_service.py`; no unintended executable changes beyond the conflict-authority implementation were present.
+- Reviewed the actual GitHub commit diff for `runtime/anchored_execution_safety.py`; no unrelated executable changes were present.
 - Re-read the committed regression file from `main` after creation.
-- Independently Python-compiled the new regression source prefix containing imports/classes/store definitions; syntax check passed.
-- A real focused unittest run could not be started because the execution container cannot currently resolve `github.com` for checkout.
-- No GitHub Actions workflow was created, modified, triggered, or rerun.
+- Attempted a focused executable run with:
+
+```bash
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
+cd /tmp/stageguard/runtime
+python -m unittest \
+  tests.test_execution_outcome_checkpoint_authority \
+  tests.test_anchored_execution_safety \
+  tests.test_execution_safety
+```
+
+- The execution container again failed before checkout with `Could not resolve host: github.com`.
+- No GitHub Actions workflow was created, modified, triggered, or rerun as a workaround.
 - No GCP/IAM/Cloud Run, Grafana Cloud, Gemini provider, incident, remediation, or external audit resource was mutated.
 
 No green repository-suite claim is made for this run.
 
 ### Decisions
 
-1. Fix the authority boundary in `IncidentService` rather than hiding conflicted state only in the HTTP layer; all callers should see the same semantics.
-2. Preserve append-before-CAS audit behavior because loser residue is required for authenticated lineage selection in stores/readers that can enumerate branches.
-3. Roll back only the candidate snapshot on `CheckpointConflictError`; the conflict flag remains authoritative and forces explicit reload before further lifecycle mutation.
-4. Cover both investigation replacement and approval publication because an uncommitted approval is especially dangerous for an incident commander.
-5. Do not alter execution/remediation conflict semantics in this change. Provider dispatch can have irreversible side effects and requires a separate review of the existing dispatching/anchored execution protocol rather than applying snapshot rollback mechanically.
+1. Treat final remediation outcome publication as checkpoint-authoritative just like investigation/approval publication.
+2. Do **not** roll back execution uncertainty when rolling back the visible outcome. Provider contact may already have occurred; the no-replay barrier must survive independently of read authority.
+3. Preserve the durable `dispatching` checkpoint as the correct crash/restart truth when the final outcome commit loses.
+4. Preserve append-before-CAS audit residue for forensic lineage selection, but keep it out of committed operator history until a checkpoint transition wins.
+5. Harden the production anchored composition first because it is the path designed for long-running provider calls, watchdog observability, authenticated audit anchors, and responsive reads.
 6. Avoid CI solely to work around the transient execution-environment DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime/tests/test_checkpoint_conflict_snapshot_authority.py` still needs execution from a real repository checkout.
+- `runtime/tests/test_execution_outcome_checkpoint_authority.py` still needs execution from a real repository checkout.
+- The non-anchored `ExecutionSafeIncidentService` still directly inherits the base `IncidentService.execute_approved()` outcome-publication behavior; its post-action conflict semantics should be reviewed for the same read-authority invariant even though the production composition is now hardened.
 - The complete evidence-unavailable safety set still needs a current combined executable run.
 - The focused Cloud Run audience/redirect/sentinel/bridge suites need a current executable run.
 - The disposable private Cloud Run acceptance still requires a private StageGuard test service, working ADC for a least-privilege invoker identity, and Docker.
@@ -118,10 +126,11 @@ No green repository-suite claim is made for this run.
 
 ## Single best next step
 
-**Review the execution/remediation checkpoint protocol for the same authority hazard, specifically the interval between provider dispatch, `dispatching` persistence, outcome creation, and `remediation_completed` checkpoint commit. Add a focused regression proving that a checkpoint conflict cannot make a losing process re-dispatch an already-started remediation or expose an uncommitted outcome. Do not apply a generic rollback until the irreversible provider-side-effect semantics are understood.**
+**Extend the same non-authoritative-loser outcome guarantee to the non-anchored `ExecutionSafeIncidentService` / base execution path, preferably by routing base `IncidentService.execute_approved()` through `_record_snapshot_transition(...)` so every checkpoint-backed composition gets the invariant centrally. Add/strengthen a focused regression that asserts `status().outcome is None` immediately after a post-provider checkpoint conflict while provider call count remains exactly one. Then run the production and non-anchored execution-safety suites together when checkout execution becomes available.**
 
 ## Recent hardening retained
 
+- Investigation and approval CAS losers no longer remain visible through `status()` as committed state.
 - Authenticated evidence-unavailable briefing, approval, and execution bypass attempts fail closed with no Gemini/remediation side effects.
 - Cloud Run metrics bridge rejects redirects for ID-token-bearing requests.
 - Cloud Run token audience must match target origin by default unless explicitly opted out.
