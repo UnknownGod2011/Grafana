@@ -3,6 +3,7 @@ import unittest
 
 from api import _lifecycle_view
 from evidence_errors import EvidenceUnavailable
+from gemini_commander import GeminiCommander
 from incident_service import IncidentService, MemoryAuditLog
 from remediation import ActionResult
 
@@ -29,8 +30,17 @@ class NoopRemediation:
         return ActionResult(True, "accepted")
 
 
+class ShouldNotRunModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, _context):
+        self.calls += 1
+        raise AssertionError("Gemini model must not run while evidence is unavailable")
+
+
 class EvidenceUnavailableLifecycleTests(unittest.TestCase):
-    def make_service(self):
+    def make_service(self, *, commander=None):
         metrics = FailingMetrics()
         remediation = NoopRemediation()
         audit = MemoryAuditLog()
@@ -38,6 +48,7 @@ class EvidenceUnavailableLifecycleTests(unittest.TestCase):
             metrics,
             remediation,
             audit,
+            commander=commander,
             clock_ms=lambda: 123456789,
             id_factory=lambda: "incident-evidence-unavailable",
             recovery_sleep=lambda _: None,
@@ -71,6 +82,23 @@ class EvidenceUnavailableLifecycleTests(unittest.TestCase):
         self.assertEqual("investigation_completed", audit.events[0].event_type)
         self.assertEqual("abstain", audit.events[0].payload["status"])
         self.assertNotIn("super-secret", json.dumps(audit.events[0].payload, sort_keys=True))
+
+    def test_gemini_briefing_is_rejected_before_model_invocation(self):
+        model = ShouldNotRunModel()
+        service, _metrics, _remediation, audit = self.make_service(commander=GeminiCommander(model))
+        snapshot = service.investigate(actor="operator@example.com")
+        before = list(audit.events)
+
+        with self.assertRaisesRegex(ValueError, "disabled while required incident evidence is unavailable"):
+            service.briefing(
+                incident_id=snapshot.incident_id,
+                revision=snapshot.revision,
+                actor="operator@example.com",
+            )
+
+        self.assertEqual(0, model.calls)
+        self.assertEqual(before, audit.events)
+        self.assertEqual(["investigation_completed"], [event.event_type for event in audit.events])
 
     def test_approval_rejection_creates_no_approval_record_or_provider_call(self):
         service, _metrics, remediation, audit = self.make_service()
