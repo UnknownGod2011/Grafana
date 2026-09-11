@@ -104,6 +104,10 @@ class ExecutionSafetyTests(unittest.TestCase):
             service.execute_approved()
 
         self.assertEqual(1, len(remediation.calls))
+        self.assertIsNone(service.status().outcome, "CAS loser must not expose an uncommitted remediation outcome")
+        self.assertEqual(approved.approval, service.status().approval)
+        timeline = service.audit_timeline(incident_id=approved.incident_id)
+        self.assertNotIn("remediation_completed", [event["event_type"] for event in timeline["events"]])
         self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual("reload_required", service.execution_reconciliation_state())
         with self.assertRaisesRegex(RuntimeError, "uncertain"):
