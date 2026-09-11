@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, explicit stale-telemetry detection, a credential-free metrics-outage rehearsal path, reproducibly pinned Grafana/Prometheus acceptance images, live runtime-version attestation, and fail-closed Prometheus safety-query parsing in the observability rehearsal.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, explicit stale-telemetry detection, a credential-free metrics-outage rehearsal path, reproducibly pinned Grafana/Prometheus acceptance images, live runtime-version attestation, fail-closed Prometheus safety-query parsing, and a live query-local cardinality ambiguity probe.
 
 Core invariants remain unchanged:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -14,105 +14,118 @@ Core invariants remain unchanged:
 - Loss of observability must never be reclassified as a positive remediation deadline breach.
 - Ambiguous, malformed, or non-finite Prometheus safety evidence must never be interpreted as a healthy acceptance signal.
 
-## Run log — 2026-09-11 — strict Prometheus acceptance evidence
+## Run log — 2026-09-11 — live Prometheus cardinality ambiguity probe
 
 ### Inspected at start
 
-Read `progress.md` completely before making changes. Inspected repository metadata plus:
+Read `progress.md` completely before making changes. Inspected the repository tree and the current observability acceptance path, including:
 - `runtime/watchdog_observability_acceptance.py`
+- `runtime/watchdog_metrics_fixture.py`
 - `runtime/tests/test_watchdog_observability_acceptance.py`
 - `docker-compose.yml`
+- `docs/runtime-metrics-ingestion.md`
 
-Confirmed the previously recorded runtime-version attestation is present and the Compose stack remains pinned to Prometheus 3.13.3 and Grafana 13.2.1.
-
-While reviewing the acceptance boundary, identified a safety/reproducibility defect in `prometheus_query_value()`: it accepted the first result from any non-empty result list and directly converted its sample with `float()`. Prometheus instant-vector ordering is not guaranteed, and Prometheus represents special float values such as NaN/Inf as quoted sample strings. A duplicated/unexpectedly labeled metric could therefore return contradictory series and the rehearsal could accept whichever happened to be first; a non-finite sample could also flow into acceptance comparisons without a structural failure.
+Confirmed the previous strict parser rejects multi-series instant vectors, but the complete acceptance rehearsal did not yet prove that behavior through a real Prometheus query. The recorded next step proposed injecting a duplicate watchdog series. Reviewing Prometheus staleness behavior showed a reproducibility problem with persistent fixture-level duplicates: after switching back to one series, the removed series may remain queryable until Prometheus marks it stale, which can contaminate subsequent lifecycle checks or immediate reruns.
 
 ### Research / attribution
 
-Checked the current official Prometheus HTTP API documentation before changing the parser. The API documents:
-- instant-query `data.resultType` and `data.result` structure;
-- instant vectors as per-series objects containing a two-element `value` pair;
-- vector result ordering is not guaranteed unless explicitly sorted;
-- special float values such as `NaN`, `Inf`, and `-Inf` are transported as quoted strings.
+Reviewed current official Prometheus documentation before choosing the negative-probe design:
+- `label_replace()` can add/replace a label on each instant-vector series.
+- the `or` logical/set operator returns the union of vector elements when their complete label sets do not match.
 
-Official reference: https://prometheus.io/docs/prometheus/latest/querying/api/
+These semantics let the rehearsal manufacture two label-distinct results from the single healthy watchdog series entirely at query time, without writing new samples.
+
+Official references:
+- https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
+- https://prometheus.io/docs/prometheus/latest/querying/operators/
+- https://prometheus.io/docs/prometheus/latest/querying/api/
 
 ### Exact changes made
 
-#### Fail closed on ambiguous Prometheus safety evidence
+#### Added live query-local ambiguity proof
 
-Updated `runtime/watchdog_observability_acceptance.py` with `prometheus_query_value_from_payload()` and routed all watchdog/freshness instant queries through it.
+Updated `runtime/watchdog_observability_acceptance.py` with `AMBIGUITY_PROBE_QUERY`:
 
-The parser now requires:
-1. a JSON object with `status == "success"`;
-2. object-valued `data`;
-3. `resultType == "vector"`;
-4. list-valued `result`;
-5. either an empty vector (represented as `None`, allowing polling to continue) or exactly one returned series;
-6. an object-valued series;
-7. exactly a two-element `value` pair;
-8. a numeric-convertible sample that is finite.
+```promql
+label_replace(stageguard_remediation_execution_deadline_exceeded, "stageguard_acceptance_probe", "left", "", "")
+or
+label_replace(stageguard_remediation_execution_deadline_exceeded, "stageguard_acceptance_probe", "right", "", "")
+```
 
-It rejects multiple result series instead of choosing one arbitrarily. This is intentional: StageGuard's acceptance expressions are scalar-like safety signals and are expected to collapse to at most one sample. More than one sample means telemetry cardinality/configuration has drifted and acceptance must fail closed rather than guess which series is authoritative.
+After StageGuard establishes a healthy `deadline_exceeded=0` sample, the rehearsal sends this expression through the same live Prometheus HTTP query path used by the safety checks. The expression returns two label-distinct copies of the source series. `prometheus_ambiguity_probe_rejected()` requires the existing strict parser to reject that response specifically with `Prometheus safety query must return exactly one series`.
 
-It also rejects NaN and positive/negative infinity. This prevents invalid numeric evidence from silently participating in equality or freshness comparisons.
+The rehearsal fails if:
+- Prometheus unexpectedly returns an accepted scalar-like result;
+- StageGuard no longer rejects the multi-series vector;
+- an unrelated parser failure is mistaken for successful ambiguity rejection;
+- the live query cannot be executed or decoded.
 
-#### Added regression coverage
+The probe runs before the real deadline and stale-telemetry lifecycles. Because it creates labels only in the query result, it leaves no additional stored time series behind and does not make immediate reruns depend on Prometheus stale-marker timing.
 
-Expanded `runtime/tests/test_watchdog_observability_acceptance.py` to cover:
-- one valid finite instant-vector sample;
-- an empty vector returning `None` for polling;
-- contradictory duplicate/multi-series results failing closed;
-- `NaN`, `Inf`, `+Inf`, and `-Inf` samples failing closed;
-- failed Prometheus responses;
-- missing/malformed `data`;
-- non-vector result types;
-- non-list result values;
-- malformed series entries;
-- malformed sample tuples;
-- nonnumeric sample strings.
+The final PASS message now explicitly includes successful rejection of ambiguous Prometheus safety evidence.
 
-Existing runtime-version, alert identity, stale-query, telemetry-mode, timeout, and loopback-origin checks remain intact.
+#### Added focused regression coverage
+
+Added `runtime/tests/test_watchdog_ambiguity_probe.py` covering:
+- the probe expression references the watchdog metric twice;
+- exactly two `label_replace()` branches are present;
+- the branches use distinct `left`/`right` synthetic label values and `or` union semantics;
+- the helper returns success only for the exact multi-series rejection;
+- a mistakenly accepted `0.0` returns failure;
+- an unrelated parser failure such as non-finite evidence does not count as a successful ambiguity proof.
+
+Existing strict parser tests remain in `runtime/tests/test_watchdog_observability_acceptance.py` and continue to cover direct contradictory multi-series payloads, malformed response shapes, and NaN/Inf rejection.
+
+#### Added rationale documentation
+
+Added `docs/prometheus-acceptance-safety.md` explaining:
+- why watchdog cardinality ambiguity is a safety-evidence integrity failure;
+- the exact query-local PromQL probe;
+- why query-local duplication was preferred over persistent duplicate fixture exposition;
+- the relevant official Prometheus operator/function/API references;
+- the boundary between this acceptance guard and normal production telemetry-label hygiene.
 
 ### Commits this run
 
-- `7b020ee012daa8d9f5fb6869f339783c07891714` — fail closed on ambiguous Prometheus acceptance samples
-- `f1bc9473804ebe280dc092ae22bba1596396930c` — test strict Prometheus safety query parsing
+- `a7a3fcfaddaa527fc87ae41b9fa403e9f972a0b6` — prove Prometheus cardinality ambiguity fails closed
+- `9837ff7eba4416c60b6868c2c05b12df56bf73ce` — test live Prometheus ambiguity probe contract
+- `9c7456a8711ab454a08b2316237c61737b8fcd1b` — document Prometheus acceptance ambiguity guard
 
 ### Tests / checks / results
 
-- Verified through the GitHub API that the new parser is present on `main` after commit and that the acceptance script routes query results through the strict parser.
-- Attempted a fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` followed by the focused unittest module.
-- The execution environment again failed before checkout with `Could not resolve host: github.com`; therefore the exact committed Python tests did not execute and no green claim is made.
-- The full Docker observability rehearsal remains unexecuted in this environment for the same checkout/Docker-path limitation.
+- Re-fetched the committed acceptance script through the GitHub API and verified the new constant, helper, pre-lifecycle ambiguity check, failure paths, and PASS message are present on `main`.
+- Verified the new focused test file and safety rationale document were committed to the intended repository only.
+- Compared the probe design against official Prometheus documentation: `label_replace()` preserves the source series while adding the synthetic label, and `or` unions label-distinct instant-vector elements, which is the required cardinality behavior.
+- The exact Python unit tests were not executed in this environment because the runnable checkout path remains unavailable; no green unit-test claim is made.
+- The full Docker observability rehearsal was not executed here; it still requires a runnable Docker checkout with the pinned images.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
 - No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Treat unexpected Prometheus metric cardinality as invalid safety evidence. The acceptance harness must not choose an arbitrary series when it expects one authoritative watchdog value.
-2. Require Prometheus result-shape identity (`vector`) instead of loosely traversing whatever successful response happens to contain `result`.
-3. Reject non-finite samples explicitly because watchdog state and telemetry age must always be finite quantities.
-4. Preserve empty-vector-as-`None` semantics so normal ingestion startup/outage polling can continue until bounded timeout; structural ambiguity remains an exception and is never accepted as success.
-5. Keep this hardening dependency-free and local; it adds no service, credential, network destination, or CI workload.
+1. Use a query-local adversarial cardinality probe rather than a fixture mode that emits persistent duplicate series. This exercises the real Prometheus HTTP path while avoiding stale-series residue between test phases/reruns.
+2. Count only the parser's explicit multi-series rejection as a successful negative test. Other parse/API failures must not make the rehearsal look healthy.
+3. Run the ambiguity probe only after a real healthy watchdog sample exists, so the synthetic branches are derived from actual scraped evidence rather than an empty vector.
+4. Preserve the existing deadline and telemetry-outage lifecycles unchanged after the negative probe; the adversarial check is an additional gate, not a replacement.
+5. Keep the test dependency-free and local; it adds no credentials, destinations, external writes, or CI load.
 
 ### Blockers / unknowns
 
-- The focused unit tests still need execution from a runnable checkout.
-- The full Docker watchdog rehearsal still needs to run against the pinned Prometheus 3.13.3 and Grafana 13.2.1 images. It must attest live versions, then prove deadline firing/resolution and stale-telemetry firing/resolution using the new strict Prometheus evidence parser.
+- The new focused unit test and existing acceptance tests still need execution from a runnable checkout.
+- The full Docker watchdog rehearsal still needs to run against the pinned Prometheus 3.13.3 and Grafana 13.2.1 images. It must attest live versions, prove the query-local ambiguity rejection, then prove deadline firing/resolution and stale-telemetry firing/resolution.
 - Container digests are still not committed because an authoritative registry digest has not been verified through the available execution path.
 - The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity.
 - Cloud Storage Policy Troubleshooter and live Gemini/Vertex acceptance still require authorized disposable-project credentials.
 
 ## Single best next step
 
-**Run the complete credential-free Docker observability rehearsal on the first environment with a runnable checkout. In addition to live version attestation and both alert lifecycles, deliberately create or inject a duplicate watchdog series during a negative acceptance case and confirm the strict parser refuses to produce a PASS. This will validate that cardinality drift cannot make StageGuard select an arbitrary healthy-looking safety sample.**
+**Run the complete credential-free Docker observability rehearsal in the first environment with Docker access and a runnable checkout. It must attest Prometheus 3.13.3 and Grafana 13.2.1, prove the new live ambiguity probe is rejected without contaminating subsequent queries, then prove both the remediation-deadline and stale-telemetry firing-and-resolution lifecycles. If that passes, capture the exact command/output as the new observability acceptance baseline.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog freshness acceptance path, explicit image pins, live runtime-version attestation, and strict Prometheus safety-query parsing.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog freshness acceptance path, explicit image pins, live runtime-version attestation, strict Prometheus safety-query parsing, and the live ambiguity probe.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
