@@ -36,6 +36,8 @@ For an evidence-unavailable incident:
 
 The briefing refusal happens before model invocation and does not create `briefing_generated` or `briefing_failed` audit events. An observability outage is deterministic lifecycle state; it is not a condition that should be sent to an advisory model that lacks provider-failure detail.
 
+The authenticated `POST /v1/briefing` route preserves the same invariant for non-browser callers. It returns the bounded lifecycle rejection through the API error envelope, keeps `Cache-Control: no-store`, does not invoke Gemini, does not mutate the audit timeline, and does not expose the underlying evidence-provider exception text.
+
 A fresh diagnosed revision is required before any approval or execution affordance can become available again. Existing partial evidence never becomes authorization material.
 
 ## Audit semantics
@@ -57,6 +59,15 @@ A rejected evidence-unavailable briefing is likewise not recorded as a model fai
 - server-side Gemini briefing rejection before model invocation and without briefing audit events;
 - approval rejection before any approval audit record;
 - zero remediation-provider calls after rejected approval.
+
+`runtime/tests/test_api_evidence_unavailable_briefing.py` exercises the actual authenticated HTTP server and covers:
+
+- `POST /v1/investigate` producing a sanitized evidence-unavailable abstention;
+- direct authenticated `POST /v1/briefing` rejection for that exact incident revision;
+- zero Gemini invocations despite bypassing the browser;
+- no new audit event and no remediation-provider call;
+- `Cache-Control: no-store` on the rejected response;
+- absence of injected provider-detail and endpoint sentinels from both investigation and briefing response bodies.
 
 `runtime/tests/test_operator_console.py` additionally covers the browser safety boundary:
 
