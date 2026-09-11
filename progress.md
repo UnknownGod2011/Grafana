@@ -82,19 +82,15 @@ Coverage proves:
 Commit:
 - `24828fa273e9b4390f30b7f7c142ac6143455bc5` — test metrics audience credential boundary
 
-#### Documented the boundary
+#### Documented the boundary and aligned operator guidance
 
-Added `docs/cloud-run-metrics-audience-safety.md` documenting:
-- why audience and destination are one credential-delivery trust decision;
-- same-origin default behavior;
-- fail-before-token-minting semantics;
-- when the explicit cross-origin escape hatch may be appropriate;
-- preference for a configured Cloud Run custom audience matching the actual target origin;
-- interaction with the existing redirect isolation and sentinel-integrity controls;
-- official Google Cloud references.
+Added `docs/cloud-run-metrics-audience-safety.md` documenting the audience/destination trust decision, reject-before-token-minting behavior, explicit escape hatch, preference for a matching Cloud Run custom audience, and interaction with redirect/sentinel controls.
 
-Commit:
+Updated `docs/cloud-run-metrics-bridge-safety.md` so the main bridge runbook now reflects the same-origin default and no longer suggests that the disposable acceptance harness should silently use a different audience. It now documents matching target/audience as an acceptance prerequisite and links the focused audience-safety contract.
+
+Commits:
 - `d89224bfeabc0dd39f7f45a6c765f81b01f05b3a` — document metrics audience credential boundary
+- `4c53e4976afb699b86aaf7a2b504ed86c0793960` — align metrics bridge safety docs with audience boundary
 
 ### Checks / results
 
@@ -117,6 +113,8 @@ Could not resolve host: github.com
 ```
 
 Therefore no claim is made that the new regression or focused bridge suites are green in this run.
+
+Performed a repository code-search compatibility sweep for `CloudRunMetricsClient(` after the change. The connector's code-search index returned no matches, so this was not treated as proof that no call sites exist; the known acceptance harness was inspected directly and remains intentionally fail-closed under a mismatch.
 
 No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
 
