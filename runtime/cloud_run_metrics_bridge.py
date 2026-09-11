@@ -7,6 +7,10 @@ Run audience and forwards only GET /metrics. It never forwards caller headers,
 never accepts an arbitrary upstream path, and never logs tokens or upstream
 error bodies.
 
+``/healthz`` is intentionally process-only liveness. ``/readyz`` verifies the
+complete authenticated upstream metrics path and fails closed with a sanitized
+response when ADC, IAM, network, or the StageGuard metrics endpoint is broken.
+
 The production dependency set already includes ``google-auth``. Tests inject a
 token supplier and opener, so they remain credential-free.
 """
@@ -143,10 +147,28 @@ class MetricsBridgeHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
 
+    def _upstream_ready(self) -> bool:
+        try:
+            self.client.fetch()
+        except Exception:
+            # Readiness is intentionally fail-closed and sanitized. Never expose
+            # target URLs, tokens, ADC details, provider bodies, or exception text.
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
             body = b'{"ok":true}'
             self._headers(200, "application/json", len(body))
+            self.wfile.write(body)
+            return
+        if self.path == "/readyz":
+            if self._upstream_ready():
+                body = b'{"ok":true,"upstream":"reachable"}'
+                self._headers(200, "application/json", len(body))
+            else:
+                body = b'{"ok":false,"upstream":"unavailable"}'
+                self._headers(503, "application/json", len(body))
             self.wfile.write(body)
             return
         if self.path != "/metrics":
