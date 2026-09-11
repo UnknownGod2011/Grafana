@@ -15,11 +15,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from command_line import split_command
+from evidence_errors import EvidenceUnavailable
 from mcp_smoke import DEFAULT_COMMAND, DATASOURCE_UID, McpError, StdioClient
 
 
-class McpMetricError(McpError):
-    """Raised when Grafana MCP returns an unusable metric result."""
+class McpMetricError(McpError, EvidenceUnavailable):
+    """Raised when Grafana MCP cannot provide trustworthy metric evidence."""
 
 
 @dataclass(frozen=True)
@@ -30,15 +31,9 @@ class QueryTrace:
 
 
 def _tool_payload(result: dict[str, Any]) -> Any:
-    """Extract the JSON payload returned by a successful MCP tool call.
-
-    mcp-grafana serializes ordinary tool return values as JSON text in
-    CallToolResult.content. We also accept structuredContent defensively so the
-    adapter remains compatible with servers that expose the same payload using
-    newer MCP result conventions.
-    """
+    """Extract the JSON payload returned by a successful MCP tool call."""
     if result.get("isError"):
-        raise McpMetricError(f"query_prometheus returned isError=true: {result.get('content')}")
+        raise McpMetricError("query_prometheus returned an MCP tool error")
 
     structured = result.get("structuredContent")
     if structured is not None:
@@ -66,22 +61,14 @@ def _coerce_number(value: Any) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
-        raise McpMetricError(f"Prometheus sample value is not numeric: {value!r}") from exc
+        raise McpMetricError("Prometheus sample value is not numeric") from exc
     if not math.isfinite(number):
-        raise McpMetricError(f"Prometheus sample value is non-finite: {value!r}")
+        raise McpMetricError("Prometheus sample value is non-finite")
     return number
 
 
 def extract_instant_value(result: dict[str, Any]) -> float | None:
-    """Return exactly one finite numeric sample from an MCP query result.
-
-    Prometheus model.Value JSON encodes vectors as a list of sample objects and
-    scalars as ``[timestamp, value]``. Empty vectors are legitimate missing
-    evidence and therefore map to ``None``. Multiple vector samples are rejected
-    rather than guessed because StageGuard's bounded queries are expected to
-    resolve to one scalar observation each. NaN and infinities are rejected:
-    they are numeric encodings but are not trustworthy incident evidence.
-    """
+    """Return exactly one finite numeric sample from an MCP query result."""
     payload = _tool_payload(result)
     if not isinstance(payload, dict) or "data" not in payload:
         raise McpMetricError("query_prometheus JSON payload is missing data")
@@ -102,10 +89,10 @@ def extract_instant_value(result: dict[str, Any]) -> float | None:
             )
         sample = data[0].get("value")
         if not isinstance(sample, list) or len(sample) != 2:
-            raise McpMetricError(f"Prometheus vector sample has malformed value: {sample!r}")
+            raise McpMetricError("Prometheus vector sample has malformed value")
         return _coerce_number(sample[1])
 
-    raise McpMetricError(f"unsupported Prometheus instant result shape: {data!r}")
+    raise McpMetricError("unsupported Prometheus instant result shape")
 
 
 class McpPrometheusMetricClient:
@@ -162,34 +149,43 @@ class McpPrometheusMetricClient:
             annotations = query_tool.get("annotations") or {}
             if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
                 raise McpMetricError("query_prometheus does not advertise readOnlyHint=true")
-        except Exception:
+        except McpMetricError:
             client.close()
             raise
+        except McpError as exc:
+            client.close()
+            raise McpMetricError("Grafana MCP metric transport/protocol unavailable") from exc
         self._client = client
 
     def instant(self, promql: str) -> float | None:
         if not isinstance(promql, str) or not promql.strip():
             raise ValueError("PromQL must be a non-empty string")
-        if self._client is None:
-            self.connect()
-        assert self._client is not None
+        try:
+            if self._client is None:
+                self.connect()
+            assert self._client is not None
 
-        started = time.perf_counter()
-        result = self._client.request(
-            "tools/call",
-            {
-                "name": "query_prometheus",
-                "arguments": {
-                    "datasourceUid": self.datasource_uid,
-                    "expr": promql,
-                    "queryType": "instant",
-                    "endTime": "now",
+            started = time.perf_counter()
+            result = self._client.request(
+                "tools/call",
+                {
+                    "name": "query_prometheus",
+                    "arguments": {
+                        "datasourceUid": self.datasource_uid,
+                        "expr": promql,
+                        "queryType": "instant",
+                        "endTime": "now",
+                    },
                 },
-            },
-        )
-        if not isinstance(result, dict):
-            raise McpMetricError("query_prometheus result must be an object")
-        value = extract_instant_value(result)
+            )
+            if not isinstance(result, dict):
+                raise McpMetricError("query_prometheus result must be an object")
+            value = extract_instant_value(result)
+        except McpMetricError:
+            raise
+        except McpError as exc:
+            raise McpMetricError("Grafana MCP metric transport/protocol unavailable") from exc
+
         self.traces.append(
             QueryTrace(
                 promql=promql,
