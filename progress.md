@@ -2,9 +2,9 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, explicit stale-telemetry detection, a credential-free metrics-outage rehearsal path, reproducibly pinned Grafana/Prometheus acceptance images, live runtime-version attestation, fail-closed Prometheus safety-query parsing, and a live query-local cardinality ambiguity probe.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, stale-telemetry detection, a credential-free metrics-outage rehearsal path, pinned Grafana/Prometheus acceptance images, live runtime-version attestation, strict Prometheus safety-query parsing, a live query-local cardinality ambiguity probe, and separate liveness/readiness semantics for the private Cloud Run metrics bridge.
 
-Core invariants remain unchanged:
+Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Approval is exact-revision-bound and single-use.
@@ -13,122 +13,113 @@ Core invariants remain unchanged:
 - A healthy watchdog value is trustworthy only while the observability path is delivering fresh samples.
 - Loss of observability must never be reclassified as a positive remediation deadline breach.
 - Ambiguous, malformed, or non-finite Prometheus safety evidence must never be interpreted as a healthy acceptance signal.
+- Metrics bridge process liveness must not be confused with authenticated upstream readiness.
 
-## Run log — 2026-09-11 — live Prometheus cardinality ambiguity probe
+## Run log — 2026-09-11 — authenticated metrics bridge readiness
 
 ### Inspected at start
 
-Read `progress.md` completely before making changes. Inspected the repository tree and the current observability acceptance path, including:
-- `runtime/watchdog_observability_acceptance.py`
-- `runtime/watchdog_metrics_fixture.py`
-- `runtime/tests/test_watchdog_observability_acceptance.py`
-- `docker-compose.yml`
+Read `progress.md` completely before deciding what to change. Inspected the current repository and the authenticated metrics path, including:
+- `runtime/cloud_run_metrics_bridge.py`
+- `runtime/tests/test_cloud_run_metrics_bridge.py`
 - `docs/runtime-metrics-ingestion.md`
+- the previously recorded watchdog observability acceptance baseline and ambiguity-probe work.
 
-Confirmed the previous strict parser rejects multi-series instant vectors, but the complete acceptance rehearsal did not yet prove that behavior through a real Prometheus query. The recorded next step proposed injecting a duplicate watchdog series. Reviewing Prometheus staleness behavior showed a reproducibility problem with persistent fixture-level duplicates: after switching back to one series, the removed series may remain queryable until Prometheus marks it stale, which can contaminate subsequent lifecycle checks or immediate reruns.
+Attempted a fresh local checkout first:
 
-### Research / attribution
+```bash
+git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
+```
 
-Reviewed current official Prometheus documentation before choosing the negative-probe design:
-- `label_replace()` can add/replace a label on each instant-vector series.
-- the `or` logical/set operator returns the union of vector elements when their complete label sets do not match.
+The execution container still failed with `Could not resolve host: github.com`, so the Docker rehearsal and committed Python test suite could not run from a local checkout in this environment. Work continued through the GitHub repository API instead of stopping on that transient environment limitation.
 
-These semantics let the rehearsal manufacture two label-distinct results from the single healthy watchdog series entirely at query time, without writing new samples.
+### Problem identified
 
-Official references:
-- https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
-- https://prometheus.io/docs/prometheus/latest/querying/operators/
-- https://prometheus.io/docs/prometheus/latest/querying/api/
+The private Cloud Run metrics bridge already had `/healthz`, but that endpoint always returned healthy if the bridge process itself was serving HTTP. It did not prove that:
+- Application Default Credentials could mint an ID token;
+- the configured audience was accepted;
+- the bridge identity had Cloud Run invoke permission;
+- the upstream StageGuard service was reachable; or
+- authenticated `GET /metrics` actually worked.
+
+Using process liveness as readiness would let an orchestrator or operator see a healthy bridge while every Prometheus scrape was failing.
 
 ### Exact changes made
 
-#### Added live query-local ambiguity proof
+#### Added deep `/readyz` while preserving `/healthz` as liveness
 
-Updated `runtime/watchdog_observability_acceptance.py` with `AMBIGUITY_PROBE_QUERY`:
+Updated `runtime/cloud_run_metrics_bridge.py`:
+- `/healthz` remains a dependency-free process liveness endpoint and returns `200 {"ok":true}` even when the upstream path is broken.
+- `/readyz` executes the same `CloudRunMetricsClient.fetch()` path used by Prometheus. This verifies token acquisition, audience/IAM, network reachability, and authenticated access to the fixed upstream `/metrics` endpoint.
+- successful readiness returns only `200 {"ok":true,"upstream":"reachable"}`;
+- failed readiness returns only `503 {"ok":false,"upstream":"unavailable"}`;
+- exceptions are deliberately swallowed at this boundary so target URLs, ID tokens, ADC detail, IAM/provider messages, and upstream bodies cannot leak through readiness responses.
+- no generic proxy, remediation, lifecycle, or arbitrary-fetch capability was added.
 
-```promql
-label_replace(stageguard_remediation_execution_deadline_exceeded, "stageguard_acceptance_probe", "left", "", "")
-or
-label_replace(stageguard_remediation_execution_deadline_exceeded, "stageguard_acceptance_probe", "right", "", "")
-```
+Commit:
+- `84b30264d0a37b375260fffcc3d76c37534dd5ca` — add authenticated metrics bridge readiness probe
 
-After StageGuard establishes a healthy `deadline_exceeded=0` sample, the rehearsal sends this expression through the same live Prometheus HTTP query path used by the safety checks. The expression returns two label-distinct copies of the source series. `prometheus_ambiguity_probe_rejected()` requires the existing strict parser to reject that response specifically with `Prometheus safety query must return exactly one series`.
+#### Added focused bridge regression coverage
 
-The rehearsal fails if:
-- Prometheus unexpectedly returns an accepted scalar-like result;
-- StageGuard no longer rejects the multi-series vector;
-- an unrelated parser failure is mistaken for successful ambiguity rejection;
-- the live query cannot be executed or decoded.
+Updated `runtime/tests/test_cloud_run_metrics_bridge.py` with cases proving:
+- `/healthz` remains 200 when the injected upstream opener fails;
+- `/readyz` calls the configured token supplier and the exact fixed `https://<service>/metrics` upstream path;
+- readiness uses the bridge-owned Authorization header and configured timeout;
+- successful readiness returns the fixed reachable JSON payload;
+- failed readiness returns HTTP 503;
+- readiness failure bodies do not expose provider exception detail, token contents, or the target hostname;
+- existing `/metrics` failure sanitization remains covered.
 
-The probe runs before the real deadline and stale-telemetry lifecycles. Because it creates labels only in the query result, it leaves no additional stored time series behind and does not make immediate reruns depend on Prometheus stale-marker timing.
+Commit:
+- `4b3ea15b4d0abf6b751d141fb1619d5d5157ee08` — test metrics bridge readiness semantics
 
-The final PASS message now explicitly includes successful rejection of ambiguous Prometheus safety evidence.
+#### Documented operational semantics
 
-#### Added focused regression coverage
+Updated `docs/runtime-metrics-ingestion.md` to document the distinction:
+- `/healthz` is process-only liveness and should not cause restart loops solely because IAM/upstream metrics are unavailable;
+- `/readyz` is deep authenticated readiness and intentionally performs a real metrics fetch;
+- readiness responses are fixed/sanitized;
+- operators should avoid an unnecessarily aggressive readiness cadence because each readiness probe performs a real authenticated upstream request.
 
-Added `runtime/tests/test_watchdog_ambiguity_probe.py` covering:
-- the probe expression references the watchdog metric twice;
-- exactly two `label_replace()` branches are present;
-- the branches use distinct `left`/`right` synthetic label values and `or` union semantics;
-- the helper returns success only for the exact multi-series rejection;
-- a mistakenly accepted `0.0` returns failure;
-- an unrelated parser failure such as non-finite evidence does not count as a successful ambiguity proof.
+Commit:
+- `72aaa0b60ff649ba0a401e69b1173801148d4f0e` — document metrics bridge liveness and readiness
 
-Existing strict parser tests remain in `runtime/tests/test_watchdog_observability_acceptance.py` and continue to cover direct contradictory multi-series payloads, malformed response shapes, and NaN/Inf rejection.
+### Checks / results
 
-#### Added rationale documentation
-
-Added `docs/prometheus-acceptance-safety.md` explaining:
-- why watchdog cardinality ambiguity is a safety-evidence integrity failure;
-- the exact query-local PromQL probe;
-- why query-local duplication was preferred over persistent duplicate fixture exposition;
-- the relevant official Prometheus operator/function/API references;
-- the boundary between this acceptance guard and normal production telemetry-label hygiene.
-
-### Commits this run
-
-- `a7a3fcfaddaa527fc87ae41b9fa403e9f972a0b6` — prove Prometheus cardinality ambiguity fails closed
-- `9837ff7eba4416c60b6868c2c05b12df56bf73ce` — test live Prometheus ambiguity probe contract
-- `9c7456a8711ab454a08b2316237c61737b8fcd1b` — document Prometheus acceptance ambiguity guard
-- `9fb6e677ef0cee35a63129647d7fd01249bc4eeb` — record implementation handoff before final validation attempt
-
-### Tests / checks / results
-
-- Re-fetched the committed acceptance script through the GitHub API and verified the new constant, helper, pre-lifecycle ambiguity check, failure paths, and PASS message are present on `main`.
-- Re-fetched `runtime/tests/test_watchdog_ambiguity_probe.py` and verified the focused regression coverage is committed to the intended repository.
-- Compared the probe design against official Prometheus documentation: `label_replace()` preserves the source series while adding the synthetic label, and `or` unions label-distinct instant-vector elements, which is the required cardinality behavior.
-- Attempted the focused test command from a fresh checkout:
-  `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard-grafana && python -m unittest runtime.tests.test_watchdog_ambiguity_probe runtime.tests.test_watchdog_observability_acceptance`
-- The environment failed before checkout with `Could not resolve host: github.com`; therefore the exact committed tests did not execute and no green claim is made.
-- The full Docker observability rehearsal was not executed here for the same checkout/network limitation; it still requires a runnable Docker checkout with the pinned images.
+- Re-fetched the committed `runtime/cloud_run_metrics_bridge.py` through the GitHub API and verified the new `_upstream_ready()` helper and `/readyz` branch are present on `main`.
+- Re-fetched the committed bridge test module and verified the liveness/readiness/sanitization regression cases are present on `main`.
+- Existing target restrictions remain unchanged: HTTPS origin only, no userinfo, arbitrary path, query, or fragment; the forwarded path remains hard-coded to `/metrics`.
+- Existing loopback-default listener policy and explicit `--allow-network-bind` requirement remain unchanged.
+- The environment could not clone GitHub, so the exact committed unittest module did not execute here and no green claim is made.
+- The full Docker observability rehearsal also remains unexecuted in this environment.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
 - No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Use a query-local adversarial cardinality probe rather than a fixture mode that emits persistent duplicate series. This exercises the real Prometheus HTTP path while avoiding stale-series residue between test phases/reruns.
-2. Count only the parser's explicit multi-series rejection as a successful negative test. Other parse/API failures must not make the rehearsal look healthy.
-3. Run the ambiguity probe only after a real healthy watchdog sample exists, so the synthetic branches are derived from actual scraped evidence rather than an empty vector.
-4. Preserve the existing deadline and telemetry-outage lifecycles unchanged after the negative probe; the adversarial check is an additional gate, not a replacement.
-5. Keep the test dependency-free and local; it adds no credentials, destinations, external writes, or CI load.
+1. Keep `/healthz` shallow. Dependency failures should not automatically restart-loop a correctly running bridge process.
+2. Make `/readyz` deep and fail closed so orchestration/operator readiness reflects the actual authenticated metrics path.
+3. Reuse the production `fetch()` path rather than implementing a weaker second authentication probe. Readiness therefore checks the exact operation Prometheus depends on.
+4. Keep readiness responses fixed and sanitized instead of exposing diagnostic exception text over HTTP.
+5. Do not cache or persist Google ID tokens as part of this change; credential lifecycle remains delegated to ADC/google-auth.
 
 ### Blockers / unknowns
 
-- The new focused unit test and existing acceptance tests still need execution from a runnable checkout.
-- The full Docker watchdog rehearsal still needs to run against the pinned Prometheus 3.13.3 and Grafana 13.2.1 images. It must attest live versions, prove the query-local ambiguity rejection, then prove deadline firing/resolution and stale-telemetry firing/resolution.
+- The new bridge tests still need execution from a runnable checkout.
+- The complete credential-free Docker watchdog rehearsal still needs to run against the pinned Prometheus 3.13.3 and Grafana 13.2.1 images. It must attest live versions, prove the query-local ambiguity rejection, then prove deadline firing/resolution and stale-telemetry firing/resolution.
 - Container digests are still not committed because an authoritative registry digest has not been verified through the available execution path.
-- The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity.
+- The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity. That live acceptance should now verify `/healthz`, `/readyz`, and `/metrics` separately.
 - Cloud Storage Policy Troubleshooter and live Gemini/Vertex acceptance still require authorized disposable-project credentials.
 
 ## Single best next step
 
-**Run the complete credential-free Docker observability rehearsal in the first environment with Docker access and a runnable checkout. It must attest Prometheus 3.13.3 and Grafana 13.2.1, prove the new live ambiguity probe is rejected without contaminating subsequent queries, then prove both the remediation-deadline and stale-telemetry firing-and-resolution lifecycles. If that passes, capture the exact command/output as the new observability acceptance baseline.**
+**Run the complete credential-free Docker observability rehearsal in the first environment with Docker access and a runnable checkout. It must attest Prometheus 3.13.3 and Grafana 13.2.1, prove the live cardinality ambiguity query is rejected, then prove remediation-deadline firing/resolution and stale-telemetry firing/resolution. In the same runnable checkout, execute `python -m unittest runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_watchdog_ambiguity_probe runtime.tests.test_watchdog_observability_acceptance`.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates the new watchdog freshness acceptance path, explicit image pins, live runtime-version attestation, strict Prometheus safety-query parsing, and the live ambiguity probe.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the newest watchdog freshness acceptance path, explicit image pins, live runtime-version attestation, strict Prometheus safety-query parsing, the live ambiguity probe, and bridge readiness work.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
