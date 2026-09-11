@@ -475,12 +475,14 @@ class IncidentService:
         actor: str,
         payload: dict,
     ) -> IncidentSnapshot:
-        """Publish a snapshot only if its durable checkpoint transition wins.
+        """Publish a snapshot only after the complete audit/checkpoint transition succeeds.
 
         Audit sinks intentionally append before optimistic checkpoint persistence so a
         competing writer can be reconstructed later. A CAS loser must therefore not
         remain visible through ``status()`` as if it were authoritative lifecycle
-        state. The conflict flag still requires an explicit durable reload.
+        state. Any other audit/checkpoint failure is likewise non-authoritative and,
+        when checkpoint persistence is configured, moves the lifecycle into an
+        explicit fail-closed integrity state.
         """
         previous = self._snapshot
         self._snapshot = candidate
@@ -488,6 +490,11 @@ class IncidentService:
             self._record(candidate.incident_id, event_type, actor, payload)
         except CheckpointConflictError:
             self._snapshot = previous
+            raise
+        except Exception:
+            self._snapshot = previous
+            if self._checkpoint_store is not None:
+                self._audit_integrity_state = "failed"
             raise
         return candidate
 
@@ -501,6 +508,8 @@ class IncidentService:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         with self._lock:
+            if self._audit_integrity_state == "failed":
+                raise RuntimeError("audit integrity verification failed; timeline is unavailable")
             snapshot = self._snapshot
             if snapshot is None:
                 raise RuntimeError("no incident has been investigated")
