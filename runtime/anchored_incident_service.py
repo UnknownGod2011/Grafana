@@ -242,6 +242,17 @@ class AnchoredIncidentService(IncidentService):
             self._audit_integrity_state = "failed"
             raise
 
+    def audit_timeline(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> dict[str, object]:
+        """Never present unauthenticated audit residue as committed operator history."""
+        with self._lock:
+            if self._audit_integrity_state == "failed":
+                raise RuntimeError("audit integrity verification failed; timeline is unavailable")
+            return super().audit_timeline(
+                incident_id=incident_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+
     def audit_anchor_state(self) -> dict[str, object]:
         """Return bounded operator-safe anchor metadata; never returns event payloads."""
         with self._lock:
