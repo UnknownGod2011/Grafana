@@ -41,6 +41,23 @@ A scrape failure must never be reclassified as a positive remediation deadline b
 
 For the local fixture, `POST /telemetry/offline` makes `/metrics` fail while leaving control endpoints healthy. This provides a deterministic path for rehearsing both the immediate scrape-health warning and the later stale-evidence warning without mutating remediation state.
 
+## Acceptance lifecycle
+
+`runtime/watchdog_observability_acceptance.py` now treats the outage path as an ordered safety contract rather than merely waiting for stale telemetry:
+
+1. prove the watchdog target starts at `up == 1` with healthy deadline evidence;
+2. switch only metrics delivery offline;
+3. require Prometheus to observe `up == 0`;
+4. require the Grafana scrape warning to become active;
+5. while that warning is first active, require the stale-evidence warning to still be inactive and the critical remediation-deadline alert to remain inactive;
+6. wait until the last watchdog sample crosses the 45-second freshness boundary and require the stale-evidence warning to become active while the scrape warning remains active;
+7. restore metrics delivery and require `up == 1`, fresh healthy deadline evidence, and resolution of both outage warnings;
+8. require the critical remediation-deadline alert to remain inactive throughout the outage/recovery phase.
+
+This ordering matters operationally: collection failure should be visible quickly, while the independent freshness boundary determines when old safety evidence can no longer be trusted. The rehearsal uses the live Prometheus API and Grafana Alertmanager endpoint; it does not infer success from fixture control state alone.
+
+A dedicated dependency-free regression module, `runtime/tests/test_watchdog_scrape_lifecycle_acceptance.py`, locks the acceptance script to the provisioned scrape job/query and separate scrape-alert identity.
+
 ## Production mapping
 
 For private Cloud Run deployments, the target should be the loopback/default-safe authenticated metrics bridge (or another trusted identity-aware collector), not a publicly exposed StageGuard service. A scrape-health alert therefore helps localize failures across the collector, identity/IAM path, network path, and authenticated `/metrics` readiness before the sample-age alert matures.
