@@ -4,6 +4,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from evidence_errors import EvidenceUnavailable
 from investigator import QUERIES, investigate
 
 
@@ -14,6 +15,22 @@ class FakeClient:
 
     def instant(self, promql):
         self.calls.append(promql)
+        for name, (query, _) in QUERIES.items():
+            if query == promql:
+                return self.values.get(name)
+        raise AssertionError(f"unexpected query: {promql}")
+
+
+class FailingClient(FakeClient):
+    def __init__(self, values, failed_slot, exc):
+        super().__init__(values)
+        self.failed_query = QUERIES[failed_slot][0]
+        self.exc = exc
+
+    def instant(self, promql):
+        self.calls.append(promql)
+        if promql == self.failed_query:
+            raise self.exc
         for name, (query, _) in QUERIES.items():
             if query == promql:
                 return self.values.get(name)
@@ -38,6 +55,7 @@ class InvestigatorTests(unittest.TestCase):
         self.assertEqual("uplink-b packet loss", report.hypothesis)
         self.assertGreaterEqual(report.confidence, 0.95)
         self.assertEqual((), report.missing_evidence)
+        self.assertEqual((), report.unavailable_evidence)
         self.assertEqual(6, len(report.evidence))
 
     def test_missing_causal_evidence_forces_abstention(self):
@@ -78,6 +96,24 @@ class InvestigatorTests(unittest.TestCase):
         investigate(client)
         self.assertEqual(6, len(client.calls))
         self.assertEqual(set(query for query, _ in QUERIES.values()), set(client.calls))
+
+    def test_evidence_source_failure_returns_sanitized_abstention_and_stops_collection(self):
+        secret = "Bearer super-secret-provider-token"
+        client = FailingClient(fault_values(), "causal", EvidenceUnavailable(secret))
+        report = investigate(client)
+        self.assertEqual("abstain", report.status)
+        self.assertIsNone(report.hypothesis)
+        self.assertEqual(0.0, report.confidence)
+        self.assertEqual(("causal",), report.unavailable_evidence)
+        self.assertEqual((), report.missing_evidence)
+        self.assertNotIn(secret, report.summary)
+        self.assertNotIn(secret, str(report.to_dict()))
+        self.assertEqual(2, len(client.calls))
+
+    def test_programming_error_is_not_swallowed_as_evidence_unavailability(self):
+        client = FailingClient(fault_values(), "causal", TypeError("adapter bug"))
+        with self.assertRaisesRegex(TypeError, "adapter bug"):
+            investigate(client)
 
 
 if __name__ == "__main__":
