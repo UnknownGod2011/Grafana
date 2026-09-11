@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, production deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, stale-telemetry detection, a credential-free metrics-outage rehearsal path, pinned Grafana/Prometheus acceptance images, live runtime-version attestation, strict Prometheus safety-query parsing, a live query-local cardinality ambiguity probe, separate liveness/readiness semantics for the private Cloud Run metrics bridge, explicit Prometheus scrape-health warning, and an ordered live outage acceptance contract that proves scrape failure is detected before stale evidence while the critical remediation alert remains inactive.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, stale-telemetry detection, scrape-health detection, credential-free outage rehearsal, pinned Grafana/Prometheus acceptance images, runtime-version attestation, strict Prometheus acceptance parsing, a cardinality-ambiguity probe, and a fail-closed Grafana MCP metric evidence boundary.
 
 Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -12,139 +12,121 @@ Core invariants:
 - Durable checkpoint/audit integrity failures fail closed.
 - A healthy watchdog value is trustworthy only while the observability path is delivering fresh samples.
 - Loss of observability must never be reclassified as a positive remediation deadline breach.
-- Ambiguous, malformed, or non-finite Prometheus safety evidence must never be interpreted as a healthy acceptance signal.
+- Ambiguous, malformed, nonnumeric, or non-finite Prometheus evidence must never be interpreted as healthy incident evidence.
 - Metrics bridge process liveness must not be confused with authenticated upstream readiness.
 - Prometheus scrape failure is a transport/collection warning, not evidence that a remediation deadline was exceeded.
 
-## Run log — 2026-09-11 — ordered scrape-failure/stale-evidence acceptance lifecycle
+## Run log — 2026-09-11 — Grafana MCP metric evidence hardening
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the repository through the GitHub connector, including:
-- `runtime/watchdog_observability_acceptance.py`
-- `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml`
-- `runtime/tests/test_watchdog_observability_acceptance.py`
-- `docs/watchdog-scrape-health.md`
-- the current repository metadata/default branch and retained validation baseline.
+Read `progress.md` completely before deciding what to change. Inspected the repository/default branch and the evidence path, including:
+- `runtime/mcp_metric_client.py`
+- `runtime/mcp_log_client.py`
+- `runtime/tests/test_mcp_metric_client.py`
+- `runtime/investigator.py`
+- `docker-compose.yml`
+- `ARCHITECTURE.md`
 
-The previous run's single best next step was to extend the existing `/telemetry/offline` acceptance path so it proves the new scrape warning fires before the stale-evidence warning, the critical deadline alert stays inactive, and both warnings resolve after recovery.
+The prior run's best next step was to execute the pinned Docker rehearsal and, if execution remained unavailable, move away from acceptance scaffolding toward a production integration gap. Because the execution container still cannot resolve GitHub, this run shifted to official Grafana MCP incident-evidence hardening rather than adding more rehearsal-only code.
+
+### Research / current external references
+
+Checked current official Grafana MCP documentation before changing the adapter:
+- Grafana MCP introduction: https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
+- Grafana MCP configuration: https://grafana.com/docs/grafana/latest/developer-resources/mcp/configure/
+- MCP tools/RBAC reference: https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
+- tool enable/disable and `--disable-write`: https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/oss-mcp/configure/enable-and-disable-tools/
+
+The repository already starts the reference MCP service with `--disable-write`, `--enabled-tools datasource,prometheus,loki`, `--disable-proxied`, and a bounded Loki limit. That remains the correct defense-in-depth posture: server-side write disabling plus client-side tool verification.
 
 ### Exact changes made
 
-#### Extended the live outage acceptance to cover the scrape-warning lifecycle
+#### Hardened `runtime/mcp_metric_client.py`
 
-Updated `runtime/watchdog_observability_acceptance.py` so the credential-free rehearsal now models three independent observability signals directly:
-- positive deadline evidence: `stageguard_remediation_execution_deadline_exceeded`;
-- target transport health: `max(up{job="stageguard-runtime-watchdog"})`;
-- evidence freshness: the existing timestamp/absent expression.
+The previous MCP metric parser used `float(value)`, which accepts `NaN` and infinities. That was inconsistent with StageGuard's newer acceptance-safety rules and could allow a non-finite Prometheus sample to enter diagnosis as if it were ordinary numeric evidence.
 
-Added stable scrape-alert identity constants matching the provisioned Grafana rule:
-- title: `StageGuard runtime watchdog scrape failing`;
-- summary: `Prometheus cannot scrape the StageGuard runtime watchdog target`.
-
-Added `prometheus_scrape_up()` and `scrape_alert_active()` helpers so the acceptance path proves actual Prometheus/Grafana state instead of inferring transport failure from the fixture control endpoint.
-
-The outage lifecycle now requires, in order:
-1. watchdog starts healthy with `up == 1` and an idle deadline metric;
-2. `/telemetry/offline` is activated without changing remediation state;
-3. Prometheus observes `up == 0`;
-4. Grafana's scrape-failure warning becomes active within a dedicated bounded timeout;
-5. at the moment the scrape warning is first active, the stale warning must still be inactive and the critical deadline alert must be inactive;
-6. the watchdog sample ages beyond the 45-second freshness boundary;
-7. the stale-evidence warning becomes active while the scrape warning remains active;
-8. the critical deadline alert remains inactive throughout the outage;
-9. telemetry is restored and Prometheus returns to `up == 1` with fresh healthy deadline evidence;
-10. both outage warnings resolve, while the critical deadline alert remains inactive.
-
-Added `--scrape-alert-timeout` (default 50 seconds) and subjected it to the same finite-positive validation as other acceptance timeouts.
+Changes:
+- imported `math` and changed numeric coercion to require `math.isfinite()`;
+- `NaN`, `Inf`, `+Inf`, and `-Inf` now raise `McpMetricError`;
+- preserved strict duplicate-series rejection instead of guessing among multiple series;
+- require a non-empty Prometheus datasource UID;
+- require non-empty PromQL before attempting MCP connection/query execution;
+- validate `tools/list` is an object containing `tools[]`;
+- validate tool annotations are an object and `query_prometheus` advertises `readOnlyHint=true`;
+- validate the `tools/call` result itself is an object before parsing it;
+- updated the parser contract/docstring so only exactly one finite numeric observation is considered usable evidence.
 
 Commit:
-- `c21689756cb8a2971515adb8ba031a75efa99f27` — extend watchdog outage acceptance with scrape alert lifecycle
+- `6a42ca3904a8c6a1431cc9e7b86693a576fe9ddd` — harden Grafana MCP metric evidence parsing
 
-#### Added focused regression coverage
+#### Expanded `runtime/tests/test_mcp_metric_client.py`
 
-Created `runtime/tests/test_watchdog_scrape_lifecycle_acceptance.py` covering:
-- exact `stageguard-runtime-watchdog` job/query contract;
-- `prometheus_scrape_up()` delegation to the exact target-health query;
-- scrape-alert title identity;
-- scrape-alert summary identity;
-- separation from stale/deadline alert identities;
-- fail behavior of the stale-warning ordering guard when stale is already active;
-- pass behavior when stale remains inactive during the early scrape-warning phase.
+Added focused dependency-free regression cases for:
+- `NaN`, `Inf`, `+Inf`, and `-Inf` in vector results;
+- the same non-finite values in scalar results;
+- blank datasource UID rejection;
+- blank PromQL rejection before MCP connection;
+- non-object tool result rejection.
 
-The test is dependency-free and uses `unittest.mock`; it does not require Grafana, Prometheus, Docker, or credentials.
+Existing tests continue to cover finite scalar/vector parsing, empty-vector missing evidence, structured content, duplicate-series rejection, tool errors, and nonnumeric samples.
 
 Commit:
-- `24c0ec37706d9ce90f0e3767bd32383bdd5778ea` — test watchdog scrape alert acceptance helpers
+- `e087ac1f9a39b6f1a5e4a4dc295482df902bfced` — test fail-closed MCP metric evidence handling
 
-#### Updated operational documentation
+#### Added operator/developer evidence-safety documentation
 
-Updated `docs/watchdog-scrape-health.md` with the exact eight-stage operational acceptance contract, including:
-- explicit `up == 1 -> 0 -> 1` transitions;
-- scrape warning before stale warning;
-- simultaneous scrape+stale warnings during a sustained outage;
-- critical deadline alert inactivity throughout the transport outage;
-- resolution requirements after telemetry recovery;
-- rationale for using live Prometheus and Grafana APIs instead of trusting fixture state.
+Created `docs/grafana-mcp-evidence-safety.md` documenting:
+- the least-privilege official Grafana MCP deployment shape;
+- the exact metric evidence contract;
+- the existing bounded Loki evidence contract;
+- the separation between evidence credentials and remediation credentials;
+- regression expectations for future MCP adapter changes;
+- official Grafana MCP documentation links.
 
 Commit:
-- `964aeb83485ab15a941ae22776998a86b1db4810` — document scrape warning lifecycle rehearsal
+- `63dd7358331ddcc7b4081afa8278c5bc763f6daa` — document Grafana MCP evidence safety contract
 
 ### Checks / results
 
-- Re-fetched the committed acceptance script after the write and verified on `main`:
-  - `SCRAPE_JOB = "stageguard-runtime-watchdog"`;
-  - exact `max(up{job="stageguard-runtime-watchdog"})` query;
-  - dedicated scrape-alert title/summary;
-  - `--scrape-alert-timeout` finite-positive validation;
-  - pre-outage `up == 1` assertion;
-  - outage `up == 0` assertion;
-  - scrape-warning activation before stale-warning activation;
-  - critical deadline inactivity checks during the outage;
-  - post-recovery `up == 1` assertion;
-  - resolution checks for both scrape and stale warnings.
-- Re-checked the provisioned Grafana rule and confirmed the acceptance identity/query matches `stageguard-runtime-scrape-down` exactly.
-- Attempted a fresh executable checkout and focused unit tests with:
+- Re-fetched the committed `runtime/mcp_metric_client.py` from `main` and verified the finite-number guard, strict tools-list checks, datasource validation, and exact single-series policy are present.
+- Attempted an executable checkout and focused unit test with:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
-python -m unittest \
-  runtime.tests.test_watchdog_observability_acceptance \
-  runtime.tests.test_watchdog_scrape_health \
-  runtime.tests.test_cloud_run_metrics_bridge \
-  runtime.tests.test_watchdog_ambiguity_probe
+cd /tmp/stageguard
+python -m unittest runtime.tests.test_mcp_metric_client
 ```
 
-The execution container still failed before checkout with `Could not resolve host: github.com`. Therefore no green unittest or Docker claim is made for this run.
+The container failed before checkout with `Could not resolve host: github.com`; therefore no green unittest claim is made for the newly committed tests.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
-- No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
+- No external Grafana/Grafana Cloud, GCP/IAM/Cloud Run, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Prove transport state twice: via Prometheus `up` and via Grafana's managed warning. Fixture control state alone is not sufficient acceptance evidence.
-2. Treat alert ordering as a safety property. The fast scrape warning should explain collection failure before the slower freshness trust boundary matures.
-3. Require the stale warning to still be inactive when the scrape warning first fires. This prevents a configuration regression from silently collapsing the two operational stages.
-4. Require the scrape warning to remain active when stale telemetry becomes active. Sustained collection failure should not appear partially recovered.
-5. Require both outage warnings to resolve only after Prometheus again reports `up == 1` and fresh watchdog evidence is ingested.
-6. Keep the critical deadline alert semantically pure throughout: loss of telemetry remains unknown/degraded evidence, never synthetic proof of an execution deadline breach.
+1. Treat non-finite Prometheus values as unusable incident evidence, not merely unusual numeric values.
+2. Keep `None` reserved for a legitimate empty-vector/missing-evidence result; malformed/tool-error/non-finite cases remain explicit errors so they cannot be confused with ordinary telemetry absence.
+3. Reject ambiguous vectors at the MCP boundary. StageGuard's policy-selected instant queries are required to reduce to at most one authoritative series.
+4. Preserve server-side `--disable-write` even though the clients call only query tools. Tool annotations are an additional runtime assertion, not the sole write-safety mechanism.
+5. Validate user/config inputs before opening an MCP process when possible, reducing unnecessary subprocess/tool activity and making failures deterministic.
 
 ### Blockers / unknowns
 
-- The newly committed regression test still needs execution from a runnable checkout.
+- `runtime.tests.test_mcp_metric_client` still needs execution from a runnable checkout.
 - The complete credential-free Docker watchdog rehearsal still needs to run against pinned Prometheus 3.13.3 and Grafana 13.2.1.
-- Container digests remain uncommitted because authoritative registry digests have not been verified through the available execution path.
-- The authenticated metrics bridge still needs one disposable-project acceptance against a private Cloud Run StageGuard service with a least-privilege invoker identity.
-- The historical full-suite failures/errors have not been re-triaged in this run; no full-suite green claim exists.
+- The authenticated metrics bridge still needs a disposable-project acceptance against a private Cloud Run StageGuard service using a least-privilege invoker identity.
+- Container image digests remain uncommitted because authoritative registry digests have not been verified through the available execution path.
+- The historical full-suite failures/errors have not yet been re-triaged; no full-suite green claim exists.
 
 ## Single best next step
 
-**Run the full credential-free pinned Docker rehearsal now that the outage acceptance is complete. It must attest Prometheus 3.13.3 and Grafana 13.2.1, reject the ambiguity probe, prove the deadline alert fires/resolves, then prove `up: 1 -> 0`, scrape warning fires before stale warning, critical deadline remains inactive, stale warning fires, `up: 0 -> 1`, and both outage warnings resolve. In the same runnable checkout execute `python -m unittest runtime.tests.test_watchdog_observability_acceptance runtime.tests.test_watchdog_scrape_health runtime.tests.test_watchdog_scrape_lifecycle_acceptance runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_watchdog_ambiguity_probe`. If that is green, the next implementation target should shift away from acceptance scaffolding and toward the highest-impact remaining production integration gap (private Cloud Run metrics-bridge acceptance or official Grafana MCP incident-evidence hardening).**
+**Harden the incident orchestration boundary so Grafana MCP transport/protocol failures become an explicit structured `abstain`/evidence-unavailable outcome instead of bubbling into an opaque request failure, while still not swallowing programming errors. Add a small adapter-neutral evidence-collection error contract, preserve which bounded evidence slot failed without exposing credentials/tool payloads, and regression-test that no approval/remediation path can be reached from a partial or failed MCP evidence collection. If a runnable checkout becomes available first, execute `python -m unittest runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_correlated_investigator` and the pinned Docker observability rehearsal before further integration work.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates the newest ordered scrape/stale outage acceptance path, explicit image pins, live runtime-version attestation, strict Prometheus safety-query parsing, live ambiguity probe, and bridge readiness work.
-- Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the newest ordered scrape/stale outage acceptance path, explicit image pins, runtime-version attestation, strict Prometheus safety parsing, live ambiguity probe, bridge readiness work, and current MCP finite-evidence hardening.
+- Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the current MCP finite-evidence hardening.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
