@@ -110,6 +110,8 @@ Safety boundaries:
 - upstream exceptions and response bodies are not returned to the scraper;
 - the default listener is loopback-only;
 - a non-loopback bind requires explicit `--allow-network-bind`, intended only for a trusted private container/VPC network;
+- `/healthz` is process liveness only and never depends on credentials or the upstream service;
+- `/readyz` checks the complete authenticated StageGuard `/metrics` path and returns a sanitized HTTP 503 if token acquisition, IAM, network, or upstream metrics access fails;
 - the bridge has no remediation, lifecycle, generic proxy, or arbitrary-fetch endpoint.
 
 Run it on a Google Cloud workload or another environment where ADC can mint an ID token for the StageGuard Cloud Run service:
@@ -122,6 +124,18 @@ python runtime/cloud_run_metrics_bridge.py \
 ```
 
 `--target` may also be supplied through `STAGEGUARD_METRICS_TARGET`. `STAGEGUARD_METRICS_AUDIENCE` is available only for deployments where the accepted Cloud Run audience differs from the target origin. Keep it an HTTPS service origin.
+
+The bridge exposes separate liveness and readiness semantics:
+
+```bash
+# Process-only liveness. A broken IAM/upstream path does not restart-loop the bridge.
+curl -fsS http://127.0.0.1:9112/healthz
+
+# Deep readiness. Performs the same authenticated upstream metrics fetch used by Prometheus.
+curl -fsS http://127.0.0.1:9112/readyz
+```
+
+`/readyz` intentionally performs a real authenticated metrics request; do not configure an unnecessarily aggressive readiness cadence. Its JSON response contains only `ok` and the fixed `reachable`/`unavailable` state, never the target URL, ID token, ADC error, IAM detail, or upstream error body.
 
 A local Prometheus process can then scrape:
 
