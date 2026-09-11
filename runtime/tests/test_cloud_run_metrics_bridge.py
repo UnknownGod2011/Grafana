@@ -96,6 +96,90 @@ class CloudRunMetricsBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeConfigurationError):
             make_server(client, "0.0.0.0", 0)
 
+    def test_healthz_is_process_liveness_even_when_upstream_is_broken(self) -> None:
+        def failing_opener(*_args, **_kwargs):
+            raise RuntimeError("secret-provider-detail token=never-leak")
+
+        client = CloudRunMetricsClient(
+            "https://stageguard.example",
+            token_supplier=lambda _audience: "top-secret-token",
+            opener=failing_opener,
+        )
+        server = make_server(client, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/healthz"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b'{"ok":true}')
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_readyz_verifies_authenticated_upstream_metrics_path(self) -> None:
+        observed = {"token_calls": 0, "open_calls": 0}
+
+        def token_supplier(audience):
+            observed["token_calls"] += 1
+            self.assertEqual(audience, "https://stageguard.example")
+            return "short-lived-id-token"
+
+        def opener(request, *, timeout):
+            observed["open_calls"] += 1
+            self.assertEqual(request.full_url, "https://stageguard.example/metrics")
+            self.assertEqual(dict(request.header_items())["Authorization"], "Bearer short-lived-id-token")
+            self.assertEqual(timeout, 10.0)
+            return _Response(b"stageguard_remediation_execution_active 0\n")
+
+        client = CloudRunMetricsClient(
+            "https://stageguard.example",
+            token_supplier=token_supplier,
+            opener=opener,
+        )
+        server = make_server(client, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/readyz"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b'{"ok":true,"upstream":"reachable"}')
+            self.assertEqual(observed["token_calls"], 1)
+            self.assertEqual(observed["open_calls"], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_readyz_fails_closed_and_sanitizes_upstream_failure(self) -> None:
+        def failing_opener(*_args, **_kwargs):
+            raise RuntimeError("secret-provider-detail token=never-leak")
+
+        client = CloudRunMetricsClient(
+            "https://stageguard.example",
+            token_supplier=lambda _audience: "top-secret-token",
+            opener=failing_opener,
+        )
+        server = make_server(client, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/readyz"
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(url, timeout=2)
+            body = caught.exception.read().decode("utf-8")
+            self.assertEqual(caught.exception.code, 503)
+            self.assertEqual(body, '{"ok":false,"upstream":"unavailable"}')
+            self.assertNotIn("secret-provider-detail", body)
+            self.assertNotIn("top-secret-token", body)
+            self.assertNotIn("stageguard.example", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_http_bridge_sanitizes_upstream_failures(self) -> None:
         def failing_opener(*_args, **_kwargs):
             raise RuntimeError("secret-provider-detail token=never-leak")
