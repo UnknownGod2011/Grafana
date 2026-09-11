@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, deployment hardening, runtime watchdog observability, authenticated Cloud Run metrics ingestion, stale-telemetry detection, scrape-health detection, credential-free outage rehearsal, pinned Grafana/Prometheus acceptance images, runtime-version attestation, strict Prometheus acceptance parsing, a cardinality-ambiguity probe, and a fail-closed Grafana MCP metric evidence boundary.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the runtime evidence plane. The working vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official read-only Grafana MCP access, bounded diagnosis, optional revision-bound Gemini briefing, exact human approval, safe remediation, Grafana-based recovery verification, authenticated lifecycle state, restart reconciliation, operator UI, deployment hardening, watchdog observability, authenticated Cloud Run metrics ingestion, stale/scrape health detection, credential-free outage rehearsal, pinned Grafana/Prometheus acceptance images, runtime-version attestation, strict Prometheus acceptance parsing, cardinality ambiguity rejection, fail-closed MCP parsing, and now structured evidence-unavailable abstention at the incident orchestration boundary.
 
 Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
@@ -10,109 +10,151 @@ Core invariants:
 - Approval is exact-revision-bound and single-use.
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove it.
 - Durable checkpoint/audit integrity failures fail closed.
-- A healthy watchdog value is trustworthy only while the observability path is delivering fresh samples.
 - Loss of observability must never be reclassified as a positive remediation deadline breach.
 - Ambiguous, malformed, nonnumeric, or non-finite Prometheus evidence must never be interpreted as healthy incident evidence.
-- Metrics bridge process liveness must not be confused with authenticated upstream readiness.
-- Prometheus scrape failure is a transport/collection warning, not evidence that a remediation deadline was exceeded.
+- Expected evidence-plane transport/protocol failures must become a sanitized abstention, not an opaque request failure and not a diagnosis.
+- Programming/configuration defects must remain visible exceptions rather than being disguised as evidence unavailability.
+- Partial or unavailable evidence must never reach infrastructure mutation.
 
-## Run log — 2026-09-11 — Grafana MCP metric evidence hardening
+## Run log — 2026-09-11 — structured evidence-unavailable orchestration
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the repository/default branch and the evidence path, including:
+Read `progress.md` completely before deciding what to change. Inspected the current default branch and the relevant evidence/lifecycle path, including:
+- `runtime/investigator.py`
 - `runtime/mcp_metric_client.py`
 - `runtime/mcp_log_client.py`
+- `runtime/mcp_smoke.py`
+- `runtime/incident_service.py`
+- `runtime/remediation.py`
+- `runtime/tests/test_investigator.py`
+- `runtime/tests/test_correlated_investigator.py`
 - `runtime/tests/test_mcp_metric_client.py`
-- `runtime/investigator.py`
-- `docker-compose.yml`
-- `ARCHITECTURE.md`
+- `runtime/tests/test_remediation.py`
+- `docs/grafana-mcp-evidence-safety.md`
 
-The prior run's best next step was to execute the pinned Docker rehearsal and, if execution remained unavailable, move away from acceptance scaffolding toward a production integration gap. Because the execution container still cannot resolve GitHub, this run shifted to official Grafana MCP incident-evidence hardening rather than adding more rehearsal-only code.
-
-### Research / current external references
-
-Checked current official Grafana MCP documentation before changing the adapter:
-- Grafana MCP introduction: https://grafana.com/docs/grafana/latest/developer-resources/mcp/introduction/
-- Grafana MCP configuration: https://grafana.com/docs/grafana/latest/developer-resources/mcp/configure/
-- MCP tools/RBAC reference: https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
-- tool enable/disable and `--disable-write`: https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/oss-mcp/configure/enable-and-disable-tools/
-
-The repository already starts the reference MCP service with `--disable-write`, `--enabled-tools datasource,prometheus,loki`, `--disable-proxied`, and a bounded Loki limit. That remains the correct defense-in-depth posture: server-side write disabling plus client-side tool verification.
+The previous single best next step was to convert expected Grafana MCP transport/protocol failures into a structured `abstain`/evidence-unavailable outcome while preserving programming failures and preventing partial evidence from reaching remediation. This run implemented that boundary.
 
 ### Exact changes made
 
-#### Hardened `runtime/mcp_metric_client.py`
+#### Added adapter-neutral evidence availability contract
 
-The previous MCP metric parser used `float(value)`, which accepts `NaN` and infinities. That was inconsistent with StageGuard's newer acceptance-safety rules and could allow a non-finite Prometheus sample to enter diagnosis as if it were ordinary numeric evidence.
-
-Changes:
-- imported `math` and changed numeric coercion to require `math.isfinite()`;
-- `NaN`, `Inf`, `+Inf`, and `-Inf` now raise `McpMetricError`;
-- preserved strict duplicate-series rejection instead of guessing among multiple series;
-- require a non-empty Prometheus datasource UID;
-- require non-empty PromQL before attempting MCP connection/query execution;
-- validate `tools/list` is an object containing `tools[]`;
-- validate tool annotations are an object and `query_prometheus` advertises `readOnlyHint=true`;
-- validate the `tools/call` result itself is an object before parsing it;
-- updated the parser contract/docstring so only exactly one finite numeric observation is considered usable evidence.
+Created `runtime/evidence_errors.py` with `EvidenceUnavailable`. The contract is intentionally small: adapters use it only for expected evidence-source availability/integrity failures. Investigator code can catch this contract without importing Grafana-MCP-specific exception types.
 
 Commit:
-- `6a42ca3904a8c6a1431cc9e7b86693a576fe9ddd` — harden Grafana MCP metric evidence parsing
+- `a2cf86f82fe32ae699febc3dd83dd484cf3ebb6c` — add adapter-neutral evidence availability contract
 
-#### Expanded `runtime/tests/test_mcp_metric_client.py`
+#### Classified Grafana MCP metric failures
 
-Added focused dependency-free regression cases for:
-- `NaN`, `Inf`, `+Inf`, and `-Inf` in vector results;
-- the same non-finite values in scalar results;
-- blank datasource UID rejection;
-- blank PromQL rejection before MCP connection;
-- non-object tool result rejection.
+Updated `runtime/mcp_metric_client.py` so `McpMetricError` also implements `EvidenceUnavailable`.
 
-Existing tests continue to cover finite scalar/vector parsing, empty-vector missing evidence, structured content, duplicate-series rejection, tool errors, and nonnumeric samples.
+Changes include:
+- MCP tool errors no longer copy raw provider/tool content into exception text;
+- malformed/non-finite/ambiguous metric results remain explicit fail-closed errors;
+- MCP process startup `OSError`/`FileNotFoundError`, stdio failures such as broken pipes, and `McpError` protocol failures are translated to sanitized `McpMetricError`;
+- invalid caller inputs such as blank PromQL/datasource UID remain `ValueError` and are not converted into evidence availability failures.
+
+Commits:
+- `18babd109731e51c46920be6041d9d685557964c`
+- `29314eafc4e784918ea870d3c16f60e9878bc4a9`
+
+#### Classified Grafana MCP Loki failures
+
+Updated `runtime/mcp_log_client.py` similarly:
+- `McpLogError` implements `EvidenceUnavailable`;
+- raw MCP tool error content is not copied into the exception message;
+- process startup/stdio/protocol availability failures are translated into sanitized evidence-source failures;
+- malformed Loki data still fails closed;
+- blank LogQL and invalid bounds remain programming/configuration errors.
+
+Commits:
+- `c8ee8cad4b051dcfb3039361f91bcbf8c23f64a1`
+- `12b2bd447c9581e64c869810856f08094a11c8ef`
+
+#### Added structured abstention in the bounded investigator
+
+Updated `runtime/investigator.py`:
+- `IncidentReport` now exposes `unavailable_evidence` separately from `missing_evidence`;
+- metric collection is performed in the fixed semantic-slot order and stops at the first `EvidenceUnavailable` failure;
+- the returned report is `status="abstain"`, `hypothesis=None`, `confidence=0.0`;
+- only the semantic slot name is preserved, e.g. `causal`; adapter exception text is never copied into the report;
+- successful empty-vector telemetry continues to use `missing_evidence`, preserving the distinction between "query succeeded but no sample exists" and "evidence source could not safely answer";
+- Loki transport/protocol failure after a metric diagnosis produces the same structured abstention with `unavailable_evidence=("causal_log",)`;
+- arbitrary exceptions are deliberately not caught.
 
 Commit:
-- `e087ac1f9a39b6f1a5e4a4dc295482df902bfced` — test fail-closed MCP metric evidence handling
+- `14b6194d193d33dada9a8c83c19741b3a59768ea`
 
-#### Added operator/developer evidence-safety documentation
+#### Added fail-closed regressions
 
-Created `docs/grafana-mcp-evidence-safety.md` documenting:
-- the least-privilege official Grafana MCP deployment shape;
-- the exact metric evidence contract;
-- the existing bounded Loki evidence contract;
-- the separation between evidence credentials and remediation credentials;
-- regression expectations for future MCP adapter changes;
-- official Grafana MCP documentation links.
+Updated `runtime/tests/test_investigator.py`:
+- evidence-source failure yields sanitized abstention;
+- the failed slot is preserved;
+- exception secrets do not enter `summary` or `to_dict()`;
+- collection stops at the failure rather than continuing unnecessary evidence reads;
+- a `TypeError` from an adapter continues to propagate.
+
+Updated `runtime/tests/test_correlated_investigator.py`:
+- Loki evidence-source failure converts a metric diagnosis into a sanitized abstention;
+- `causal_log` is preserved as the unavailable semantic slot;
+- arbitrary Loki programming errors still propagate.
+
+Updated `runtime/tests/test_remediation.py`:
+- an evidence-unavailable abstention cannot execute remediation even when handed an otherwise matching explicit approval; the remediation adapter receives zero calls.
+
+Commits:
+- `031406ebe110a7c890b6e6a603f9748f225250c1`
+- `225a35b633a7d70f2e91542bfc1aebc9d4620748`
+- `c36327dac1d7787019cbd5489aeeaca954056b7b`
+
+#### Updated evidence-safety documentation
+
+Expanded `docs/grafana-mcp-evidence-safety.md` to document:
+- the adapter-neutral availability contract;
+- the exact difference between `missing_evidence` and `unavailable_evidence`;
+- sanitization requirements;
+- first-failure collection stopping;
+- programming-error propagation;
+- the remediation gate that requires `status == "diagnosed"`.
 
 Commit:
-- `63dd7358331ddcc7b4081afa8278c5bc763f6daa` — document Grafana MCP evidence safety contract
+- `5bebf97679caaacd859790b602aab59c95a4dd96`
 
 ### Checks / results
 
-- Re-fetched the committed `runtime/mcp_metric_client.py` from `main` and verified the finite-number guard, strict tools-list checks, datasource validation, and exact single-series policy are present.
-- Attempted an executable checkout and focused unit test with:
+Attempted a clean executable checkout and focused unit set:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
 cd /tmp/stageguard
-python -m unittest runtime.tests.test_mcp_metric_client
+python -m unittest \
+  runtime.tests.test_investigator \
+  runtime.tests.test_correlated_investigator \
+  runtime.tests.test_mcp_metric_client \
+  runtime.tests.test_mcp_log_client \
+  runtime.tests.test_remediation
 ```
 
-The container failed before checkout with `Could not resolve host: github.com`; therefore no green unittest claim is made for the newly committed tests.
-- No GitHub Actions workflow was created, modified, triggered, or rerun.
-- No external Grafana/Grafana Cloud, GCP/IAM/Cloud Run, Gemini, checkpoint, or remediation resource was changed.
+The container again failed before checkout with `Could not resolve host: github.com`. Therefore no green unit-test claim is made for this run.
+
+Static reasoning checks performed while editing:
+- `McpMetricError` and `McpLogError` are subclasses of the adapter-neutral `EvidenceUnavailable` contract;
+- the investigator catches only that contract, not `Exception`;
+- remediation already requires `report.status == "diagnosed"`, so the new abstention cannot pass `_approval_matches`;
+- no GitHub Actions workflow was created, changed, triggered, or rerun;
+- no Grafana Cloud, GCP/IAM/Cloud Run, Gemini, checkpoint, or remediation resource was changed.
 
 ### Decisions
 
-1. Treat non-finite Prometheus values as unusable incident evidence, not merely unusual numeric values.
-2. Keep `None` reserved for a legitimate empty-vector/missing-evidence result; malformed/tool-error/non-finite cases remain explicit errors so they cannot be confused with ordinary telemetry absence.
-3. Reject ambiguous vectors at the MCP boundary. StageGuard's policy-selected instant queries are required to reduce to at most one authoritative series.
-4. Preserve server-side `--disable-write` even though the clients call only query tools. Tool annotations are an additional runtime assertion, not the sole write-safety mechanism.
-5. Validate user/config inputs before opening an MCP process when possible, reducing unnecessary subprocess/tool activity and making failures deterministic.
+1. Keep evidence availability distinct from evidence absence. `None`/`missing_evidence` means a successful bounded query produced no authoritative sample; `unavailable_evidence` means the evidence plane could not safely answer.
+2. Sanitize at two layers: MCP adapters do not embed raw tool/provider content in operational errors, and investigator reports never copy adapter exception messages.
+3. Stop metric evidence collection at the first unavailable required slot. A degraded evidence plane should not cause additional unnecessary reads, and partial evidence cannot become a diagnosis.
+4. Catch only an explicit evidence-availability contract. `TypeError`, `AssertionError`, invalid policy input, and other defects must stay visible.
+5. Preserve the existing remediation invariant: only a fully `diagnosed` report can match an approval and mutate infrastructure.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_mcp_metric_client` still needs execution from a runnable checkout.
+- The focused unit set above still needs execution from a runnable checkout.
 - The complete credential-free Docker watchdog rehearsal still needs to run against pinned Prometheus 3.13.3 and Grafana 13.2.1.
 - The authenticated metrics bridge still needs a disposable-project acceptance against a private Cloud Run StageGuard service using a least-privilege invoker identity.
 - Container image digests remain uncommitted because authoritative registry digests have not been verified through the available execution path.
@@ -120,13 +162,13 @@ The container failed before checkout with `Could not resolve host: github.com`; 
 
 ## Single best next step
 
-**Harden the incident orchestration boundary so Grafana MCP transport/protocol failures become an explicit structured `abstain`/evidence-unavailable outcome instead of bubbling into an opaque request failure, while still not swallowing programming errors. Add a small adapter-neutral evidence-collection error contract, preserve which bounded evidence slot failed without exposing credentials/tool payloads, and regression-test that no approval/remediation path can be reached from a partial or failed MCP evidence collection. If a runnable checkout becomes available first, execute `python -m unittest runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_correlated_investigator` and the pinned Docker observability rehearsal before further integration work.**
+**Carry the new `unavailable_evidence` state through `IncidentService` and the authenticated API/operator UI as a first-class operational condition: regression-test that an evidence-plane failure produces an auditable investigation-completed abstention, that the approval endpoint/service refuses it before creating an approval record, and that the UI clearly distinguishes `evidence unavailable` from ordinary `missing telemetry` without surfacing adapter/provider secrets. If a runnable checkout becomes available first, execute the focused unit set above before further integration work.**
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively; it predates the newest ordered scrape/stale outage acceptance path, explicit image pins, runtime-version attestation, strict Prometheus safety parsing, live ambiguity probe, bridge readiness work, and current MCP finite-evidence hardening.
-- Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the current MCP finite-evidence hardening.
+- Historical live Docker rehearsal: PASS twice consecutively; it predates the newest ordered scrape/stale outage acceptance path, explicit image pins, runtime-version attestation, strict Prometheus safety parsing, live ambiguity probe, bridge readiness work, and current evidence-unavailable orchestration.
+- Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the current MCP evidence-availability changes.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
