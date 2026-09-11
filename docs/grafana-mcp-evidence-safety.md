@@ -40,6 +40,22 @@ This is important because Prometheus can legitimately represent special floating
 
 The investigator can use logs as corroboration, but a truncated or malformed log result must never silently become complete evidence.
 
+## Evidence availability and orchestration
+
+`runtime/evidence_errors.py` defines the adapter-neutral `EvidenceUnavailable` contract. Grafana MCP metric/log adapters translate expected MCP transport, protocol, tool, and unusable-result failures into adapter-specific exceptions that also implement this contract.
+
+The investigator catches only `EvidenceUnavailable`. It does **not** catch arbitrary exceptions. This distinction is intentional:
+
+- expected evidence-plane failure becomes a structured `IncidentReport(status="abstain")`;
+- the report records only the failed semantic slot in `unavailable_evidence`, for example `causal` or `causal_log`;
+- exception text, provider responses, tokens, URLs, datasource details, and raw MCP payloads are never copied into the incident report;
+- collection stops at the first unavailable required metric slot, avoiding unnecessary downstream reads from a degraded evidence plane;
+- ordinary programming/configuration exceptions such as `TypeError` or invalid policy inputs continue to raise and must be fixed rather than being disguised as an operational abstention.
+
+An evidence-unavailable report always has `hypothesis=None` and `confidence=0.0`. Existing remediation policy requires `status == "diagnosed"` plus an exact matching approval, so even a manually constructed matching approval cannot execute infrastructure mutation from a partial/unavailable evidence report.
+
+`missing_evidence` remains reserved for a successful query that legitimately returns no authoritative sample. `unavailable_evidence` means the evidence source itself could not safely answer. Operators and API consumers can therefore distinguish telemetry absence from evidence-plane failure without receiving sensitive adapter diagnostics.
+
 ## Separation from remediation
 
 Grafana MCP credentials are evidence-only. StageGuard remediation uses a separate allowlisted adapter and separate credentials. Gemini briefing/reasoning cannot acquire the remediation credential through the MCP client.
@@ -48,7 +64,7 @@ The reference Compose stack also uses server-side `--disable-write`; client-side
 
 ## Regression expectations
 
-Any change to the MCP adapters should retain tests for:
+Any change to the MCP adapters or investigator should retain tests for:
 
 - ordinary finite vector/scalar parsing;
 - empty-vector missing evidence;
@@ -58,6 +74,9 @@ Any change to the MCP adapters should retain tests for:
 - tool errors;
 - read-only tool discovery;
 - datasource/query input validation;
-- Loki result bounds and truncation semantics.
+- Loki result bounds and truncation semantics;
+- structured/sanitized evidence-unavailable abstention;
+- programming exceptions continuing to propagate;
+- evidence-unavailable abstentions being unable to execute remediation even with an otherwise matching approval.
 
 A live smoke should additionally confirm the official server can query the configured Grafana datasource using the repository-pinned MCP image before a release is considered production-ready.
