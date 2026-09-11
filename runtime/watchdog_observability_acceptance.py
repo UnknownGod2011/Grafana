@@ -9,6 +9,12 @@ independent Grafana safety contracts:
 1. healthy -> remediation deadline firing -> healthy/resolved
 2. healthy -> metrics unavailable -> stale-evidence warning -> telemetry restored
 
+Before either lifecycle is driven, the rehearsal also asks the live Prometheus
+API to synthesize two label-distinct copies of the healthy watchdog series and
+requires StageGuard's strict evidence parser to reject that ambiguous result.
+This negative probe is query-local: it does not create persistent time series
+or contaminate subsequent/repeated rehearsals.
+
 The outage path never changes remediation state. It also proves that stale
 telemetry does not falsely activate the critical remediation-deadline alert.
 The fixture is always restored to idle with telemetry online before exit.
@@ -34,6 +40,10 @@ STALE_ALERT_TITLE = "StageGuard runtime telemetry stale"
 STALE_ALERT_SUMMARY = "StageGuard runtime watchdog telemetry is stale or missing"
 METRIC = "stageguard_remediation_execution_deadline_exceeded"
 FRESHNESS_QUERY = f"max(time() - timestamp({METRIC})) or vector(1000000000) * absent({METRIC})"
+AMBIGUITY_PROBE_QUERY = (
+    f'label_replace({METRIC}, "stageguard_acceptance_probe", "left", "", "") '
+    f'or label_replace({METRIC}, "stageguard_acceptance_probe", "right", "", "")'
+)
 FRESHNESS_THRESHOLD_SECONDS = 45.0
 
 
@@ -172,6 +182,22 @@ def prometheus_freshness_age(base: str) -> float | None:
     return prometheus_query_value(base, FRESHNESS_QUERY)
 
 
+def prometheus_ambiguity_probe_rejected(base: str) -> bool:
+    """Prove the live Prometheus path cannot turn two safety series into a PASS.
+
+    The probe uses label_replace() twice and a set union to manufacture two
+    label-distinct results from the single healthy watchdog series at query
+    time. No samples are written, so there is no stale-series residue after the
+    negative test. Only the parser's explicit multi-series rejection counts as
+    success; unrelated response failures remain hard failures.
+    """
+    try:
+        prometheus_query_value(base, AMBIGUITY_PROBE_QUERY)
+    except ValueError as exc:
+        return str(exc) == "Prometheus safety query must return exactly one series"
+    return False
+
+
 def _alert_matches(alert: dict[str, Any], *, title: str, summary: str) -> bool:
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
@@ -298,13 +324,24 @@ def main() -> int:
         return 1
 
     try:
-        # First prove the genuine remediation-deadline lifecycle.
+        # Start from healthy evidence, then prove the live Prometheus API returns
+        # a deliberately ambiguous vector that the strict StageGuard parser
+        # refuses. The query-local labels leave no persistent series behind.
         set_telemetry(fixture, True)
         set_fixture(fixture, "idle")
         if not wait_until(lambda: prometheus_value(prometheus) == 0.0, timeout=args.prometheus_timeout):
             print("FAIL: Prometheus did not ingest the idle watchdog metric")
             return 1
+        try:
+            ambiguity_rejected = prometheus_ambiguity_probe_rejected(prometheus)
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            print("FAIL: could not execute live Prometheus ambiguity probe")
+            return 1
+        if not ambiguity_rejected:
+            print("FAIL: ambiguous Prometheus watchdog evidence was not rejected")
+            return 1
 
+        # Prove the genuine remediation-deadline lifecycle.
         set_fixture(fixture, "overdue")
         if not wait_until(lambda: prometheus_value(prometheus) == 1.0, timeout=args.prometheus_timeout):
             print("FAIL: Prometheus did not ingest the overdue watchdog metric")
@@ -356,8 +393,8 @@ def main() -> int:
             return 1
 
         print(
-            "PASS: pinned runtime versions attested; deadline alert fired/resolved; "
-            "telemetry outage fired only stale warning and recovered cleanly"
+            "PASS: pinned runtime versions attested; ambiguous Prometheus safety evidence rejected; "
+            "deadline alert fired/resolved; telemetry outage fired only stale warning and recovered cleanly"
         )
         return 0
     finally:
