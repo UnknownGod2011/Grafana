@@ -92,7 +92,7 @@ For workloads on Google Cloud, prefer an attached service account. For workloads
 - rejection of missing, malformed, duplicate, non-finite, labeled, and non-boolean safety sentinels;
 - sanitized failure bodies that do not echo provider/token/target details.
 
-`runtime/tests/test_cloud_run_metrics_acceptance.py` covers the disposable acceptance harness without credentials or Docker side effects. It verifies the anonymous-access negative contract, exact Prometheus `up == 1` interpretation, ambiguity/non-finite rejection, ephemeral/read-only container flags, and CLI error sanitization.
+`runtime/tests/test_cloud_run_metrics_acceptance.py` covers the disposable acceptance harness without credentials or Docker side effects. It verifies the anonymous-access negative contract, exact binary Prometheus `up` interpretation, ambiguity/non-finite rejection, ephemeral/read-only container flags, CLI error sanitization, and the ordered local `up: 1 -> 0 -> 1` bridge failure/recovery contract. It also proves the authoritative upstream is rechecked only after Prometheus has observed the local bridge down.
 
 ## Disposable-project acceptance harness
 
@@ -135,9 +135,14 @@ A passing run proves, in order:
 4. the returned payload passes StageGuard's sentinel identity/integrity check;
 5. bridge `/readyz` succeeds using the same authenticated path;
 6. bridge `/metrics` forwards only a validated StageGuard exposition;
-7. disposable Prometheus scrapes the bridge and returns exactly one `up{job="stageguard-cloud-run-acceptance"} == 1` target.
+7. disposable Prometheus scrapes the bridge and returns exactly one `up{job="stageguard-cloud-run-acceptance"} == 1` target;
+8. the harness stops **only** the local bridge and Prometheus observes the same target as exactly `up == 0`;
+9. while that local bridge is down, the same authenticated production client successfully fetches and validates private Cloud Run `/metrics`, proving the upstream service/IAM path remained intact;
+10. the bridge is restarted on the exact same port and Prometheus observes the target recover to exactly `up == 1`.
 
 The anonymous check is deliberately used instead of temporarily revoking IAM. The harness therefore does not mutate service IAM, cannot accidentally remove production access, and remains safe to use against a disposable/private test deployment.
+
+The failure/recovery phase is similarly constrained. It does **not** stop, redeploy, reconfigure, or change IAM on Cloud Run. Only the local bridge process is stopped. Because Prometheus keeps scraping the same fixed target, the bridge must recover on the same local port; a different target cannot accidentally satisfy the recovery check.
 
 ### What the harness does not do
 
@@ -146,6 +151,7 @@ It never:
 - creates or changes IAM bindings;
 - deploys or modifies Cloud Run services;
 - changes ingress or public-access settings;
+- stops or restarts Cloud Run;
 - prints or persists ID tokens;
 - writes a bearer token into Prometheus configuration;
 - calls incident, approval, execution, recovery, or remediation endpoints;
