@@ -90,14 +90,17 @@ Added `docs/prometheus-acceptance-safety.md` explaining:
 - `a7a3fcfaddaa527fc87ae41b9fa403e9f972a0b6` — prove Prometheus cardinality ambiguity fails closed
 - `9837ff7eba4416c60b6868c2c05b12df56bf73ce` — test live Prometheus ambiguity probe contract
 - `9c7456a8711ab454a08b2316237c61737b8fcd1b` — document Prometheus acceptance ambiguity guard
+- `9fb6e677ef0cee35a63129647d7fd01249bc4eeb` — record implementation handoff before final validation attempt
 
 ### Tests / checks / results
 
 - Re-fetched the committed acceptance script through the GitHub API and verified the new constant, helper, pre-lifecycle ambiguity check, failure paths, and PASS message are present on `main`.
-- Verified the new focused test file and safety rationale document were committed to the intended repository only.
+- Re-fetched `runtime/tests/test_watchdog_ambiguity_probe.py` and verified the focused regression coverage is committed to the intended repository.
 - Compared the probe design against official Prometheus documentation: `label_replace()` preserves the source series while adding the synthetic label, and `or` unions label-distinct instant-vector elements, which is the required cardinality behavior.
-- The exact Python unit tests were not executed in this environment because the runnable checkout path remains unavailable; no green unit-test claim is made.
-- The full Docker observability rehearsal was not executed here; it still requires a runnable Docker checkout with the pinned images.
+- Attempted the focused test command from a fresh checkout:
+  `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard-grafana && python -m unittest runtime.tests.test_watchdog_ambiguity_probe runtime.tests.test_watchdog_observability_acceptance`
+- The environment failed before checkout with `Could not resolve host: github.com`; therefore the exact committed tests did not execute and no green claim is made.
+- The full Docker observability rehearsal was not executed here for the same checkout/network limitation; it still requires a runnable Docker checkout with the pinned images.
 - No GitHub Actions workflow was created, modified, triggered, or rerun.
 - No external Grafana, Grafana Cloud, GCP, IAM, Cloud Run, Secret Manager, Gemini, checkpoint, or remediation resource was changed.
 
