@@ -335,8 +335,6 @@ class IncidentService:
                     chain.append(event)
                 if chain.checkpoint().sequence != checkpoint.sequence:
                     raise ValueError("legacy audit history is incomplete")
-                # Legacy state has no authenticated head capable of selecting a winner,
-                # so keep the pre-v3 conservative orphan-tail rule.
                 self._assert_no_audit_tail(checkpoint.incident_id, checkpoint.sequence)
             except Exception:
                 self._audit_integrity_state = "failed"
@@ -355,13 +353,9 @@ class IncidentService:
             candidates = self._read_audit_candidates(checkpoint.incident_id, expected.sequence)
             if candidates is not None:
                 committed = select_committed_audit_lineage(candidates, expected)
-                # Post-head records are append-before-CAS residue and are intentionally
-                # not read/adopted. Only the authenticated path becomes timeline state.
             else:
                 committed = self._read_audit_prefix(checkpoint.incident_id, expected.sequence)
                 verify_audit_chain(committed, expected)
-                # Readers that cannot enumerate branches cannot prove that a tail is a
-                # loser lineage, so retain the older fail-closed behavior.
                 self._assert_no_audit_tail(checkpoint.incident_id, expected.sequence)
         except Exception:
             self._audit_integrity_state = "failed"
@@ -474,6 +468,29 @@ class IncidentService:
         if len(self._committed_audit_history) > _MAX_AUDIT_LINEAGE_READ_EVENTS:
             del self._committed_audit_history[: len(self._committed_audit_history) - _MAX_AUDIT_LINEAGE_READ_EVENTS]
 
+    def _record_snapshot_transition(
+        self,
+        candidate: IncidentSnapshot,
+        event_type: str,
+        actor: str,
+        payload: dict,
+    ) -> IncidentSnapshot:
+        """Publish a snapshot only if its durable checkpoint transition wins.
+
+        Audit sinks intentionally append before optimistic checkpoint persistence so a
+        competing writer can be reconstructed later. A CAS loser must therefore not
+        remain visible through ``status()`` as if it were authoritative lifecycle
+        state. The conflict flag still requires an explicit durable reload.
+        """
+        previous = self._snapshot
+        self._snapshot = candidate
+        try:
+            self._record(candidate.incident_id, event_type, actor, payload)
+        except CheckpointConflictError:
+            self._snapshot = previous
+            raise
+        return candidate
+
     def status(self) -> IncidentSnapshot | None:
         with self._lock:
             return self._snapshot
@@ -521,7 +538,6 @@ class IncidentService:
             report = investigate(self._metrics, self._profile) if self._logs is None else investigate_with_log_corroboration(self._metrics, self._logs, self._profile)
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
-            self._snapshot = snapshot
             payload = {"revision": snapshot.revision, "status": report.status, "confidence": report.confidence,
                        "evidence_mode": "metric+loki" if self._logs is not None else "metric-only"}
             if self._activation is not None:
@@ -531,8 +547,12 @@ class IncidentService:
                 payload["log_activation_contract_sha256"] = self._log_activation.contract_sha256
                 payload["log_activation_datasource_sha256"] = self._log_activation.datasource_sha256
                 payload["log_activation_preflight_sha256"] = self._log_activation.preflight_sha256
-            self._record(incident_id, "investigation_completed", actor.strip() or "stageguard", payload)
-            return snapshot
+            return self._record_snapshot_transition(
+                snapshot,
+                "investigation_completed",
+                actor.strip() or "stageguard",
+                payload,
+            )
 
     def briefing(self, *, incident_id: str, revision: str, actor: str = "stageguard") -> IncidentBriefing:
         with self._lock:
@@ -571,10 +591,13 @@ class IncidentService:
             if snapshot.report.status != "diagnosed":
                 raise ValueError("only a diagnosed incident can be approved for remediation")
             approval = required_approval(snapshot.report, actor, True, self._profile)
-            self._snapshot = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, approval, None)
-            self._record(snapshot.incident_id, "remediation_approved", actor,
-                         {"revision": snapshot.revision, "action": approval.action, "target": approval.target})
-            return self._snapshot
+            candidate = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, approval, None)
+            return self._record_snapshot_transition(
+                candidate,
+                "remediation_approved",
+                actor,
+                {"revision": snapshot.revision, "action": approval.action, "target": approval.target},
+            )
 
     def execute_approved(self, *, actor: str = "stageguard") -> IncidentSnapshot:
         with self._lock:
