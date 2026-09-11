@@ -38,6 +38,20 @@ def diagnosed_report():
     )
 
 
+def unavailable_report():
+    return IncidentReport(
+        status="abstain",
+        production_id="broadcast-alpha",
+        affected_feed="cam-3",
+        hypothesis=None,
+        confidence=0.0,
+        summary="Required incident evidence is temporarily unavailable; no diagnosis or remediation is permitted.",
+        missing_evidence=(),
+        evidence=(),
+        unavailable_evidence=("causal",),
+    )
+
+
 class RemediationTests(unittest.TestCase):
     def test_no_action_without_explicit_matching_approval(self):
         action = FakeRemediation()
@@ -63,6 +77,18 @@ class RemediationTests(unittest.TestCase):
         self.assertEqual("approval_required", outcome.status)
         self.assertEqual([], action.calls)
 
+    def test_evidence_unavailable_abstention_cannot_execute_even_with_matching_approval(self):
+        action = FakeRemediation()
+        outcome = remediate_and_verify(
+            unavailable_report(),
+            Approval(True, "operator@example.com", "recover_uplink", "broadcast-alpha", "uplink-b"),
+            action,
+            SequenceMetrics([]),
+            sleep=lambda _: None,
+        )
+        self.assertEqual("approval_required", outcome.status)
+        self.assertEqual([], action.calls)
+
     def test_action_success_is_not_recovery(self):
         action = FakeRemediation()
         metrics = SequenceMetrics([0.3, 4.0, 0.3, 3.0, 0.3, 2.0])
@@ -81,12 +107,11 @@ class RemediationTests(unittest.TestCase):
 
     def test_requires_consecutive_healthy_samples(self):
         action = FakeRemediation()
-        # Each attempt consumes packet loss then dropped-frame rate.
         metrics = SequenceMetrics([
-            0.3, 0.5,  # healthy streak 1
-            0.3, 1.5,  # reset
-            0.3, 0.4,  # healthy streak 1
-            0.3, 0.2,  # healthy streak 2 => recovered
+            0.3, 0.5,
+            0.3, 1.5,
+            0.3, 0.4,
+            0.3, 0.2,
         ])
         outcome = remediate_and_verify(
             diagnosed_report(),
