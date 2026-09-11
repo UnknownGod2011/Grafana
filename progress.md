@@ -13,83 +13,69 @@ Core invariants retained:
 - Durable checkpoint/audit integrity failures fail closed.
 - Append-before-CAS audit residue is not lifecycle authority until a checkpoint transition wins.
 - A losing or otherwise failed persistence transition must not remain visible through `status()` as committed incident, approval, or remediation state.
-- Unauthenticated audit residue must not be presented as committed operator timeline history.
-- Once a provider action may have been dispatched, checkpoint uncertainty blocks replay until durable reload/reconciliation.
+- Failed checkpoint-backed transitions must not expose unauthenticated audit residue through the operator timeline.
+- Once a provider action may have been dispatched, persistence uncertainty blocks replay.
 - The browser and HTTP API must not expose provider failure detail or turn evidence loss into actionable state.
 - Private Cloud Run metrics requests must not follow redirects and must keep token audience/target boundaries explicit.
 - Runtime metrics readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 
-## Run log — 2026-09-12 — anchored non-CAS persistence failure authority
+## Run log — 2026-09-12 — base transition persistence authority
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Then inspected:
-- `runtime/incident_service.py`, especially `_record()`, `_record_snapshot_transition()`, `_require_checkpoint_consistency()`, and `audit_timeline()`;
-- `runtime/anchored_incident_service.py`, especially anchored checkpoint/anchor promotion and restore behavior;
-- `runtime/anchored_execution_safety.py`, including the existing generic post-provider failure rollback and execution-uncertainty path;
+- `runtime/incident_service.py`, especially `_record()`, `_record_snapshot_transition()`, `_require_checkpoint_consistency()`, `audit_timeline()`, investigation, approval, and remediation completion;
+- `runtime/execution_safety.py`, especially the provider-dispatch wrapper and generic post-provider failure path;
 - `runtime/tests/test_checkpoint_conflict_snapshot_authority.py`;
-- `runtime/tests/test_audit_integrity.py`;
-- `runtime/tests/test_anchored_incident_runtime.py`;
-- `runtime/tests/test_anchored_execution_safety.py`.
+- `runtime/tests/test_execution_safety.py`;
+- the immediately preceding anchored persistence-failure handoff.
 
 ### Finding
 
-The previous hardening correctly restored the previous snapshot when an optimistic CAS lost. However the base `_record_snapshot_transition()` catches only `CheckpointConflictError`.
+The anchored production composition already restored the previous committed snapshot on non-CAS transition failure, but the base `IncidentService` still restored only `CheckpointConflictError` failures.
 
-For the production anchored composition, a different persistence failure can occur after the candidate snapshot is installed and after the audit sequence/chain has advanced—for example an audit/checkpoint storage I/O failure. Before this run, that path could leave the candidate visible through `status()` even though it never became durable lifecycle authority.
+That meant any other audit/checkpoint failure after the candidate snapshot was installed could leave an uncommitted investigation, approval, or remediation outcome visible through `status()` in non-anchored checkpoint-backed compositions. The base timeline also still had a raw-reader fallback that could present append-before-persistence residue after integrity had failed.
 
-A second consequence existed in anchored mode: once integrity became failed, the inherited `audit_timeline()` could fall back to the durable audit reader. Because audit append intentionally happens before checkpoint persistence, that fallback could surface the failed transition's unauthenticated append as if it were committed operator history.
+For post-provider remediation, this is especially important: a provider action may already have happened, so a failed final lifecycle save must hide the candidate outcome while the execution-safety layer prevents replay.
 
 ### Exact changes made
 
-#### Production anchored transition rollback for every non-CAS failure
+#### Centralized non-CAS snapshot rollback in base `IncidentService`
 
-Updated `runtime/anchored_incident_service.py`.
+Updated `runtime/incident_service.py`.
 
-`AnchoredIncidentService._record_snapshot_transition(...)` now wraps the base transition contract:
-1. captures the previously committed in-process snapshot;
-2. delegates to the existing base transition;
-3. preserves the existing explicit CAS-conflict behavior unchanged;
-4. on any other transition failure, restores the previous snapshot;
-5. marks audit integrity `failed`, which blocks subsequent lifecycle mutation through the existing consistency gate.
+`_record_snapshot_transition(...)` now:
+1. captures the previously authoritative in-process snapshot;
+2. installs the candidate only for the duration of the attempted audit/checkpoint transition;
+3. preserves the existing CAS-conflict path unchanged;
+4. restores the previous snapshot on every other exception;
+5. when checkpoint persistence is configured, marks audit/integrity state `failed`, causing subsequent lifecycle mutations to fail closed.
 
-This intentionally fails closed rather than pretending a transient non-CAS storage failure has a safe authenticated winner that can be adopted through `reload_checkpoint_after_conflict()`.
-
-Commit:
-- `33cba369278a1687fd380c9a8f64fd2c83e74b27` — fail closed on anchored lifecycle transition persistence errors.
-
-#### Fail closed timeline reads after anchored integrity failure
-
-Also updated `runtime/anchored_incident_service.py`.
-
-The anchored service now overrides `audit_timeline(...)` and rejects timeline reads while audit integrity is `failed`. This prevents append-before-persistence residue from being presented as committed operator history after a failed non-CAS transition.
+The base `audit_timeline(...)` now also rejects reads while audit integrity is `failed`, so append-before-persistence residue cannot be presented as committed operator history in non-anchored compositions.
 
 Commit:
-- `c17daa03434479420282919bbe368b08e2678a0e` — hide unauthenticated audit tail after anchored persistence failure.
+- `b22bc265927ce1962d2e1d239c4b4c81680fb49c` — centralize failed transition snapshot authority.
 
-#### Added deterministic non-CAS authority regressions
+#### Added deterministic base and post-provider regressions
 
-Added `runtime/tests/test_anchored_transition_failure_authority.py`.
+Added `runtime/tests/test_transition_failure_snapshot_authority.py`.
 
-The new tests use a checkpoint store that succeeds once and then raises a non-CAS `RuntimeError` while retaining the last durable checkpoint. They cover:
-- failed re-investigation: the previously committed incident snapshot remains visible and the durable checkpoint revision is unchanged;
-- failed approval: the uncommitted approval is never visible through `status()` and never enters the durable checkpoint;
-- the append-before-persistence audit residue is still physically present for forensic recovery;
-- integrity becomes `failed`;
-- operator timeline reads fail closed instead of surfacing the unauthenticated tail;
-- further lifecycle mutation remains blocked by the existing audit-integrity consistency gate.
+Coverage includes:
+- failed re-investigation after one committed incident: previous snapshot and durable checkpoint remain authoritative, physical audit residue is retained, timeline fails closed, and further mutation is blocked;
+- failed approval persistence: the uncommitted approval never becomes visible in memory or durable state;
+- failed remediation outcome persistence after the provider action: previous approved/no-outcome state remains visible, durable outcome remains absent, the provider is called exactly once, execution uncertainty blocks replay, and the timeline fails closed.
 
 Commit:
-- `3683fca8b0cebb6e251aa8a1d8ba46a5ecb72e8b` — test anchored non-CAS transition failure authority.
+- `eb4726e6f6155540e9872e6ea19a5a5bec6f8890` — test base transition persistence failure authority.
 
 ### Checks / results
 
-- GitHub compare from the previous handoff `00b97b769a8499c03cbf97d6659fe642a53aa18d` through `3683fca8b0cebb6e251aa8a1d8ba46a5ecb72e8b` is exactly three commits ahead and touches only:
-  - `runtime/anchored_incident_service.py`: +38/-0;
-  - `runtime/tests/test_anchored_transition_failure_authority.py`: +136/-0.
-- Re-read the production anchored and base transition paths before implementing the change.
+- GitHub compare from the prior handoff `9f36121ebbac1bed1da2c797822a1406a18b3160` through `eb4726e6f6155540e9872e6ea19a5a5bec6f8890` is exactly two commits ahead and touches only:
+  - `runtime/incident_service.py`: +11/-2;
+  - `runtime/tests/test_transition_failure_snapshot_authority.py`: +153/-0.
+- Re-read the exact production diff after commit; no unrelated `incident_service.py` changes were introduced.
 - Attempted a fresh local checkout before executable validation; the execution container still failed with `Could not resolve host: github.com`.
-- Because checkout remains unavailable, the new unittest module and the focused anchored suites could not be executed in this run.
+- Because checkout remains unavailable, the new unittest module and focused transition/execution-safety suites could not be executed in this run.
 - No GitHub Actions workflow was created, modified, triggered, or rerun as a workaround.
 - No GCP/IAM/Cloud Run, Grafana Cloud, Gemini provider, incident, remediation, or external audit resource was mutated.
 
@@ -97,16 +83,19 @@ No green repository-suite claim is made for this run.
 
 ### Decisions
 
-1. Production anchored lifecycle state fails closed on every non-CAS transition failure: previous committed snapshot remains read authority and further mutation is blocked.
-2. Keep CAS contention distinct from storage/integrity failure. CAS still uses the explicit conflict/reload path and does not automatically become an integrity failure.
-3. Preserve append-before-persistence residue for durable forensic reconstruction; do not silently delete or rewrite it.
-4. When anchored audit integrity is failed, prefer no operator timeline over an unauthenticated timeline.
-5. Avoid noisy CI solely to work around transient execution-environment DNS failure.
+1. Snapshot authority now depends on the complete lifecycle transition succeeding, not merely on avoiding CAS contention.
+2. CAS conflicts remain distinct: they still set the explicit checkpoint-conflict flag and require durable reload rather than being collapsed into generic integrity failure.
+3. Non-CAS failures in checkpoint-backed base services mark integrity failed and block further lifecycle mutation.
+4. Failed-integrity timeline reads fail closed rather than falling back to raw durable events.
+5. Post-provider persistence failure preserves execution-safety semantics: the candidate outcome is hidden and the provider action must never be replayed.
+6. Preserve append-before-persistence residue for forensic reconstruction; do not rewrite or silently delete it.
+7. Continue avoiding noisy CI solely to work around transient execution-environment DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime/tests/test_anchored_transition_failure_authority.py` still needs execution from a real repository checkout.
-- The base non-anchored `IncidentService` still restores failed snapshot transitions only for `CheckpointConflictError`; production anchored mode is now protected, but the invariant is not yet centralized for every composition.
+- `runtime/tests/test_transition_failure_snapshot_authority.py` still needs execution from a real repository checkout.
+- The anchored and base transition-authority suites should be run together to detect redundant/interaction regressions after centralization.
+- Generic post-provider persistence failure now marks audit integrity failed while execution uncertainty is also set; the external status/API representation of these simultaneous barriers should be reviewed so operators receive one clear, actionable fail-closed state without weakening no-replay guarantees.
 - The production anchored and base execution-safety suites still need a current executable run.
 - The complete evidence-unavailable safety set still needs a current combined executable run.
 - The focused Cloud Run audience/redirect/sentinel/bridge suites need a current executable run.
@@ -116,10 +105,12 @@ No green repository-suite claim is made for this run.
 
 ## Single best next step
 
-**Centralize the same non-CAS transition rollback invariant in base `IncidentService` so every checkpoint-backed composition—not only anchored production—restores the previous snapshot and enters an explicit fail-closed persistence/integrity state after audit/checkpoint failure. Add focused base regressions for investigation, approval, and remediation outcome persistence failures, while ensuring `ExecutionSafeIncidentService` still marks post-provider failures `execution_uncertain` and never replays the provider action. Then run the new anchored/base suites together when checkout execution is available.**
+**Review and harden the simultaneous `audit_integrity=failed` + post-provider `execution_uncertain` operator/API contract. Ensure a non-CAS failure after provider dispatch has one explicit externally visible state that communicates both “do not trust the failed lifecycle write” and “do not replay remediation,” while retaining the stable operation identity needed for reconciliation. Add API/status regressions, then run the base + anchored transition-authority and execution-safety suites together as soon as checkout execution is available.**
 
 ## Recent hardening retained
 
+- Base checkpoint-backed non-CAS transition failures no longer expose uncommitted investigation, approval, or remediation snapshots.
+- Base failed-integrity timeline reads no longer surface raw append-before-persistence residue as committed history.
 - Production anchored non-CAS transition failures no longer expose uncommitted lifecycle snapshots or unauthenticated audit tail as committed operator history.
 - Base and production anchored remediation outcome CAS losers no longer remain visible through `status()` as committed state.
 - Investigation and approval CAS losers no longer remain visible through `status()` as committed state.
