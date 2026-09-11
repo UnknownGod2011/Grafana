@@ -38,6 +38,8 @@ The briefing refusal happens before model invocation and does not create `briefi
 
 The authenticated `POST /v1/briefing` route preserves the same invariant for non-browser callers. It returns the bounded lifecycle rejection through the API error envelope, keeps `Cache-Control: no-store`, does not invoke Gemini, does not mutate the audit timeline, and does not expose the underlying evidence-provider exception text.
 
+The authenticated mutation routes preserve the same fail-closed boundary for non-browser callers. `POST /v1/approve` rejects an evidence-unavailable abstention because it is not diagnosed, and `POST /v1/execute` then rejects because no explicit approval exists. Both rejections keep `Cache-Control: no-store`, create no remediation audit events, make no remediation-provider call, and do not expose provider exception text. A follow-up `GET /v1/incident` must still show the original abstained revision with no approval or outcome.
+
 A fresh diagnosed revision is required before any approval or execution affordance can become available again. Existing partial evidence never becomes authorization material.
 
 ## Audit semantics
@@ -68,6 +70,16 @@ A rejected evidence-unavailable briefing is likewise not recorded as a model fai
 - no new audit event and no remediation-provider call;
 - `Cache-Control: no-store` on the rejected response;
 - absence of injected provider-detail and endpoint sentinels from both investigation and briefing response bodies.
+
+`runtime/tests/test_api_evidence_unavailable_mutations.py` exercises the actual authenticated HTTP mutation boundary and covers:
+
+- direct authenticated `POST /v1/approve` rejection for an evidence-unavailable abstention;
+- direct authenticated `POST /v1/execute` rejection with no approval present;
+- zero Gemini and remediation-provider calls;
+- an unchanged audit log containing only `investigation_completed`;
+- `Cache-Control: no-store` on both rejected mutation responses;
+- absence of injected provider-detail and endpoint sentinels from mutation and incident responses;
+- a final `GET /v1/incident` proving the abstained revision remains unchanged with no approval or outcome.
 
 `runtime/tests/test_operator_console.py` additionally covers the browser safety boundary:
 
