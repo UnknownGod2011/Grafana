@@ -215,6 +215,33 @@ class AnchoredIncidentService(IncidentService):
             )
             self._audit_anchor_authenticated = True
 
+    def _record_snapshot_transition(
+        self,
+        candidate: IncidentSnapshot,
+        event_type: str,
+        actor: str,
+        payload: dict,
+    ) -> IncidentSnapshot:
+        """Keep failed anchored transitions non-authoritative for operator reads.
+
+        A non-CAS audit/checkpoint failure can happen after the candidate snapshot
+        has been installed and after the audit sequence has advanced. In that case
+        the prior committed snapshot remains the only safe read authority. Unlike a
+        CAS conflict there is no authenticated winner that can be adopted through
+        the conflict-reload path, so anchored lifecycle mutation is blocked by
+        marking audit integrity failed until process/operator recovery reconstructs
+        durable state.
+        """
+        previous = self._snapshot
+        try:
+            return super()._record_snapshot_transition(candidate, event_type, actor, payload)
+        except CheckpointConflictError:
+            raise
+        except Exception:
+            self._snapshot = previous
+            self._audit_integrity_state = "failed"
+            raise
+
     def audit_anchor_state(self) -> dict[str, object]:
         """Return bounded operator-safe anchor metadata; never returns event payloads."""
         with self._lock:
