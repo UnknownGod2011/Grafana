@@ -2,11 +2,12 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain including local bridge failure/recovery, redirect isolation for identity-token-bearing metrics requests, and a same-origin-by-default audience/target credential boundary.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The current vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded diagnosis, optional Gemini briefing, revision-bound approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated metrics bridging, stale/scrape detection, pinned local acceptance images, strict Prometheus/MCP evidence parsing, structured evidence-unavailable abstention, fail-closed operator handling for observability-plane outages, payload-integrity validation on the private Cloud Run metrics bridge, an opt-in disposable Prometheus acceptance harness for the complete private Cloud Run scrape chain including local bridge failure/recovery, redirect isolation for identity-token-bearing metrics requests, a same-origin-by-default audience/target credential boundary, and a server-side rule preventing Gemini briefing while required evidence is unavailable.
 
 Core invariants:
 - Grafana/MCP is read-only evidence access; infrastructure write credentials remain isolated.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
+- Gemini is not invoked when required observability evidence is unavailable; this is enforced by `IncidentService`, not only the browser.
 - Approval is exact-revision-bound and single-use.
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove it.
 - Durable checkpoint/audit integrity failures fail closed.
@@ -23,125 +24,122 @@ Core invariants:
 - An identity-token-bearing Cloud Run metrics request must never follow an HTTP redirect; the configured service origin is the exact network credential boundary.
 - The ID-token audience must match the metrics target origin by default; a different audience is an explicit operator opt-in and must never be accepted silently.
 
-## Run log — 2026-09-11 — Cloud Run audience/target credential-boundary hardening
+## Run log — 2026-09-11 — server-side Gemini fail-closed rule for evidence-plane outages
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected:
-- `runtime/cloud_run_metrics_bridge.py`
-- `runtime/tests/test_cloud_run_metrics_bridge.py`
-- `runtime/cloud_run_metrics_acceptance.py`
-- `docs/cloud-run-metrics-bridge-safety.md`
-- the previous redirect/sentinel hardening handoff on `main`
+Read `progress.md` completely before deciding what to change. Inspected the current repository state and specifically:
+- `README.md`
+- `runtime/incident_service.py`
+- `runtime/investigator.py`
+- `runtime/gemini_commander.py`
+- `runtime/tests/test_evidence_unavailable_lifecycle.py`
+- `docs/evidence-unavailable-lifecycle.md`
+- the existing Cloud Run metrics bridge/acceptance handoff
 
-Also checked current official Google Cloud documentation for Cloud Run service identity, service-to-service authentication, configured custom audiences, and ID-token audience semantics.
-
-The previous handoff's disposable Cloud Run acceptance remains blocked here by missing external credentials and an unrunnable checkout. Rather than stop, this run reviewed the pre-request credential configuration boundary.
+A clean local checkout was attempted first, but the execution container again failed DNS resolution for `github.com`. Repository inspection and edits therefore used the connected GitHub integration.
 
 ### Finding
 
-`CloudRunMetricsClient` accepted an explicit `audience` independently from the configured HTTPS metrics target. That allowed a configuration such as:
+The operator cockpit already disables Gemini briefing when an incident is an `abstain` with `unavailable_evidence`, but `IncidentService.briefing()` itself still allowed a direct API caller to request a briefing for the same incident revision.
 
-```text
-target   = https://metrics-target.example
-audience = https://different-audience.example
-```
-
-The client would mint a Google-signed ID token for the second origin and send the bearer credential to the first origin. The token is audience-bound, but silently delivering a freshly minted identity credential to a different network origin is still an unnecessary credential-boundary risk and makes configuration mistakes harder to detect.
-
-Google's current Cloud Run guidance states that the ID-token audience should identify the service being invoked or a configured custom audience. Cloud Run also supports configured custom audiences, including URL-style custom-domain values. Therefore StageGuard can safely prefer target-origin/audience equality and make exceptional cross-origin delivery explicit.
+That created a server/client policy mismatch. It was also semantically unsafe because the bounded Gemini context intentionally does not include provider errors or unavailable-evidence details. A direct caller could therefore cause an advisory model invocation while StageGuard's authoritative evidence plane was unavailable, even though the browser correctly presented the situation as a fail-closed observability outage.
 
 ### Exact changes made
 
-#### Hardened `CloudRunMetricsClient`
+#### Enforced the rule in `IncidentService`
 
-Updated `runtime/cloud_run_metrics_bridge.py`.
+Updated `runtime/incident_service.py` so `briefing()` now rejects a current report with non-empty `unavailable_evidence` before checking/invoking the configured commander.
 
-Changes:
-- the normalized target origin is now retained as the default and expected audience;
-- an explicit audience that differs from the target origin raises `BridgeConfigurationError` by default;
-- this failure occurs during client construction, before the token supplier can mint a credential;
-- added strict boolean `allow_cross_origin_audience=False` escape hatch for intentionally verified deployments;
-- added CLI flag `--allow-cross-origin-audience` so the exception requires an explicit operator acknowledgement;
-- preserved all previous HTTPS-origin validation, fixed `/metrics` path, unredirected bearer header, no-redirect transport, bounded body, sentinel validation, and sanitized failure behavior.
-
-Commit:
-- `07953ce84a62bc545afda77fe1b5b2af89c093bf` — harden metrics audience credential boundary
-
-#### Added credential-free regression coverage
-
-Added `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py`.
-
-Coverage proves:
-- default audience equals target origin;
-- explicit same-origin audience works without an escape hatch;
-- cross-origin audience is rejected by default before `token_supplier()` is called;
-- explicit opt-in permits an intentionally different audience while preserving the exact configured target URL;
-- the opt-in parameter must be a real boolean rather than a truthy configuration value.
+Behavior:
+- the rejection is a deterministic lifecycle `ValueError`;
+- Gemini/model code is never invoked;
+- no `briefing_generated` event is created;
+- no `briefing_failed` event is created, because the model was intentionally not called;
+- the existing revision match and checkpoint/audit consistency checks remain in force.
 
 Commit:
-- `24828fa273e9b4390f30b7f7c142ac6143455bc5` — test metrics audience credential boundary
+- `e00214d04dcfe726a317337e1a3512374bdb3be1` — fail closed on Gemini briefing during evidence outage
 
-#### Documented the boundary and aligned operator guidance
+A follow-up cleanup restored explanatory comments in unrelated audit-integrity code that were accidentally dropped by the full-file GitHub contents update. The final diff against the previous handoff contains only the intended two-line lifecycle guard in `incident_service.py`.
 
-Added `docs/cloud-run-metrics-audience-safety.md` documenting the audience/destination trust decision, reject-before-token-minting behavior, explicit escape hatch, preference for a matching Cloud Run custom audience, and interaction with redirect/sentinel controls.
+Cleanup commit:
+- `f9e3ea2976747741c5bf569996eadf9461d8c0a5` — restore audit safety commentary
 
-Updated `docs/cloud-run-metrics-bridge-safety.md` so the main bridge runbook now reflects the same-origin default and no longer suggests that the disposable acceptance harness should silently use a different audience. It now documents matching target/audience as an acceptance prerequisite and links the focused audience-safety contract.
+#### Added focused regression coverage
 
-Commits:
-- `d89224bfeabc0dd39f7f45a6c765f81b01f05b3a` — document metrics audience credential boundary
-- `4c53e4976afb699b86aaf7a2b504ed86c0793960` — align metrics bridge safety docs with audience boundary
+Updated `runtime/tests/test_evidence_unavailable_lifecycle.py` with a `ShouldNotRunModel` fixture and a regression proving:
+- an evidence-unavailable incident rejects `service.briefing()`;
+- the model's `generate()` method is called zero times;
+- the audit log is unchanged by the rejected briefing;
+- the only lifecycle event remains `investigation_completed`.
+
+Commit:
+- `7367e0bff2e3a0510d1f81e6fc961664be4ac479` — test fail-closed Gemini briefing on evidence outage
+
+#### Documented the server-side policy
+
+Updated `docs/evidence-unavailable-lifecycle.md` to make clear that briefing suppression is enforced at both the browser and service boundary, occurs before model invocation, and is intentionally not recorded as a Gemini failure.
+
+Commit:
+- `0150e0a3f7fac2619b175ef0079e2d0a9f6a9605` — document server-side briefing outage guard
 
 ### Checks / results
 
-Attempted a clean checkout and focused test run:
+Attempted a fresh executable checkout:
 
 ```bash
 git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard
-cd /tmp/stageguard
-python -m unittest \
-  runtime.tests.test_cloud_run_metrics_bridge_audience_boundary \
-  runtime.tests.test_cloud_run_metrics_bridge_redirects \
-  runtime.tests.test_cloud_run_metrics_bridge_sentinel_family \
-  runtime.tests.test_cloud_run_metrics_bridge
 ```
 
-The execution container again failed before checkout with:
+The environment failed before checkout with:
 
 ```text
 Could not resolve host: github.com
 ```
 
-Therefore no claim is made that the new regression or focused bridge suites are green in this run.
+Therefore the focused unittest could not be executed locally in this run and no green test claim is made.
 
-Performed a repository code-search compatibility sweep for `CloudRunMetricsClient(` after the change. The connector's code-search index returned no matches, so this was not treated as proof that no call sites exist; the known acceptance harness was inspected directly and remains intentionally fail-closed under a mismatch.
+Performed a GitHub compare from the previous handoff (`e12b8182`) to the cleaned implementation (`f9e3ea29`). The resulting code diff is intentionally narrow:
+- `runtime/incident_service.py`: +2 lines, 0 deletions;
+- `runtime/tests/test_evidence_unavailable_lifecycle.py`: focused regression additions;
+- `docs/evidence-unavailable-lifecycle.md`: lifecycle semantics update.
 
-No GitHub Actions workflow was created, triggered, rerun, or modified. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, audit, checkpoint, incident, approval, remediation, or recovery resource was changed.
+No GitHub Actions workflow was created, modified, triggered, or rerun. No GCP/IAM/Cloud Run, Grafana Cloud, Gemini provider, incident, approval, remediation, recovery, audit backend, or checkpoint resource was mutated.
 
 ### Decisions
 
-1. Treat audience/target equality as the safe default because the token's intended recipient and its network recipient should normally be the same origin.
-2. Reject a mismatch before token acquisition so an invalid configuration cannot mint a credential as a side effect.
-3. Preserve a narrowly named explicit opt-in for legacy or intentionally verified cross-origin deployments rather than banning them outright.
-4. Prefer a configured Cloud Run custom audience matching the actual target origin where possible.
-5. Keep the disposable acceptance harness fail-closed under the new client rule; it must not silently normalize or bypass an audience mismatch.
+1. Treat evidence-plane unavailability as deterministic lifecycle state that must be resolved before advisory generation, not as input for Gemini to explain.
+2. Enforce the restriction in `IncidentService` so direct API callers cannot bypass browser affordances.
+3. Reject before commander invocation so an evidence outage cannot spend model quota or create misleading model-failure audit events.
+4. Preserve briefing for other supported deterministic states; this change is narrowly scoped to non-empty `unavailable_evidence` rather than banning all `abstain` briefings.
+5. Keep provider error detail out of the model boundary and out of operator-visible state.
 6. Do not trigger CI merely to work around the execution container's DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py` still needs execution from a real checkout.
-- The redirect/sentinel-family/bridge/acceptance suites still need a current executable run.
-- The real acceptance harness requires an existing private StageGuard Cloud Run test service, working ADC for a least-privilege invoker identity, and Docker.
-- A deployment that intentionally uses a target origin different from its configured Cloud Run audience now requires explicit `allow_cross_origin_audience=True` / `--allow-cross-origin-audience`; the disposable acceptance harness intentionally does not bypass this automatically.
+- `runtime/tests/test_evidence_unavailable_lifecycle.py` needs execution from a real checkout after the new briefing guard.
+- The focused Cloud Run audience/redirect/sentinel/bridge acceptance suites still need a current executable run.
+- The real metrics acceptance harness requires an existing private StageGuard Cloud Run test service, working ADC for a least-privilege invoker identity, and Docker.
 - The Playwright evidence-unavailable browser acceptance still needs execution with Chromium.
 - The complete pinned Prometheus 3.13.3 + Grafana 13.2.1 watchdog rehearsal still needs a current run after the latest hardening.
 - Historical full-suite failures/errors have not yet been re-triaged; no full-suite green claim exists.
 
 ## Single best next step
 
-**In the first runnable environment, execute the focused audience-boundary + redirect + sentinel + bridge acceptance tests. Then run the disposable private Cloud Run harness with a least-privilege `roles/run.invoker` identity using a target and configured Cloud Run audience that intentionally match. Confirm the complete ADC -> private `/metrics` -> validated bridge -> Prometheus `up: 1 -> 0 -> 1` path remains green without redirect or cross-origin credential delivery.**
+**In the first runnable environment, execute `runtime.tests.test_evidence_unavailable_lifecycle` together with the existing operator/API evidence-unavailable regressions. Then add an authenticated HTTP-level regression for `POST /v1/briefing` that proves a direct API caller receives the bounded rejection while the commander invocation count and audit timeline remain unchanged. After that, resume the disposable private Cloud Run `ADC -> /metrics -> bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
 
-## Previous hardening retained
+## Recent hardening retained
+
+### Cloud Run audience/target credential boundary
+
+`CloudRunMetricsClient` requires the ID-token audience to equal the configured metrics target origin by default. A mismatch fails during construction before token acquisition. Intentional legacy/custom deployments require explicit `allow_cross_origin_audience=True` / `--allow-cross-origin-audience`.
+
+Commits:
+- `07953ce84a62bc545afda77fe1b5b2af89c093bf` — harden metrics audience credential boundary
+- `24828fa273e9b4390f30b7f7c142ac6143455bc5` — test metrics audience credential boundary
+- `d89224bfeabc0dd39f7f45a6c765f81b01f05b3a` — document metrics audience credential boundary
+- `4c53e4976afb699b86aaf7a2b504ed86c0793960` — align metrics bridge safety docs
 
 ### Cloud Run redirect credential boundary
 
@@ -165,6 +163,6 @@ Commits:
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance, sentinel-family, redirect, and audience-boundary hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, but it predates the latest acceptance, sentinel-family, redirect, audience-boundary, and server-side briefing hardening.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
