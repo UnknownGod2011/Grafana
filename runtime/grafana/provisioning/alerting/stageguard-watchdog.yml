@@ -115,3 +115,58 @@ groups:
         labels:
           component: stageguard-runtime
           severity: warning
+
+      - uid: stageguard-runtime-scrape-down
+        title: StageGuard runtime watchdog scrape failing
+        condition: B
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: stageguard-prometheus
+            model:
+              expr: max(up{job="stageguard-runtime-watchdog"})
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: -100
+            model:
+              conditions:
+                - evaluator:
+                    params: [0.5]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: -100
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        dashboardUid: stageguard-runtime-safety
+        panelId: 6
+        noDataState: Alerting
+        execErrState: Error
+        for: 20s
+        annotations:
+          summary: Prometheus cannot scrape the StageGuard runtime watchdog target
+          description: The watchdog scrape target is down or unavailable. Investigate the metrics bridge, IAM/network path, and StageGuard /metrics readiness. Treat runtime safety evidence as degraded; this warning does not itself mean a remediation deadline was exceeded.
+        labels:
+          component: stageguard-runtime
+          severity: warning
