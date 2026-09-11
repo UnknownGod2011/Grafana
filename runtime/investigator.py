@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from evidence_errors import EvidenceUnavailable
 from log_evidence import LogCorroboration, LogQueryClient, corroborate_uplink_loss
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile, investigation_queries
 
@@ -45,31 +46,73 @@ class IncidentReport:
     missing_evidence: tuple[str, ...]
     evidence: tuple[Evidence, ...]
     log_corroboration: LogCorroboration | None = None
+    unavailable_evidence: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         payload = asdict(self)
         payload["missing_evidence"] = list(self.missing_evidence)
+        payload["unavailable_evidence"] = list(self.unavailable_evidence)
         return payload
 
 
-def investigate(client: MetricQueryClient, profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE) -> IncidentReport:
-    """Collect six fixed semantic metric evidence slots and return a diagnosis."""
-    queries = investigation_queries(profile)
-    values = {name: client.instant(query) for name, (query, _) in queries.items()}
+def _supports(name: str, value: float | None) -> bool | None:
+    if value is None:
+        return None
+    if name == "symptom":
+        return value > 1.0
+    if name == "causal":
+        return value > 5.0
+    if name in {"contradiction_cpu", "contradiction_gpu"}:
+        return value < 80.0
+    if name in {"healthy_peer_loss", "healthy_peer_drop"}:
+        return value < 1.0
+    raise AssertionError(f"unknown bounded evidence slot: {name}")
 
-    def evidence(name: str, supports: bool | None) -> Evidence:
-        query, threshold = queries[name]
-        return Evidence(name, query, values[name], threshold, supports)
 
-    items = (
-        evidence("symptom", None if values["symptom"] is None else values["symptom"] > 1.0),
-        evidence("causal", None if values["causal"] is None else values["causal"] > 5.0),
-        evidence("contradiction_cpu", None if values["contradiction_cpu"] is None else values["contradiction_cpu"] < 80.0),
-        evidence("contradiction_gpu", None if values["contradiction_gpu"] is None else values["contradiction_gpu"] < 80.0),
-        evidence("healthy_peer_loss", None if values["healthy_peer_loss"] is None else values["healthy_peer_loss"] < 1.0),
-        evidence("healthy_peer_drop", None if values["healthy_peer_drop"] is None else values["healthy_peer_drop"] < 1.0),
+def _items(queries: dict, values: dict[str, float | None]) -> tuple[Evidence, ...]:
+    return tuple(
+        Evidence(name, query, values.get(name), threshold, _supports(name, values.get(name)))
+        for name, (query, threshold) in queries.items()
     )
 
+
+def _evidence_unavailable_report(
+    profile: TelemetryProfile,
+    queries: dict,
+    values: dict[str, float | None],
+    slot: str,
+) -> IncidentReport:
+    return IncidentReport(
+        "abstain",
+        profile.production_id,
+        profile.affected_feed,
+        None,
+        0.0,
+        "Required incident evidence is temporarily unavailable; no diagnosis or remediation is permitted.",
+        (),
+        _items(queries, values),
+        unavailable_evidence=(slot,),
+    )
+
+
+def investigate(client: MetricQueryClient, profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE) -> IncidentReport:
+    """Collect six fixed semantic metric evidence slots and return a diagnosis.
+
+    Expected evidence-source transport/protocol failures become a structured
+    abstention naming only the failed semantic slot. Exception text is never
+    copied into the report. Programming/policy errors are deliberately not
+    caught and continue to fail loudly.
+    """
+    queries = investigation_queries(profile)
+    values: dict[str, float | None] = {}
+    for name, (query, _) in queries.items():
+        try:
+            values[name] = client.instant(query)
+        except EvidenceUnavailable:
+            values[name] = None
+            return _evidence_unavailable_report(profile, queries, values, name)
+
+    items = _items(queries, values)
     required_groups = {
         "symptom": ("symptom",), "causal": ("causal",),
         "contradiction": ("contradiction_cpu", "contradiction_gpu"),
@@ -101,17 +144,27 @@ def investigate_with_log_corroboration(
     logs: LogQueryClient,
     profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
 ) -> IncidentReport:
-    """Require one independent bounded Loki corroboration for metric diagnosis.
-
-    Loki is queried only when all six metric reads already support the diagnosis.
-    Missing, truncated, or scope-inconsistent log evidence converts the result to
-    an abstention; it never weakens a metric contradiction or creates a diagnosis.
-    """
+    """Require one independent bounded Loki corroboration for metric diagnosis."""
     metric_report = investigate(metrics, profile)
     if metric_report.status != "diagnosed":
         return metric_report
 
-    corroboration = corroborate_uplink_loss(logs, profile)
+    try:
+        corroboration = corroborate_uplink_loss(logs, profile)
+    except EvidenceUnavailable:
+        return IncidentReport(
+            "abstain",
+            profile.production_id,
+            profile.affected_feed,
+            None,
+            0.0,
+            "Required log evidence is temporarily unavailable; no diagnosis or remediation is permitted.",
+            (),
+            metric_report.evidence,
+            None,
+            ("causal_log",),
+        )
+
     if corroboration.status != "corroborated":
         missing = ("causal_log",) if corroboration.status == "missing" else ()
         return IncidentReport(
