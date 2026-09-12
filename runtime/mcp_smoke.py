@@ -15,6 +15,7 @@ QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
     'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}',
 )
+REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
 
 
 class McpError(RuntimeError):
@@ -75,7 +76,38 @@ class StdioClient:
 
 def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     tools = result.get("tools", [])
-    return {tool.get("name"): tool for tool in tools if isinstance(tool, dict) and tool.get("name")}
+    if not isinstance(tools, list):
+        raise McpError("tools/list returned a non-list tools field")
+
+    mapped: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise McpError("tools/list returned a malformed tool entry")
+        name = tool.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise McpError("tools/list returned a tool without a valid name")
+        if name in mapped:
+            raise McpError(f"tools/list returned duplicate tool name: {name}")
+        mapped[name] = tool
+    return mapped
+
+
+def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
+    missing = sorted(REQUIRED_READ_TOOLS - tools.keys())
+    if missing:
+        raise McpError(f"Required read tools are missing: {missing}; available={sorted(tools)}")
+
+    not_explicitly_read_only: list[str] = []
+    for name, tool in tools.items():
+        annotations = tool.get("annotations")
+        if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
+            not_explicitly_read_only.append(name)
+
+    if not_explicitly_read_only:
+        raise McpError(
+            "MCP advertised tools without readOnlyHint=true while StageGuard is configured "
+            f"as an evidence-only plane: {sorted(not_explicitly_read_only)}"
+        )
 
 
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
@@ -99,14 +131,7 @@ def main() -> None:
         client.send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
 
         tools = _tool_map(client.request("tools/list"))
-        required = {"list_datasources", "query_prometheus"}
-        missing = sorted(required - tools.keys())
-        if missing:
-            raise McpError(f"Required read tools are missing: {missing}; available={sorted(tools)}")
-        for name in required:
-            annotations = tools[name].get("annotations") or {}
-            if annotations.get("readOnlyHint") is not True:
-                raise McpError(f"Expected {name} to advertise readOnlyHint=true")
+        _assert_read_only_tool_surface(tools)
 
         datasources = client.request("tools/call", {"name": "list_datasources", "arguments": {}})
         _assert_tool_result("list_datasources", datasources)
@@ -126,11 +151,12 @@ def main() -> None:
         _assert_tool_result("query_prometheus", query)
         print(json.dumps({
             "server": initialized.get("serverInfo"),
+            "advertised_read_only_tools": sorted(tools),
             "datasource_uid": DATASOURCE_UID,
             "query": QUERY,
             "result": query.get("content"),
         }, indent=2))
-        print("PASS: official Grafana MCP executed a read-only Prometheus query through Grafana.")
+        print("PASS: official Grafana MCP exposed only explicit read-only tools and executed a Prometheus query through Grafana.")
     finally:
         client.close()
 
