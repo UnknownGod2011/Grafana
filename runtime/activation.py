@@ -15,7 +15,9 @@ from telemetry import TelemetryProfile, investigation_queries, recovery_queries
 
 ACTIVATION_VERSION = 2
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
+MAX_TTL_SECONDS = 7 * 24 * 60 * 60
 _MAX_ACTIVATION_BYTES = 128 * 1024
+_SHA256_HEX_LENGTH = 64
 
 
 def _canonical_json(value: Any) -> str:
@@ -100,6 +102,36 @@ def _validate_successful_preflight(profile: TelemetryProfile, preflight: Preflig
             raise ValueError("activation requires ok preflight slots without error detail")
 
 
+def _validate_sha256_hex(name: str, value: str) -> None:
+    if len(value) != _SHA256_HEX_LENGTH or any(ch not in "0123456789abcdef" for ch in value):
+        raise ValueError(f"activation.{name} must be a canonical SHA-256 hex digest")
+
+
+def _validate_record_shape(record: ActivationRecord) -> None:
+    """Validate persisted activation authority independently of construction path."""
+    if type(record.version) is not int or record.version != ACTIVATION_VERSION:
+        raise ValueError(f"unsupported activation version: {record.version!r}")
+    if not isinstance(record.production_id, str) or not record.production_id.strip():
+        raise ValueError("activation.production_id must be a non-empty string")
+    if record.production_id != record.production_id.strip():
+        raise ValueError("activation.production_id must not contain boundary whitespace")
+    for name in ("profile_sha256", "datasource_sha256", "slot_digest_sha256"):
+        value = getattr(record, name)
+        if not isinstance(value, str):
+            raise ValueError(f"activation.{name} must be a string")
+        _validate_sha256_hex(name, value)
+    for name in ("created_at_unix", "expires_at_unix"):
+        value = getattr(record, name)
+        if type(value) is not int:
+            raise ValueError(f"activation.{name} must be an integer")
+        if value < 0:
+            raise ValueError(f"activation.{name} must be non-negative")
+    if record.expires_at_unix <= record.created_at_unix:
+        raise ValueError("activation expiry must be after creation")
+    if record.expires_at_unix - record.created_at_unix > MAX_TTL_SECONDS:
+        raise ValueError("activation lifetime exceeds the maximum allowed TTL")
+
+
 def create_activation_record(
     profile: TelemetryProfile,
     datasource_identity: str,
@@ -112,10 +144,15 @@ def create_activation_record(
     if preflight.production_id != profile.production_id:
         raise ValueError("preflight production does not match telemetry profile")
     _validate_successful_preflight(profile, preflight)
-    if type(ttl_seconds) is not int or ttl_seconds <= 0 or ttl_seconds > 7 * 24 * 60 * 60:
-        raise ValueError("ttl_seconds must be an integer between 1 and 604800")
-    created = int(time.time()) if now_unix is None else int(now_unix)
-    return ActivationRecord(
+    if type(ttl_seconds) is not int or ttl_seconds <= 0 or ttl_seconds > MAX_TTL_SECONDS:
+        raise ValueError(f"ttl_seconds must be an integer between 1 and {MAX_TTL_SECONDS}")
+    if now_unix is None:
+        created = int(time.time())
+    else:
+        if type(now_unix) is not int or now_unix < 0:
+            raise ValueError("now_unix must be a non-negative integer")
+        created = now_unix
+    record = ActivationRecord(
         version=ACTIVATION_VERSION,
         production_id=profile.production_id,
         profile_sha256=telemetry_profile_sha256(profile),
@@ -124,9 +161,12 @@ def create_activation_record(
         expires_at_unix=created + ttl_seconds,
         slot_digest_sha256=_slot_digest(preflight),
     )
+    _validate_record_shape(record)
+    return record
 
 
 def write_activation_record(path: str | Path, record: ActivationRecord) -> None:
+    _validate_record_shape(record)
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = (_canonical_json(record.to_dict()) + "\n").encode("utf-8")
@@ -156,14 +196,7 @@ def load_activation_record(path: str | Path) -> ActivationRecord:
         record = ActivationRecord(**document)
     except TypeError as exc:
         raise ValueError("activation record has invalid field types") from exc
-    if type(record.version) is not int or record.version != ACTIVATION_VERSION:
-        raise ValueError(f"unsupported activation version: {record.version!r}")
-    for name in ("production_id", "profile_sha256", "datasource_sha256", "slot_digest_sha256"):
-        if not isinstance(getattr(record, name), str):
-            raise ValueError(f"activation.{name} must be a string")
-    for name in ("created_at_unix", "expires_at_unix"):
-        if type(getattr(record, name)) is not int:
-            raise ValueError(f"activation.{name} must be an integer")
+    _validate_record_shape(record)
     return record
 
 
@@ -175,9 +208,13 @@ def verify_activation_record(
     now_unix: int | None = None,
 ) -> None:
     """Fail closed if a runtime profile/datasource does not match the pinned preflight."""
-    now = int(time.time()) if now_unix is None else int(now_unix)
-    if record.version != ACTIVATION_VERSION:
-        raise ValueError("unsupported activation record version")
+    _validate_record_shape(record)
+    if now_unix is None:
+        now = int(time.time())
+    else:
+        if type(now_unix) is not int or now_unix < 0:
+            raise ValueError("now_unix must be a non-negative integer")
+        now = now_unix
     if record.production_id != profile.production_id:
         raise ValueError("activation production does not match telemetry profile")
     if record.profile_sha256 != telemetry_profile_sha256(profile):
@@ -188,5 +225,3 @@ def verify_activation_record(
         raise ValueError("activation record is not yet valid")
     if now >= record.expires_at_unix:
         raise ValueError("activation record is stale; rerun telemetry preflight")
-    if len(record.slot_digest_sha256) != 64:
-        raise ValueError("activation slot digest is malformed")
