@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from evidence_errors import EvidenceUnavailable
 from onboarding import load_telemetry_profile, preflight_telemetry
 from telemetry import investigation_queries, recovery_queries
 
@@ -111,7 +112,25 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual("missing", result.slots[2].status)
         self.assertEqual(1, len(result.failures))
 
-    def test_ambiguous_or_transport_error_is_reported_per_slot(self):
+    def test_expected_evidence_error_is_redacted_and_remaining_slots_are_checked(self):
+        path = write_config(self.valid_document())
+        self.addCleanup(path.unlink)
+        profile = load_telemetry_profile(path)
+        all_queries = [q for q, _ in investigation_queries(profile).values()]
+        all_queries += [q for q, _ in recovery_queries(profile).values()]
+        secret = "https://user:super-secret@example.invalid/api"
+        client = RecordingClient(
+            values={query: 1.0 for query in all_queries},
+            errors={all_queries[4]: EvidenceUnavailable(f"provider failed at {secret}")},
+        )
+        result = preflight_telemetry(client, profile)
+        self.assertFalse(result.ready)
+        self.assertEqual(8, len(client.calls))
+        self.assertEqual("error", result.slots[4].status)
+        self.assertEqual("evidence source unavailable", result.slots[4].detail)
+        self.assertNotIn("super-secret", json.dumps(result.to_dict()))
+
+    def test_unexpected_programming_error_is_not_downgraded_to_telemetry_unavailability(self):
         path = write_config(self.valid_document())
         self.addCleanup(path.unlink)
         profile = load_telemetry_profile(path)
@@ -119,13 +138,11 @@ class OnboardingTests(unittest.TestCase):
         all_queries += [q for q, _ in recovery_queries(profile).values()]
         client = RecordingClient(
             values={query: 1.0 for query in all_queries},
-            errors={all_queries[4]: RuntimeError("returned 2 series; expected exactly one")},
+            errors={all_queries[1]: AssertionError("broken adapter invariant")},
         )
-        result = preflight_telemetry(client, profile)
-        self.assertFalse(result.ready)
-        self.assertEqual("error", result.slots[4].status)
-        self.assertIn("2 series", result.slots[4].detail)
-        self.assertEqual(8, len(client.calls))
+        with self.assertRaisesRegex(AssertionError, "broken adapter invariant"):
+            preflight_telemetry(client, profile)
+        self.assertEqual(2, len(client.calls))
 
 
 if __name__ == "__main__":
