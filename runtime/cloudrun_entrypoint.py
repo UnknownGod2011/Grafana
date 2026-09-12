@@ -114,7 +114,9 @@ def _checkpoint_object(environ: Mapping[str, str]) -> str:
 
 def _checkpoint_hmac_key(environ: Mapping[str, str]) -> str:
     name = "STAGEGUARD_CHECKPOINT_HMAC_KEY"
-    key = _required(environ, name)
+    key = environ.get(name, "")
+    if not key:
+        raise ValueError(f"required environment variable {name} is not set")
     encoded = key.encode("utf-8")
     if key != key.strip() or any(ord(char) < 32 or ord(char) == 127 for char in key):
         raise ValueError(f"{name} must not contain leading/trailing whitespace or control characters")
