@@ -16,6 +16,7 @@ Core invariants retained:
 - Expected evidence transport/protocol/datasource failures cross runtime boundaries as `EvidenceUnavailable`; provider exception text is diagnostic-only and must not be copied into operator/onboarding results.
 - Unexpected programming/policy exceptions must fail loudly rather than being downgraded to telemetry unavailability.
 - Telemetry onboarding never treats NaN or infinities as successful evidence, and activation independently requires every `ok` slot to contain a finite numeric sample with no error detail.
+- Telemetry activation v2 pins the exact profile-derived phase/name/PromQL contract in deterministic order and hashes the normalized observed samples; arbitrary successful-looking eight-slot preflights cannot be activated.
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
@@ -43,11 +44,88 @@ Core invariants retained:
 - Bounded checkpoint HMAC keys to 32-512 UTF-8 bytes and reject malformed boundary/control characters.
 - Added focused Cloud Run entrypoint and hermetic deploy-script regressions.
 
-### Telemetry mapping and onboarding safety
+### Telemetry mapping, onboarding, and activation safety
 - Enforced independent healthy comparator mappings.
 - Reconciled runtime documentation with the Grafana MCP 1.4.1 baseline and current safety controls.
 - Hardened onboarding to catch only `EvidenceUnavailable`, redact provider detail from operator-visible preflight state, and fail unexpected programming/policy exceptions loudly.
 - Refused NaN/infinite telemetry samples during preflight and independently revalidated finite numeric `ok` samples at the activation boundary.
+- Activation v2 now verifies the exact ordered profile-derived preflight contract and includes normalized observed sample values in the slot digest; legacy v1 activation records are deliberately refused so operators rerun preflight under the stronger contract.
+
+## Run log — 2026-09-12 — exact telemetry activation contract boundary
+
+### Inspected at start
+
+Read this `progress.md` completely before deciding what to change. Inspected repository metadata and reviewed:
+- `runtime/activation.py`
+- `runtime/tests/test_activation.py`
+- `runtime/onboarding.py`
+- `runtime/telemetry.py`
+- `runtime/evidence_errors.py`
+- `README.md` activation/onboarding description
+
+No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, IAM binding, or remediation provider was modified.
+
+### Findings
+
+1. The prior activation boundary validated `ready=True`, exactly eight slots, successful statuses, finite numeric samples, and no error detail, but it did not prove that those eight slots were the semantic queries generated from the telemetry profile.
+2. A caller able to construct `PreflightResult` directly could therefore supply eight arbitrary `phase/name/promql` entries such as `vector(...)`, mark them `ok`, and obtain an activation record for an unrelated real profile as long as the production ID matched.
+3. The activation `slot_digest_sha256` hashed phase/name/PromQL/status but omitted the actual observed sample values, so two successful preflights with different telemetry observations produced the same evidence digest.
+4. Strengthening digest semantics without a schema/version transition would leave existing v1 records accepted under weaker assumptions, so a version bump is the safer fail-closed migration.
+
+### Exact changes made
+
+#### 1. Exact profile-derived activation contract validation
+
+Commit: `f099657b40d914f25f526240262efa3049f22d74`
+
+`runtime/activation.py` now:
+- imports the canonical `investigation_queries()` and `recovery_queries()` builders;
+- derives the exact eight-slot expected contract as ordered `(phase, name, promql)` tuples from the supplied `TelemetryProfile`;
+- requires the supplied successful preflight to match that complete ordered contract before activation;
+- rejects arbitrary queries, renamed slots, wrong phases, omissions/additions, and reordered slots even when every entry claims `status="ok"` with a finite value;
+- normalizes every accepted observed sample through `float(...)` and includes it in `slot_digest_sha256`, binding the activation evidence digest to what the read-only evidence plane actually returned;
+- bumps `ACTIVATION_VERSION` from 1 to 2 so weaker legacy activation records fail closed and require a fresh telemetry preflight.
+
+#### 2. Added activation forgery and migration regressions
+
+Commit: `9c08b776bc51ac7a21540217e979275d0f9ffd53`
+
+`runtime/tests/test_activation.py` now:
+- keeps numeric/non-finite/detail forgery tests aligned with the real profile-derived query contract so each regression reaches the intended validation boundary;
+- rejects eight arbitrary successful-looking `vector(...)` slots;
+- rejects a reversed ordering of otherwise legitimate real preflight slots;
+- proves different observed sample values generate different activation slot digests;
+- verifies activation records use the current version and that a legacy version is rejected at verification;
+- retains profile-change, datasource-change, expiry, round-trip, unactivated-service, and matching-activation coverage.
+
+### Checks / results
+
+- Authenticated GitHub inspection and both code/test writes succeeded.
+- A fresh executable checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`.
+- The runner again failed before checkout with `Could not resolve host: github.com`; therefore `python -m unittest runtime.tests.test_activation -v` could not execute against the committed tree.
+- No GitHub Actions workflow was triggered or rerun merely to bypass the transient runner DNS failure.
+- There is no new green-suite claim for this change yet.
+
+### Decisions
+
+1. Treat the exact semantic telemetry query contract as part of activation authority, not merely the count/status/value shape of preflight output.
+2. Require deterministic slot ordering because the official onboarding path already generates a deterministic eight-slot sequence, and ordering makes the pinned evidence digest stable and reviewable.
+3. Bind observed finite sample values into the digest so an activation record distinguishes materially different successful evidence snapshots.
+4. Bump the activation schema to v2 and intentionally reject v1 instead of silently accepting weaker historical pins; this forces a safe one-time preflight refresh for existing deployments.
+5. Keep Grafana/MCP read-only and make no changes to remediation credentials or write paths.
+6. Continue avoiding noisy GitHub Actions solely to work around the transient checkout DNS failure.
+
+### Blockers / unknowns
+
+- `runtime.tests.test_activation` requires execution from an actual checkout after the v2 change.
+- Existing deployments carrying `stageguard` metric activation v1 files must rerun telemetry preflight to generate v2 records; this is intentional fail-closed migration behavior.
+- `runtime.tests.test_onboarding`, `runtime.tests.test_cloud_run_metrics_acceptance`, `runtime.tests.test_telemetry`, `runtime.tests.test_cloudrun_entrypoint`, and `runtime.tests.test_deploy_cloud_run_script` still need a current repository run.
+- `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins` still need an actual repository run.
+- A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required before calling that dependency baseline production-ready.
+- The strengthened Cloud Run bridge set still needs an executable run.
+- The execution-reconciliation/operator/Playwright safety set still needs a current run.
+- The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Run log — 2026-09-12 — private acceptance job identity boundary
 
@@ -209,4 +287,4 @@ Commit: `db47909d34bcdf1a0b0ce6892d1d8bf8399ff8b8`
 
 ## Single best next step
 
-**When executable checkout is available, run `python -m unittest runtime.tests.test_onboarding runtime.tests.test_activation runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v` first. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**When executable checkout is available, run `python -m unittest runtime.tests.test_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v` first. If clean, update any operator/onboarding documentation that needs an explicit v1→v2 activation refresh note, then run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; finally proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
