@@ -4,33 +4,42 @@ StageGuard keeps its production Cloud Run service authenticated. Prometheus shou
 
 ## Trust model
 
-The bridge is an observability adapter, not a general proxy. It accepts one configured HTTPS StageGuard service origin, obtains a short-lived Google-signed ID token through Application Default Credentials, and performs only `GET /metrics`. Caller headers are never forwarded and the bridge owns the upstream `Authorization` header. The default listener is loopback-only; a non-loopback listener requires explicit opt-in for a trusted private network.
+The bridge is an observability adapter, not a general proxy. It accepts one configured HTTPS StageGuard service origin, obtains a short-lived Google-signed ID token through Application Default Credentials, and performs only `GET /metrics`. Caller headers are never forwarded and the bridge owns the upstream `Authorization` header.
 
-By default the normalized token audience must equal the normalized metrics target origin. A mismatched audience is rejected during client construction, before a token is minted. This prevents a configuration error from silently minting an identity credential intended for one origin and sending it to another. See `docs/cloud-run-metrics-audience-safety.md` for the explicit, narrowly scoped escape hatch for intentionally verified deployments.
+The default listener is loopback-only. A non-loopback listener still requires explicit `--allow-network-bind`; when that is necessary, operators should additionally configure `--bearer-token` or `STAGEGUARD_BRIDGE_BEARER_TOKEN` so `/readyz` and `/metrics` are not anonymously readable on the bound network. `/healthz` remains process-only liveness and does not contact Cloud Run.
 
-Google's current Cloud Run guidance uses an ID token whose audience identifies the receiving service or a configured custom audience. StageGuard follows that model rather than storing a long-lived service-account key or static bearer token in Prometheus configuration.
+Inbound bridge authentication and upstream Cloud Run authentication are intentionally separate credentials. A Prometheus scrape credential is never reused as the Google ID token, and a caller-supplied `Authorization` header is never forwarded upstream.
+
+By default the normalized Google token audience must equal the normalized metrics target origin. A mismatched audience is rejected during client construction, before a token is minted. See `docs/cloud-run-metrics-audience-safety.md` for the explicit escape hatch for intentionally verified deployments.
 
 Official references:
 
 - https://cloud.google.com/run/docs/securing/service-identity
 - https://cloud.google.com/run/docs/authenticating/service-to-service
-- https://cloud.google.com/run/docs/troubleshooting
 - https://cloud.google.com/docs/authentication/token-types
+- https://prometheus.io/docs/prometheus/latest/configuration/configuration/#authorization
 
 ## Credential destination and redirects
 
-The configured service origin is the exact network destination for the bearer credential. The token is installed as an unredirected request header and the production HTTP opener rejects redirects entirely. A routing redirect is treated as observability failure rather than a destination StageGuard should trust automatically.
+The configured Cloud Run service origin is the exact destination for the Google bearer credential. The token is installed as an unredirected request header and the production HTTP opener rejects redirects entirely. A routing redirect is treated as observability failure rather than a destination StageGuard should trust automatically.
 
-These two controls are complementary:
+These controls are complementary:
 
 - audience/target matching prevents silent cross-origin credential delivery before a request starts;
-- redirect rejection prevents a credential from being replayed to a different destination after a request starts.
+- redirect rejection prevents replay to a different destination after a request starts;
+- optional bridge bearer authentication protects the local/private scrape surface when loopback-only binding is impossible.
+
+## Inbound scrape authentication
+
+When `STAGEGUARD_BRIDGE_BEARER_TOKEN` is configured, `/readyz` and `/metrics` require an exact `Authorization: Bearer ...` match. Comparison uses `hmac.compare_digest`. Missing or incorrect credentials receive sanitized HTTP `401` with a Bearer challenge and, importantly, do **not** mint an upstream Cloud Run token or contact the upstream service.
+
+`/healthz` intentionally remains unauthenticated because it is process-only liveness. It neither fetches StageGuard telemetry nor acquires a Google credential.
+
+For Prometheus, configure the bridge credential using its `authorization` stanza. Treat that credential as a normal scrape secret: source it from the deployment secret mechanism, do not commit it, and rotate it independently of Cloud Run IAM.
 
 ## HTTP 200 is not sufficient readiness
 
-A successful HTTP status only proves that *something* answered. It does not prove that the response is a valid StageGuard safety exposition. A proxy can return HTML with status 200, an exporter can fail and emit only comments, a wrong service can be reachable, or a payload can contain ambiguous/non-finite safety samples.
-
-Therefore `CloudRunMetricsClient.fetch()` validates the response body before either `/readyz` or bridge `/metrics` can succeed.
+A successful HTTP status only proves that *something* answered. It does not prove that the response is a valid StageGuard safety exposition. `CloudRunMetricsClient.fetch()` therefore validates the response before either `/readyz` or bridge `/metrics` can succeed.
 
 The required identity/integrity sentinel is:
 
@@ -38,33 +47,19 @@ The required identity/integrity sentinel is:
 stageguard_remediation_execution_deadline_exceeded <0|1>
 ```
 
-The bridge requires exactly one label-free sentinel sample and requires its value to be finite and exactly `0` or `1`. Any labeled sibling series using that same metric name makes the payload ambiguous and is rejected.
-
-Rejected examples include:
-
-```text
-# comment-only response
-
-stageguard_remediation_execution_deadline_exceeded NaN
-stageguard_remediation_execution_deadline_exceeded Inf
-stageguard_remediation_execution_deadline_exceeded 2
-stageguard_remediation_execution_deadline_exceeded{source="spoofed"} 0
-
-# ambiguous duplicate
-stageguard_remediation_execution_deadline_exceeded 0
-stageguard_remediation_execution_deadline_exceeded 1
-```
+The bridge requires exactly one label-free sentinel sample whose value is finite and exactly `0` or `1`. Labeled sibling series, duplicate samples, non-finite values, HTML/login pages, empty expositions, and malformed samples fail closed.
 
 The bridge deliberately does not implement a general Prometheus parser. The sentinel is the minimum identity/integrity contract needed before forwarding the authenticated response; Prometheus remains responsible for parsing the full exposition.
 
 ## Fail-closed behavior
 
-When configuration, ADC, token minting, IAM, network access, redirects, upstream HTTP access, response-size limits, or payload validation fail:
+When configuration, bridge authentication, ADC, token minting, IAM, network access, redirects, upstream HTTP access, response-size limits, or payload validation fail:
 
-- bridge `/readyz` returns sanitized HTTP `503`;
-- bridge `/metrics` returns sanitized HTTP `502`;
+- unauthenticated bridge `/readyz` and `/metrics` return sanitized HTTP `401` when inbound auth is configured;
+- authenticated bridge `/readyz` returns sanitized HTTP `503` when the upstream path fails;
+- authenticated bridge `/metrics` returns sanitized HTTP `502` when the upstream path fails;
 - `/healthz` remains process-only liveness;
-- target URLs, tokens, provider response bodies, ADC exceptions, and IAM details are not returned to callers.
+- target URLs, bridge credentials, Google ID tokens, provider response bodies, ADC exceptions, and IAM details are not returned to callers.
 
 A transport or payload-integrity failure must become scrape/evidence unavailability, not a fabricated remediation-deadline value. Prometheus exposes scrape health through its generated `up` series, while StageGuard's Grafana rules keep scrape health, telemetry freshness, and positive remediation-deadline evidence as separate signals.
 
@@ -74,27 +69,28 @@ The bridge workload identity should receive only the permission required to invo
 
 For workloads on Google Cloud, prefer an attached user-managed service account. For workloads outside Google Cloud, prefer Workload Identity Federation over downloaded long-lived service-account keys.
 
-## Credential-free regression coverage
+## Regression coverage
 
-Focused tests include:
+Focused credential-free tests include:
 
-- `runtime/tests/test_cloud_run_metrics_bridge.py` — target validation, timeout bounds, bridge-owned authorization, liveness/readiness behavior, payload integrity, and sanitized failure responses;
+- `runtime/tests/test_cloud_run_metrics_bridge.py` — target validation, timeout bounds, bridge-owned upstream authorization, liveness/readiness, payload integrity, and sanitized failure responses;
+- `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py` — inbound bearer validation, 401 behavior, zero upstream calls for unauthorized requests, Prometheus auth configuration, and acceptance restart credential continuity;
 - `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py` — sentinel-family ambiguity and labeled-series rejection;
-- `runtime/tests/test_cloud_run_metrics_bridge_redirects.py` — real local redirect isolation requiring the redirect destination to receive zero requests and zero credentials;
-- `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py` — same-origin default, reject-before-token-minting mismatch behavior, and explicit opt-in semantics;
+- `runtime/tests/test_cloud_run_metrics_bridge_redirects.py` — redirect isolation requiring the redirect destination to receive zero credentials;
+- `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py` — same-origin default and reject-before-token-minting mismatch behavior;
 - `runtime/tests/test_cloud_run_metrics_acceptance.py` — disposable acceptance-harness behavior without real credentials or Docker side effects.
 
-## Disposable-project acceptance harness
+## Disposable private-Cloud-Run acceptance
 
-`runtime/cloud_run_metrics_acceptance.py` validates an already provisioned private StageGuard Cloud Run service. It is intentionally opt-in and is not wired into CI.
+`runtime/cloud_run_metrics_acceptance.py` validates an already provisioned private StageGuard Cloud Run service. It is opt-in and not wired into CI.
 
 Prerequisites:
 
 1. A StageGuard Cloud Run service with unauthenticated invocation disabled.
-2. Local ADC that can mint an ID token and invoke the service using a least-privilege grant, normally service-level `roles/run.invoker`.
-3. A target URL and configured Cloud Run audience that intentionally match. For custom-domain deployments, prefer configuring a Cloud Run custom audience matching that domain.
+2. Local ADC that can mint an ID token and invoke the service with least-privilege `roles/run.invoker`.
+3. A target URL and configured audience that intentionally match.
 4. `google-auth` installed.
-5. Docker installed and running; the harness starts only a disposable Prometheus container.
+5. Docker installed and running.
 6. StageGuard `/metrics` exposes the canonical deadline sentinel.
 
 Run from the repository root:
@@ -104,30 +100,25 @@ export STAGEGUARD_METRICS_TARGET='https://YOUR-SERVICE-URL'
 python runtime/cloud_run_metrics_acceptance.py
 ```
 
-The default disposable image is pinned to `prom/prometheus:v3.13.3`. Override it explicitly only when testing another approved Prometheus build:
-
-```bash
-STAGEGUARD_ACCEPTANCE_PROMETHEUS_IMAGE='prom/prometheus:YOUR_VERSION' \
-  python runtime/cloud_run_metrics_acceptance.py
-```
+For each run the harness creates a fresh high-entropy **local bridge bearer credential**. It exists only in memory and in the temporary read-only Prometheus config. The harness never prints it and deletes the temporary config when the acceptance block exits. This local credential is not the Google Cloud Run ID token and cannot be used to invoke Cloud Run.
 
 A passing run proves, in order:
 
-1. anonymous `GET /metrics` receives HTTP `401` or `403`;
+1. anonymous Cloud Run `GET /metrics` receives HTTP `401` or `403`;
 2. ADC can mint an ID token for the configured target audience;
 3. that identity can invoke private Cloud Run `/metrics`;
 4. the returned payload passes StageGuard sentinel validation;
-5. bridge `/readyz` succeeds using the same authenticated path;
-6. bridge `/metrics` forwards only the validated exposition;
-7. disposable Prometheus observes exactly one `up{job="stageguard-cloud-run-acceptance"} == 1` target;
+5. the non-loopback local bridge requires its ephemeral bearer credential for `/readyz` and `/metrics`;
+6. disposable Prometheus authenticates to that bridge without receiving the Cloud Run ID token;
+7. Prometheus observes exactly one `up{job="stageguard-cloud-run-acceptance"} == 1` target;
 8. stopping only the local bridge causes exactly `up == 0`;
-9. while the bridge is down, the same authenticated production client still fetches and validates private Cloud Run `/metrics`;
-10. restarting the bridge on the same port restores exactly `up == 1`.
+9. while the bridge is down, the same authenticated production client still validates private Cloud Run `/metrics`;
+10. restarting the bridge on the same port with the same ephemeral scrape credential restores exactly `up == 1`.
 
-The harness never creates or changes IAM bindings, deploys or modifies Cloud Run, changes ingress/public access, prints or persists ID tokens, writes bearer tokens into Prometheus configuration, calls lifecycle/remediation endpoints, starts GitHub Actions, or intentionally leaves the disposable Prometheus container running.
+The harness never creates or changes IAM bindings, deploys or modifies Cloud Run, changes ingress/public access, prints Cloud Run or bridge credentials, calls lifecycle/remediation endpoints, starts GitHub Actions, or intentionally leaves the disposable Prometheus container running.
 
 ### Interpreting failures
 
-The command avoids printing token values, upstream response bodies, ADC exception messages, or provider-error text. Expected failures are summarized by acceptance stage; unexpected exceptions report only the exception class.
+The command avoids printing credential values, upstream response bodies, ADC exception messages, or provider-error text. Expected failures are summarized by acceptance stage; unexpected exceptions report only the exception class.
 
 A failure is an observability-path failure, not evidence that a remediation deadline was exceeded. Restore the private metrics path and rerun acceptance; do not bypass the bridge by making StageGuard public or weakening the audience/redirect boundaries.
