@@ -63,9 +63,46 @@ class CloudRunMetricsAcceptanceTests(unittest.TestCase):
                     with self.assertRaises(acceptance.AcceptanceError):
                         acceptance.verify_unauthorized_upstream("https://stageguard.example/metrics", 2)
 
+    def test_prometheus_job_name_is_bounded_and_selector_safe(self) -> None:
+        valid = (
+            acceptance.DEFAULT_JOB_NAME,
+            "stageguard.acceptance_v2",
+            "stageguard:acceptance-01",
+            "A" * acceptance.MAX_JOB_NAME_LENGTH,
+        )
+        for value in valid:
+            with self.subTest(value=value):
+                self.assertEqual(acceptance.normalize_job_name(value), value)
+
+        invalid = (
+            "",
+            " stageguard",
+            "stageguard ",
+            "stageguard acceptance",
+            'stageguard"} or on() vector(1) #',
+            "stageguard\nextra",
+            "_stageguard",
+            "A" * (acceptance.MAX_JOB_NAME_LENGTH + 1),
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(acceptance.AcceptanceError):
+                    acceptance.normalize_job_name(value)
+
+    def test_invalid_job_name_fails_before_network_or_docker(self) -> None:
+        with mock.patch.object(acceptance, "verify_unauthorized_upstream") as upstream:
+            with mock.patch.object(acceptance, "_docker_available") as docker:
+                with self.assertRaises(acceptance.AcceptanceError):
+                    acceptance.run_acceptance(
+                        "https://stageguard.example",
+                        job_name='stageguard"} or on() vector(1) #',
+                    )
+        upstream.assert_not_called()
+        docker.assert_not_called()
+
     def test_prometheus_config_scrapes_only_local_bridge(self) -> None:
         config = acceptance._prometheus_config(49123, acceptance.DEFAULT_JOB_NAME)
-        self.assertIn("job_name: 'stageguard-cloud-run-acceptance'", config)
+        self.assertIn('job_name: "stageguard-cloud-run-acceptance"', config)
         self.assertIn("host.docker.internal:49123", config)
         self.assertNotIn("stageguard.example", config)
         self.assertNotIn("Authorization", config)
