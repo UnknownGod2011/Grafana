@@ -133,6 +133,9 @@ class StdioClient:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(timeout=5)
+        self._stdout_thread.join(timeout=1)
+        if self.proc.stdout:
+            self.proc.stdout.close()
 
 
 def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
