@@ -107,10 +107,25 @@ class StdioClient:
                 raise McpError(f"MCP process exited before {method} response (exit={code})")
             try:
                 message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as exc:
+                raise McpError(
+                    "MCP stdio stdout contained non-JSON data; stdout is reserved for JSON-RPC"
+                ) from exc
+            if not isinstance(message, dict):
+                raise McpError("MCP stdio stdout contained a non-object JSON-RPC message")
+            if message.get("jsonrpc") != "2.0":
+                raise McpError("MCP stdio message did not declare jsonrpc=2.0")
+
+            # Notifications are valid while a request is outstanding and have no id.
+            if "id" not in message:
+                if isinstance(message.get("method"), str):
+                    continue
+                raise McpError("MCP stdio message had neither a response id nor notification method")
+
             if message.get("id") != request_id:
-                continue
+                raise McpError(
+                    f"MCP returned unexpected response id while waiting for {method}"
+                )
             if "error" in message:
                 raise McpError(f"{method} failed: {message['error']}")
             result = message.get("result")
