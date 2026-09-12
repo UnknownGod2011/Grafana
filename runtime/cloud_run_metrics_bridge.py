@@ -9,10 +9,10 @@ redirects, and never logs tokens or upstream error bodies.
 An optional *inbound* bearer token can protect /readyz and /metrics when the
 bridge is loopback-only. If the bridge binds beyond loopback (for example, so
 Prometheus in Docker can scrape the host), inbound bearer authentication is
-mandatory in addition to explicit network-bind opt-in. This token is
-independent from the Google ID token: callers never receive or control the
-upstream credential. /healthz remains process-only liveness and does not mint
-an upstream token.
+mandatory in addition to explicit network-bind opt-in and the credential must
+be at least 32 ASCII token characters. This token is independent from the
+Google ID token: callers never receive or control the upstream credential.
+/healthz remains process-only liveness and does not mint an upstream token.
 
 A successful upstream HTTP response is not sufficient evidence that the bridge
 reached StageGuard. Every accepted payload must contain exactly one finite,
@@ -26,6 +26,7 @@ import hmac
 import ipaddress
 import math
 import os
+import re
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,8 @@ from urllib.parse import urlsplit, urlunsplit
 MAX_METRICS_BYTES = 2 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 10.0
 SAFETY_SENTINEL_METRIC = b"stageguard_remediation_execution_deadline_exceeded"
+MIN_NETWORK_BEARER_TOKEN_LENGTH = 32
+_BEARER_TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/-]+=*\Z")
 
 
 class BridgeConfigurationError(ValueError):
@@ -98,8 +101,8 @@ def normalize_bridge_bearer_token(value: str | None) -> str | None:
         return None
     if not isinstance(value, str) or not value or value != value.strip():
         raise BridgeConfigurationError("bridge bearer token must be a non-empty trimmed string")
-    if "\r" in value or "\n" in value:
-        raise BridgeConfigurationError("bridge bearer token must not contain line breaks")
+    if _BEARER_TOKEN_RE.fullmatch(value) is None:
+        raise BridgeConfigurationError("bridge bearer token must use the HTTP bearer token character set")
     return value
 
 
@@ -287,6 +290,10 @@ def make_server(
     normalized_token = normalize_bridge_bearer_token(bearer_token)
     if not is_loopback and normalized_token is None:
         raise BridgeConfigurationError("non-loopback metrics bridge bind requires inbound bearer authentication")
+    if not is_loopback and len(normalized_token) < MIN_NETWORK_BEARER_TOKEN_LENGTH:
+        raise BridgeConfigurationError(
+            f"non-loopback metrics bridge bearer token must be at least {MIN_NETWORK_BEARER_TOKEN_LENGTH} characters"
+        )
     handler = type(
         "ConfiguredMetricsBridgeHandler",
         (MetricsBridgeHandler,),
@@ -306,7 +313,10 @@ def main() -> int:
     parser.add_argument(
         "--bearer-token",
         default=os.environ.get("STAGEGUARD_BRIDGE_BEARER_TOKEN"),
-        help="inbound bearer token protecting /readyz and /metrics; required for non-loopback binds",
+        help=(
+            "inbound bearer token protecting /readyz and /metrics; required for non-loopback binds "
+            f"and must be at least {MIN_NETWORK_BEARER_TOKEN_LENGTH} token characters there"
+        ),
     )
     parser.add_argument(
         "--allow-cross-origin-audience",
