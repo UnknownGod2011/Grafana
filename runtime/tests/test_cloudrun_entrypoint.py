@@ -27,12 +27,17 @@ class CloudRunEntrypointTests(unittest.TestCase):
         self.assertNotIn("--enable-production-remediation", argv)
 
     def test_remediation_execution_watchdog_is_configurable_and_bounded(self) -> None:
-        env = self._env()
-        env["STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"] = "17.5"
-        argv = build_bootstrap_argv(env)
-        self.assertEqual(argv[argv.index("--remediation-execution-max-seconds") + 1], "17.5")
+        for value in ("1", "17.5", "600"):
+            with self.subTest(value=value):
+                env = self._env()
+                env["STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"] = value
+                argv = build_bootstrap_argv(env)
+                self.assertEqual(
+                    argv[argv.index("--remediation-execution-max-seconds") + 1],
+                    str(float(value)),
+                )
 
-        for value in ("", "0", "-1", "nan", "inf", "-inf", "not-a-number"):
+        for value in ("", "0", "0.999", "600.001", "601", "-1", "nan", "inf", "-inf", "not-a-number"):
             with self.subTest(value=value):
                 env = self._env()
                 env["STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS"] = value
@@ -42,14 +47,22 @@ class CloudRunEntrypointTests(unittest.TestCase):
                 ):
                     build_bootstrap_argv(env)
 
-    def test_checkpoint_bucket_requires_strong_hmac_secret_and_enables_gcs(self) -> None:
+    def test_checkpoint_bucket_requires_bounded_hmac_secret_and_enables_gcs(self) -> None:
         env = self._env()
         env["STAGEGUARD_CHECKPOINT_BUCKET"] = "stageguard-state-prod"
         with self.assertRaisesRegex(ValueError, "STAGEGUARD_CHECKPOINT_HMAC_KEY"):
             build_bootstrap_argv(env)
         env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "short"
-        with self.assertRaisesRegex(ValueError, "at least 32 bytes"):
+        with self.assertRaisesRegex(ValueError, "between 32 and 512 UTF-8 bytes"):
             build_bootstrap_argv(env)
+        env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 513
+        with self.assertRaisesRegex(ValueError, "between 32 and 512 UTF-8 bytes"):
+            build_bootstrap_argv(env)
+        for value in (("k" * 32) + " ", " " + ("k" * 32), ("k" * 16) + "\n" + ("k" * 16)):
+            with self.subTest(value=repr(value)):
+                env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = value
+                with self.assertRaisesRegex(ValueError, "whitespace or control characters"):
+                    build_bootstrap_argv(env)
         env["STAGEGUARD_CHECKPOINT_HMAC_KEY"] = "k" * 32
         env["STAGEGUARD_CHECKPOINT_OBJECT"] = "prod/current.json"
         argv = build_bootstrap_argv(env)
