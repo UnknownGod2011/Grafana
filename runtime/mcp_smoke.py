@@ -16,6 +16,7 @@ from typing import Any
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_REQUEST_TIMEOUT_SECONDS = 120.0
+MAX_STDIO_LINE_CHARS = 1_048_576
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -57,7 +58,7 @@ class StdioClient:
             bufsize=1,
         )
         self._next_id = 1
-        self._stdout_queue: queue.Queue[str | None] = queue.Queue()
+        self._stdout_queue: queue.Queue[str | McpError | None] = queue.Queue()
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
             name="stageguard-mcp-stdout",
@@ -71,7 +72,21 @@ class StdioClient:
             self._stdout_queue.put(None)
             return
         try:
-            for line in stdout:
+            while True:
+                # readline(size) caps memory consumed by one newline-delimited protocol
+                # frame. Without a size bound, a broken or compromised subprocess can
+                # force the client to buffer an arbitrarily large line before the
+                # request timeout is able to protect the caller.
+                line = stdout.readline(MAX_STDIO_LINE_CHARS + 1)
+                if not line:
+                    break
+                if len(line) > MAX_STDIO_LINE_CHARS:
+                    self._stdout_queue.put(
+                        McpError(
+                            "MCP stdio response exceeded the maximum allowed JSON-RPC frame size"
+                        )
+                    )
+                    return
                 self._stdout_queue.put(line)
         finally:
             self._stdout_queue.put(None)
@@ -102,6 +117,8 @@ class StdioClient:
                 raise McpError(
                     f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response"
                 ) from exc
+            if isinstance(line, McpError):
+                raise line
             if line is None:
                 code = self.proc.poll()
                 raise McpError(f"MCP process exited before {method} response (exit={code})")
