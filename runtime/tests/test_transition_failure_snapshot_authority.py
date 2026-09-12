@@ -1,8 +1,9 @@
 import unittest
 
+from api import _lifecycle_view
 from execution_safety import ExecutionSafeIncidentService
 from incident_service import IncidentService, MemoryAuditLog
-from remediation import ActionResult
+from remediation import ActionResult, remediation_operation_id
 
 
 class SequenceMetrics:
@@ -130,6 +131,7 @@ class TransitionFailureSnapshotAuthorityTests(unittest.TestCase):
             revision=investigated.revision,
             approved_by="operator@example.com",
         )
+        expected_reference = remediation_operation_id(approved.report, approved.approval)
 
         with self.assertRaisesRegex(RuntimeError, "simulated checkpoint storage failure"):
             service.execute_approved(actor="operator@example.com")
@@ -141,10 +143,21 @@ class TransitionFailureSnapshotAuthorityTests(unittest.TestCase):
         self.assertIsNone(store.current.outcome)
         self.assertEqual(1, len(remediation.calls), "provider action must be dispatched at most once")
         self.assertEqual("failed", service.audit_integrity_state())
+        self.assertEqual("execution_uncertain", service.checkpoint_state())
         self.assertEqual("reloaded", service.execution_reconciliation_state())
+        self.assertEqual(expected_reference, service.execution_reconciliation_reference())
+
+        view = _lifecycle_view(service, current)
+        self.assertEqual("execution_uncertain_audit_failed", view["safety_state"])
+        self.assertEqual("execution_uncertain", view["checkpoint_state"])
+        self.assertEqual("failed", view["audit_integrity"])
+        self.assertEqual("reloaded", view["execution_reconciliation_state"])
+        self.assertEqual(expected_reference, view["execution_reconciliation_reference"])
+
         with self.assertRaisesRegex(RuntimeError, "uncertain"):
             service.execute_approved(actor="operator@example.com")
         self.assertEqual(1, len(remediation.calls), "uncertain execution must never replay the provider action")
+        self.assertEqual(expected_reference, service.execution_reconciliation_reference())
         with self.assertRaisesRegex(RuntimeError, "timeline is unavailable"):
             service.audit_timeline(incident_id=approved.incident_id)
 
