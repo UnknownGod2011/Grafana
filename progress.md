@@ -16,19 +16,7 @@ Core invariants retained:
 - Browser/API surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
-- A metrics bridge bound beyond loopback requires explicit network-bind opt-in and inbound bearer authentication; loopback-only binds may remain unauthenticated for local development.
-
-## Recent hardening retained
-
-- `ExecutionSafeIncidentService` prioritizes execution uncertainty once provider dispatch may have occurred.
-- Authenticated lifecycle responses expose bounded composite safety state and, only when appropriate, strict `sg-<40 lowercase hex>` reconciliation references.
-- `/readyz`, Prometheus, and the operator console consistently expose no-replay state without exporting high-cardinality reconciliation identifiers through metrics.
-- `execution_uncertain_audit_failed` renders `DO NOT REPLAY REMEDIATION` and disables lifecycle mutation controls.
-- Base and anchored checkpoint-backed transition failures restore the last committed snapshot and keep append-before-persistence residue out of committed operator history.
-- Authenticated evidence-unavailable briefing/approval/execution bypass attempts fail closed with no Gemini or remediation side effects.
-- The Cloud Run metrics bridge rejects ID-token-bearing redirects, validates target/audience boundaries, validates an unambiguous StageGuard sentinel, and separates inbound scrape authentication from the upstream Cloud Run ID token.
-- Non-loopback metrics bridge listeners now fail closed unless both `--allow-network-bind` and a valid inbound bearer credential are present.
-- The disposable private-Cloud-Run acceptance harness generates one fresh local scrape credential per run so its required `0.0.0.0` Docker-reachable bridge is never anonymously readable.
+- A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
 
 ## Retained validation baseline
 
@@ -39,82 +27,84 @@ Core invariants retained:
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
 - Baseline incident flow: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
 
-## Prior 2026-09-12 safety work retained
+## Recent retained hardening
 
-- Added composite lifecycle safety states and bounded reconciliation references.
-- Aligned the dedicated remediation-uncertainty Prometheus gauge with all non-clear reconciliation barriers.
-- Added operator `DO NOT REPLAY` interlocks and real-browser acceptance coverage for post-provider persistence uncertainty.
-- Added base/anchored snapshot-authority regressions so failed persistence cannot publish uncommitted investigation, approval, or outcome state.
-- Added evidence-unavailable lifecycle and authenticated bypass regressions.
-- Added Cloud Run metrics audience, redirect, sentinel-family, bridge, and disposable `up: 1 -> 0 -> 1` acceptance scaffolding.
-- Added separate inbound bearer authentication for the local/private metrics bridge and ephemeral Prometheus scrape credentials in the disposable acceptance harness.
+- Composite lifecycle safety states and bounded `sg-<40 lowercase hex>` reconciliation references.
+- Operator `DO NOT REPLAY REMEDIATION` interlocks and browser acceptance coverage for post-provider persistence uncertainty.
+- Base/anchored snapshot-authority regressions preventing failed persistence from publishing uncommitted investigation, approval, or outcome state.
+- Evidence-unavailable lifecycle and authenticated bypass regressions.
+- Cloud Run metrics audience, redirect, sentinel-family, authenticated bridge, and disposable `up: 1 -> 0 -> 1` acceptance scaffolding.
+- Separate inbound scrape credentials from upstream Google ID tokens.
+- Non-loopback bridge listeners fail closed without explicit network binding plus inbound authentication.
 
-## Run log — 2026-09-12 — mandatory authentication for non-loopback metrics bridge binds
+## Run log — 2026-09-12 — strong non-loopback bridge bearer credentials
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Inspected:
 - `runtime/cloud_run_metrics_bridge.py`;
-- `runtime/cloud_run_metrics_acceptance.py` including `_start_bridge()` and the disposable restart flow;
-- `runtime/tests/test_cloud_run_metrics_bridge.py`;
+- `runtime/cloud_run_metrics_acceptance.py`;
 - `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py`;
-- `docs/cloud-run-metrics-bridge-safety.md`.
+- `docs/cloud-run-metrics-bridge-safety.md`;
+- recent repository commit diffs after each write.
 
-Direct authenticated GitHub repository access was available and all writes were limited to `UnknownGod2011/grafana`. No unrelated repository or external infrastructure was touched.
+Direct authenticated GitHub repository access was available and every write was limited to `UnknownGod2011/Grafana`. No unrelated repository or external infrastructure was touched.
 
 ### Finding
 
-The previous run added optional inbound bearer authentication and made the disposable acceptance harness use it. However, the production `make_server()` contract still allowed this configuration:
+The previous run correctly made authentication mandatory for non-loopback bridge listeners, but the credential boundary still accepted values such as a one-character token or header-ambiguous strings. That left two avoidable production risks:
 
-`host=0.0.0.0`, `allow_network_bind=True`, `bearer_token=None`.
+1. an operator could expose a network-reachable bridge with an obviously weak shared secret while satisfying the nominal authentication requirement;
+2. internal whitespace, Unicode, separators, or other malformed values could survive configuration and fail later at HTTP-header handling rather than being rejected before listener construction.
 
-That meant an operator could explicitly enable a non-loopback listener yet accidentally expose `/readyz` and `/metrics` anonymously. The documentation recommended bearer protection, but the production boundary did not enforce it. Since the bridge exists specifically to protect a private authenticated StageGuard metrics path, relying on operator memory at the network exposure boundary was unnecessarily weak.
+The disposable acceptance harness already generates a strong `secrets.token_urlsafe(32)` credential, so tightening the production boundary is compatible with the intended private Cloud Run acceptance path.
 
 ### Exact changes made
 
-#### 1. Fail closed on unauthenticated non-loopback bridge listeners
+#### 1. Hardened bridge bearer-token normalization
 
 Updated `runtime/cloud_run_metrics_bridge.py`.
 
-- `make_server()` now determines whether the requested host is loopback before constructing the server.
-- Non-loopback binds require the existing explicit `allow_network_bind=True` opt-in.
-- After bearer normalization, non-loopback binds additionally require a non-`None` inbound bearer credential.
-- Missing authentication raises `BridgeConfigurationError` before `ThreadingHTTPServer` is created, so an anonymous listener is never opened.
-- Loopback-only binds retain backward-compatible optional bearer authentication for local development.
-- Updated module and CLI help text to make the mandatory non-loopback requirement explicit.
+- Added an explicit ASCII bearer/token68-style character-set validator.
+- Allowed characters are letters, digits, `.`, `_`, `~`, `+`, `/`, `-`, with optional trailing `=` padding.
+- Whitespace, CR/LF, commas, Unicode, and other header-ambiguous values now fail configuration before listener creation.
+- Added `MIN_NETWORK_BEARER_TOKEN_LENGTH = 32`.
+- Non-loopback listeners now require a normalized inbound bearer of at least 32 characters in addition to the existing `--allow-network-bind` opt-in and authentication requirement.
+- Loopback-only development retains optional authentication and may still use shorter valid local credentials.
+- CLI help/module documentation now states the non-loopback minimum explicitly.
 
-Commit: `44e1663149dfa0843a4d13d5cdbd1bba428e61f2`.
+Commit: `3e9b119f6e2db5278e68650507df49be19f9f61b`.
 
-#### 2. Added explicit non-loopback auth regression
+#### 2. Strengthened inbound-auth regression coverage
 
 Updated `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py`.
 
-The new regression requires:
-- non-loopback bind without network opt-in to fail;
-- non-loopback bind with opt-in but no bearer credential to fail;
-- non-loopback bind with both opt-in and a valid bearer credential to reach server construction;
-- the configured handler to receive exactly that inbound credential.
+Coverage now requires:
+- malformed/ambiguous bearer values to fail normalization;
+- a 31-character credential to fail on `0.0.0.0` even with network-bind opt-in;
+- a strong credential to reach server construction;
+- loopback to retain backward-compatible short local credentials;
+- authenticated `/metrics` behavior, zero upstream calls for unauthorized requests, Prometheus credential separation, and same-token acceptance restart behavior to remain covered.
 
-The successful construction branch mocks `ThreadingHTTPServer`, avoiding a real wildcard listener in the regression itself.
-
-Commit: `d8f3799a4f5f8cfdcb04d6fdd866fe93a6b36efd`.
+Commit: `a8b3b42bc9f579021f2462c6dcb5669d3f745248`.
 
 #### 3. Updated bridge safety documentation
 
 Updated `docs/cloud-run-metrics-bridge-safety.md`.
 
-- Changed non-loopback authentication from a recommendation to an enforced invariant.
-- Documented that `make_server()` rejects an unauthenticated network bind before listener creation.
-- Clarified that loopback remains the only mode where inbound auth is optional.
-- Updated fail-closed behavior and regression-coverage sections accordingly.
+- Documented the enforced three-part non-loopback boundary: explicit bind opt-in, inbound authentication, and a minimum 32-character credential.
+- Documented accepted token syntax and rejection of ambiguous values.
+- Clarified that minimum length is only a guardrail and production secrets should still be randomly generated.
+- Documented `secrets.token_urlsafe(32)` as the acceptance harness pattern.
+- Retained the separate inbound-scrape vs upstream Google-ID-token trust model, redirect rejection, audience matching, sentinel validation, and least-privilege guidance.
 
-Commit: `80bd44dc024e26fc4d71c4253ac3450d458b522f`.
+Commit: `1d7eb1094a875526676e39f4efc05f07c52b82ee`.
 
 ### Checks / results
 
-- Re-read the production construction path and confirmed bearer normalization occurs before server creation and the new non-loopback/no-token rejection precedes `ThreadingHTTPServer(...)`.
-- Confirmed the disposable Cloud Run acceptance already supplies the same generated bearer credential to both initial and restarted `0.0.0.0` bridge instances, so the stronger invariant is compatible with that path in source.
-- Confirmed loopback `make_server()` calls in existing bridge tests remain valid because authentication is still optional there.
+- Re-read the committed production diff and confirmed token normalization and minimum-length enforcement occur before `ThreadingHTTPServer(...)` construction.
+- Re-read the committed regression diff and confirmed it covers malformed token syntax, the 31-character network failure boundary, strong-token construction, and loopback compatibility.
+- Confirmed the disposable acceptance harness still generates `secrets.token_urlsafe(32)`, which comfortably satisfies the new minimum and accepted character set.
 - Attempted a fresh local checkout and the focused six-module bridge suite:
   - `tests.test_cloud_run_metrics_bridge_inbound_auth`
   - `tests.test_cloud_run_metrics_bridge`
@@ -122,7 +112,7 @@ Commit: `80bd44dc024e26fc4d71c4253ac3450d458b522f`.
   - `tests.test_cloud_run_metrics_bridge_audience_boundary`
   - `tests.test_cloud_run_metrics_bridge_redirects`
   - `tests.test_cloud_run_metrics_bridge_sentinel_family`
-- The execution environment again failed before checkout with `Could not resolve host: github.com`.
+- The execution environment still failed before checkout with `Could not resolve host: github.com`.
 - No GitHub Actions workflow was created, modified, triggered, or rerun as a workaround.
 - No GCP/IAM/Cloud Run, Grafana Cloud, Gemini provider, remediation provider, incident, audit store, or other external runtime resource was changed.
 
@@ -130,15 +120,16 @@ No new green test-suite, Docker, or live Cloud Run acceptance claim is made.
 
 ### Decisions
 
-1. Treat non-loopback binding as a security boundary, not merely an operator convenience: explicit bind opt-in is necessary but no longer sufficient without inbound authentication.
-2. Preserve simple unauthenticated loopback development because it does not widen network exposure and existing local workflows depend on it.
-3. Keep `/healthz` process-only and unauthenticated; it does not access telemetry, mint a Cloud Run token, or disclose upstream state.
-4. Keep inbound scrape credentials and upstream Google ID tokens in separate trust domains.
-5. Avoid noisy CI solely to work around the transient checkout/DNS failure.
+1. Treat network-reachable scrape authentication as a credential-quality boundary, not merely a non-empty-string check.
+2. Reject malformed bearer/header values at configuration time rather than allowing them to fail later in request handling.
+3. Use 32 characters as a minimum guardrail while explicitly avoiding claims that length alone proves entropy.
+4. Preserve lightweight loopback development behavior because it does not widen network exposure.
+5. Keep inbound scrape credentials and upstream Google ID tokens in separate trust domains.
+6. Avoid noisy CI solely to work around the transient checkout/DNS failure.
 
 ### Blockers / unknowns
 
-- The strengthened inbound-auth regression and the focused six-module Cloud Run bridge suite still need an executable run.
+- The strengthened inbound-auth regression and focused six-module Cloud Run bridge suite still need an executable run.
 - The execution-reconciliation/operator/Playwright safety set from previous runs still needs a current run.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
