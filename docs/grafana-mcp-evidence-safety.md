@@ -37,6 +37,14 @@ A missing annotation is treated the same as `readOnlyHint=false`: the smoke fail
 
 The stdio protocol path is bounded as well. Every JSON-RPC request has a 15-second timeout by default, configurable with `STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS` to a positive finite value no greater than 120 seconds. A subprocess that starts but never answers `initialize`, `tools/list`, or `tools/call` therefore fails the smoke instead of hanging a release or operator workflow indefinitely. Invalid timeout configuration fails before the MCP subprocess is trusted. The subprocess is terminated and, if necessary, killed during cleanup so timeout failures do not leave a stranded smoke container.
 
+In addition, each newline-delimited stdout frame is capped at `1,048,576` characters before JSON parsing. This closes a separate resource-exhaustion path: a broken or compromised MCP subprocess cannot force the smoke client to buffer an unbounded stdout line while the request timer is still running. Oversized frames fail closed and cleanup terminates the subprocess if it remains blocked on the pipe. This follows the same defensive shape used by current official MCP SDK transports, which expose bounded line/frame options such as `maxLineBytes` / `max_line_bytes`:
+
+- https://php.sdk.modelcontextprotocol.io/run/stdio/
+- https://ruby.sdk.modelcontextprotocol.io/server/transports/
+- https://go.sdk.modelcontextprotocol.io/protocol/ (stdio is newline-delimited JSON over stdin/stdout)
+
+The StageGuard limit is deliberately fixed for the release smoke rather than exposed as a permissive environment override. Normal `initialize`, `tools/list`, and the bounded single-series Prometheus smoke result should remain far below it; if the upstream server genuinely needs larger protocol frames for this acceptance path, that change should be reviewed explicitly rather than silently increasing the trust boundary.
+
 This runtime assertion is defense in depth. Server-side `--disable-write`, `--disable-proxied`, the narrow enabled categories, and least-privilege Grafana credentials remain required and are not replaced by MCP annotations.
 
 Upstream's contribution guidance explicitly requires write tools to respect `--disable-write`, and the official configuration documents `--enable-write-tools` as the mechanism for selectively re-enabling individual tools. StageGuard does not use that escape hatch.
@@ -105,6 +113,7 @@ Any change to the MCP adapters or investigator should retain tests for:
 - read-only tool discovery;
 - live smoke rejection of malformed/duplicate tool discovery and any advertised tool lacking `readOnlyHint=true`;
 - bounded MCP request timeouts and cleanup when a subprocess becomes silent;
+- bounded MCP stdout frames and fail-closed rejection before oversized data reaches JSON parsing;
 - datasource/query input validation;
 - Loki result bounds and truncation semantics;
 - structured/sanitized evidence-unavailable abstention;
