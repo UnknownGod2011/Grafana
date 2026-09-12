@@ -186,7 +186,7 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("provider_url", js)
         self.assertIn("execution_reconciliation_reference", js)
         self.assertIn("/^sg-[0-9a-f]{40}$/", js)
-        self.assertIn("?'Unavailable'", html)
+        self.assertIn(">Unavailable<", html)
         self.assertIn("/v1/checkpoint/reload',{method:'POST',body:{}}", js)
         self.assertIn("/v1/execution/reconcile',{method:'POST',body:{}}", js)
 
