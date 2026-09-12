@@ -172,3 +172,108 @@ No green repository-suite claim is made for this run.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest checkpoint/acceptance hardening.
 - Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
 - Incident flow baseline: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
+
+## Run log — 2026-09-12 — operator no-replay safety interlock
+
+### Inspected at start
+
+Read this file completely before changing the repository. Inspected the current repository head and tree, then focused on:
+- `runtime/operator_console.py` and its existing checkpoint, audit-integrity, evidence-unavailable, approval, execution, timeline, and proof-layer behavior;
+- `runtime/tests/test_operator_console.py`;
+- `runtime/tests/test_operator_integrity_policy.py`;
+- `runtime/tests/test_operator_browser_evidence_unavailable.py` to preserve the existing real-browser abstention contract;
+- `runtime/api.py` lifecycle serialization and authenticated console asset routing;
+- `OPERATOR_CONSOLE.md`.
+
+The repository was modified only under `UnknownGod2011/Grafana`.
+
+### Finding
+
+The API now exposes the correct composite `safety_state` and a strictly bounded authenticated `execution_reconciliation_reference`, but the operator console still reasoned mainly from the older checkpoint/audit fields. That left the highest-risk dual state — `execution_uncertain_audit_failed` — without a single unmistakable browser instruction. An operator needed one explicit safety contract: the provider may already have acted, the durable write is not trusted, and remediation must not be replayed.
+
+### Exact changes made
+
+#### 1. Added a high-severity authenticated no-replay interlock
+
+Updated `runtime/operator_console.py` so the console consumes:
+- `safety_state`;
+- `execution_reconciliation_reference`.
+
+The console recognizes only the fixed lifecycle enum and treats an unknown safety state as `audit_integrity_failed` rather than optimistic `ok`.
+
+For `execution_uncertain` and especially `execution_uncertain_audit_failed`, it renders a prominent `DO NOT REPLAY REMEDIATION` safety panel. The dual state explicitly tells the operator that provider dispatch may already have occurred while the audit/checkpoint transition is untrusted.
+
+The reconciliation reference is accepted only when it matches `^sg-[0-9a-f]{40}$`; malformed or arbitrary values render as unavailable. Provider URLs, raw provider operation identifiers, credentials, and arbitrary metadata are not accepted by the browser contract.
+
+The composite safety state is now an independent lifecycle block in addition to checkpoint and audit policy state. Investigation, Gemini briefing, approval input, approval, and execution remain disabled while the composite state is non-`ok`.
+
+The top proof/status surface also elevates `execution_uncertain_audit_failed` to `DO NOT REPLAY` instead of allowing an approval/recovery-looking state to dominate.
+
+Primary implementation commit:
+- `b4b0efb22a7ecf3995b4107e96d60c5a7bcd22cd` — surface no-replay lifecycle safety in operator console.
+
+The console was subsequently reviewed against the prior proof-layer behavior before the final branch state was selected; no unrelated repository was touched and no external resource was mutated.
+
+#### 2. Updated operator regressions for the composite contract
+
+Updated `runtime/tests/test_operator_console.py` to require:
+- the dedicated no-replay panel and reconciliation-reference surface;
+- strict `sg-<40 lowercase hex>` client validation;
+- consumption of `data.safety_state` and `data.execution_reconciliation_reference`;
+- `execution_uncertain_audit_failed` guidance;
+- the composite state participating in the common lifecycle block;
+- briefing, approval, and execution remaining disabled under that block;
+- no `operation_id` or `provider_url` in console HTML/JavaScript;
+- existing authenticated checkpoint reload/reconciliation endpoints remaining body-empty and server-authoritative.
+
+Updated `runtime/tests/test_operator_integrity_policy.py` so hardened audit policy is tested together with the composite safety block and unknown server values are required to fall back to hardened states.
+
+Commits:
+- `99f507153bfc1ae928effdb509d240d86fcd75ed` — test composite no-replay operator interlock;
+- `36202e9355fab28a0a455ad4fcf6235e3f9d256d` — align operator integrity tests with composite safety contract;
+- `79c796f8dbff1a236c9946bfcaf14d5dc2d7582a` — fix bounded reconciliation reference regression.
+
+#### 3. Documented operator reconciliation semantics
+
+Updated `OPERATOR_CONSOLE.md` with the no-replay remediation interlock, strict bounded-reference behavior, dual audit/execution failure guidance, and the requirement that the reference remain out of readiness and Prometheus metrics.
+
+Commit:
+- `35887010cbfadfd597cab57ce9dfc0d244d1ad45` — document no-replay operator interlock.
+
+#### 4. Reviewed and normalized the final console tree
+
+A repository-tree review was performed after the UI/test changes. The branch remained fast-forward only. The current console/test/document tree was finalized in:
+- `87abf63b3ae2a77dc6e12b53906e6c598da6b177` — apply no-replay operator safety console.
+
+### Checks / results
+
+- Confirmed the resulting comparison from the previous handoff changes only `OPERATOR_CONSOLE.md`, `runtime/operator_console.py`, `runtime/tests/test_operator_console.py`, and `runtime/tests/test_operator_integrity_policy.py`.
+- Re-read the authenticated console routing in `runtime/api.py`; `/console`, `/assets/operator.js`, and `/assets/operator.css` remain behind the configured identity provider and retain no-store/CSP handling.
+- Preserved the evidence-unavailable browser contract: the current console still exposes `#judge-state` / `#judge-root-cause` and explicitly renders `EVIDENCE UNAVAILABLE` / `Not established` for an abstained incident.
+- Attempted a fresh checkout and focused test run with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` followed by the operator unittest modules. The execution container failed before checkout with `Could not resolve host: github.com`.
+- No GitHub Actions workflow was created, modified, triggered, or rerun to work around the DNS failure.
+- No GCP/IAM/Cloud Run, Grafana Cloud, Gemini, remediation provider, incident, audit store, or other external runtime resource was mutated.
+
+No green test-suite claim is made for this run. The committed operator regressions still need execution from a checkout-capable environment.
+
+### Decisions
+
+1. The browser treats `safety_state` as an independent fail-closed interlock rather than merely informational text.
+2. Unknown composite safety values fail hardened instead of falling back to `ok`.
+3. The only operation correlation value permitted into the authenticated browser is the StageGuard-generated `sg-<40 lowercase hex>` reconciliation reference.
+4. The reconciliation reference is display/correlation data only; the browser does not submit it as a remediation operation identifier and does not expose provider details.
+5. Dual `execution_uncertain_audit_failed` state prioritizes the operator instruction **DO NOT REPLAY REMEDIATION** while retaining the separate audit-integrity explanation.
+6. Continue avoiding noisy CI solely to work around the transient local DNS failure.
+
+### Blockers / unknowns
+
+- The updated `test_operator_console.py` and `test_operator_integrity_policy.py` need a real executable run.
+- The existing Playwright evidence-unavailable browser acceptance needs execution against the updated console assets.
+- The transition-authority and execution-safety suites from the previous run still need a combined executable run.
+- The focused Cloud Run audience/redirect/sentinel/bridge suites still need a current executable run.
+- The disposable private Cloud Run acceptance still requires a private test service, working least-privilege ADC invoker identity, and Docker.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
+
+## Single best next step
+
+**As soon as repository checkout works, run `tests.test_operator_console`, `tests.test_operator_integrity_policy`, `tests.test_operator_browser_evidence_unavailable`, the execution/transition-authority regressions, and the API lifecycle-safety regressions together. Fix any integration mismatch before adding more features; then add a real-browser `execution_uncertain_audit_failed` acceptance that proves the `DO NOT REPLAY` panel is visible, the strict `sg-...` reference is rendered, and every unsafe lifecycle control remains disabled without leaking provider detail.**
