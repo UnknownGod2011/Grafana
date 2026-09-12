@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import queue
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from typing import Any
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
+MAX_REQUEST_TIMEOUT_SECONDS = 120.0
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -22,8 +28,26 @@ class McpError(RuntimeError):
     pass
 
 
+def _request_timeout_seconds(raw: str | None) -> float:
+    if raw is None or not raw.strip():
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise McpError("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS must be a number") from exc
+    if not math.isfinite(value) or value <= 0 or value > MAX_REQUEST_TIMEOUT_SECONDS:
+        raise McpError(
+            "STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS must be greater than 0 and no more than "
+            f"{MAX_REQUEST_TIMEOUT_SECONDS:g}"
+        )
+    return value
+
+
 class StdioClient:
-    def __init__(self, command: list[str]) -> None:
+    def __init__(self, command: list[str], *, request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> None:
+        if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be a positive finite number")
+        self.request_timeout_seconds = min(request_timeout_seconds, MAX_REQUEST_TIMEOUT_SECONDS)
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -33,24 +57,54 @@ class StdioClient:
             bufsize=1,
         )
         self._next_id = 1
+        self._stdout_queue: queue.Queue[str | None] = queue.Queue()
+        self._stdout_thread = threading.Thread(
+            target=self._read_stdout,
+            name="stageguard-mcp-stdout",
+            daemon=True,
+        )
+        self._stdout_thread.start()
+
+    def _read_stdout(self) -> None:
+        stdout = self.proc.stdout
+        if stdout is None:
+            self._stdout_queue.put(None)
+            return
+        try:
+            for line in stdout:
+                self._stdout_queue.put(line)
+        finally:
+            self._stdout_queue.put(None)
 
     def send(self, message: dict[str, Any]) -> None:
         if self.proc.stdin is None:
             raise McpError("MCP stdin is unavailable")
-        self.proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise McpError("MCP stdin closed while sending request") from exc
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._next_id
         self._next_id += 1
         self.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}})
-        if self.proc.stdout is None:
-            raise McpError("MCP stdout is unavailable")
+        deadline = time.monotonic() + self.request_timeout_seconds
         while True:
-            line = self.proc.stdout.readline()
-            if not line:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpError(
+                    f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response"
+                )
+            try:
+                line = self._stdout_queue.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise McpError(
+                    f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response"
+                ) from exc
+            if line is None:
                 code = self.proc.poll()
-                raise McpError(f"MCP process exited before response (exit={code})")
+                raise McpError(f"MCP process exited before {method} response (exit={code})")
             try:
                 message = json.loads(line)
             except json.JSONDecodeError:
@@ -66,12 +120,19 @@ class StdioClient:
 
     def close(self) -> None:
         if self.proc.stdin:
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.proc.terminate()
-            self.proc.wait(timeout=5)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
 
 
 def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -117,8 +178,9 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
 
 def main() -> None:
     command = shlex.split(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
+    request_timeout = _request_timeout_seconds(os.getenv("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS"))
     print("Launching official Grafana MCP smoke test:", " ".join(command))
-    client = StdioClient(command)
+    client = StdioClient(command, request_timeout_seconds=request_timeout)
     try:
         initialized = client.request(
             "initialize",
