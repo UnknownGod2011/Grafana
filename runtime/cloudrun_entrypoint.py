@@ -19,6 +19,10 @@ _FALSE = frozenset({"0", "false", "no", "off"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$")
 _IPV4_LIKE_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 _DEFAULT_CHECKPOINT_OBJECT = "stageguard/incident-checkpoint.json"
+_MIN_REMEDIATION_EXECUTION_SECONDS = 1.0
+_MAX_REMEDIATION_EXECUTION_SECONDS = 600.0
+_MIN_CHECKPOINT_HMAC_KEY_BYTES = 32
+_MAX_CHECKPOINT_HMAC_KEY_BYTES = 512
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:
@@ -58,9 +62,19 @@ def _execution_max_seconds(environ: Mapping[str, str]) -> float:
     try:
         value = float(raw)
     except ValueError as exc:
-        raise ValueError(f"{name} must be a finite positive number") from exc
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite positive number")
+        raise ValueError(
+            f"{name} must be between {_MIN_REMEDIATION_EXECUTION_SECONDS:g} and "
+            f"{_MAX_REMEDIATION_EXECUTION_SECONDS:g} seconds"
+        ) from exc
+    if (
+        not math.isfinite(value)
+        or value < _MIN_REMEDIATION_EXECUTION_SECONDS
+        or value > _MAX_REMEDIATION_EXECUTION_SECONDS
+    ):
+        raise ValueError(
+            f"{name} must be between {_MIN_REMEDIATION_EXECUTION_SECONDS:g} and "
+            f"{_MAX_REMEDIATION_EXECUTION_SECONDS:g} seconds"
+        )
     return value
 
 
@@ -99,9 +113,16 @@ def _checkpoint_object(environ: Mapping[str, str]) -> str:
 
 
 def _checkpoint_hmac_key(environ: Mapping[str, str]) -> str:
-    key = _required(environ, "STAGEGUARD_CHECKPOINT_HMAC_KEY")
-    if len(key.encode("utf-8")) < 32:
-        raise ValueError("STAGEGUARD_CHECKPOINT_HMAC_KEY must be at least 32 bytes")
+    name = "STAGEGUARD_CHECKPOINT_HMAC_KEY"
+    key = _required(environ, name)
+    encoded = key.encode("utf-8")
+    if key != key.strip() or any(ord(char) < 32 or ord(char) == 127 for char in key):
+        raise ValueError(f"{name} must not contain leading/trailing whitespace or control characters")
+    if not _MIN_CHECKPOINT_HMAC_KEY_BYTES <= len(encoded) <= _MAX_CHECKPOINT_HMAC_KEY_BYTES:
+        raise ValueError(
+            f"{name} must be between {_MIN_CHECKPOINT_HMAC_KEY_BYTES} and "
+            f"{_MAX_CHECKPOINT_HMAC_KEY_BYTES} UTF-8 bytes"
+        )
     return key
 
 
