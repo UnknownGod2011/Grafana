@@ -18,9 +18,10 @@ Core invariants retained:
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; server-side write/proxy restrictions are regression-locked; the live smoke rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
 - Grafana MCP smoke requests are time-bounded, stdout JSON-RPC frames are individually bounded, strict framing/response integrity fails closed, and pending stdout frames are held in a fixed-capacity queue.
-- Cloud Run remediation/recovery execution watchdog configuration is bounded to 1-600 seconds so operator configuration cannot effectively disable the watchdog with an arbitrarily large value.
+- Cloud Run remediation/recovery execution watchdog configuration is bounded to 1-600 seconds.
 - Cloud Run checkpoint HMAC keys are bounded to 32-512 UTF-8 bytes and reject leading/trailing whitespace or control characters before runtime composition.
-- The Cloud Run deployment helper has a hermetic shell regression boundary that rejects unsafe watchdog values before any `gcloud` invocation and verifies safe serialization using a fake local `gcloud`.
+- The Cloud Run deployment helper has a hermetic shell regression boundary that rejects unsafe watchdog values before any `gcloud` invocation.
+- Telemetry profiles now require genuinely independent healthy comparators: `healthy_uplink` cannot equal `affected_uplink`, `healthy_peer_feeds` cannot include the affected feed, and healthy peer feeds cannot contain duplicates.
 
 ## Retained validation baseline
 
@@ -31,154 +32,104 @@ Core invariants retained:
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires an executable live smoke before a production-ready claim.
 - Recent MCP hardening added request deadlines, strict JSON-RPC framing/response-ID validation, a 1,048,576-character frame cap, and a 16-frame pending stdout queue; the actual repository regression modules still need a runnable checkout.
 
-## Run log — 2026-09-12 — Cloud Run production safety bounds
+## Recent completed work
+
+### Cloud Run production safety bounds
+
+- Bounded `STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS` to 1-600 seconds in runtime and deployment helper.
+- Bounded checkpoint HMAC keys to 32-512 UTF-8 bytes and reject malformed boundary/control characters.
+- Added focused Cloud Run entrypoint regressions.
+- Updated Google Cloud deployment guidance to the Grafana MCP 1.4.1 baseline.
+
+### Hermetic Cloud Run deploy-script regression
+
+- Added `runtime/tests/test_deploy_cloud_run_script.py`.
+- Uses a fake local `gcloud` and the real shell helper/identifier validator.
+- Unsafe watchdog values must fail before any `gcloud` call.
+- Valid values `1`, `17.5`, and `600` and the default `60` are serialization-checked.
+
+## Run log — 2026-09-12 — independent telemetry comparator contract
 
 ### Inspected at start
 
-Read this `progress.md` completely before choosing work. Inspected the current default branch and reviewed:
-- `README.md`
-- `runtime/api.py`
-- `runtime/tests/test_api.py`
-- `runtime/cloudrun_entrypoint.py`
-- `runtime/tests/test_cloudrun_entrypoint.py`
-- `runtime/bootstrap.py`
-- `GOOGLE_CLOUD_DEPLOYMENT.md`
+Read this `progress.md` completely before deciding what to change. Inspected the current repository metadata and reviewed:
 - `scripts/deploy_cloud_run.sh`
-- current recent commits; run-start head was `b93a9d6abc52b3e2c528218316c2e777d8e1c4f8`.
+- `runtime/tests/test_deploy_cloud_run_script.py`
+- the runtime/test inventories
+- `scripts/stageguard_doctor.py`
+- `runtime/onboarding.py`
+- `runtime/telemetry.py`
+- `runtime/tests/test_telemetry.py`
+- `runtime/investigator.py`
+- `runtime/README.md`
 
 All repository writes were limited to `UnknownGod2011/Grafana`. No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
 
 ### Findings
 
-1. `runtime/cloudrun_entrypoint.py` accepted any finite positive `STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS`. A very large value could make the remediation watchdog operationally meaningless even though the code still considered it enabled.
-2. The checkpoint HMAC guard enforced only a minimum 32-byte length. It did not cap pathological secret size or reject accidental boundary whitespace/control characters. Because this secret authenticates persisted lifecycle authority, production composition should reject obviously malformed values early.
-3. `scripts/deploy_cloud_run.sh` independently validated the watchdog as merely positive, so deployment-time validation could accept a value that the hardened runtime would later reject.
-4. `GOOGLE_CLOUD_DEPLOYMENT.md` still named the older `grafana/mcp-grafana:1.3.0` image even though the repository is now pinned to 1.4.1.
+1. The telemetry profile validated that affected and healthy bindings were non-empty, but it did not require the healthy comparator path to be independent from the affected path.
+2. A profile could set `healthy_uplink == affected_uplink`. In that case the `healthy_peer_loss` contradiction query would read the same uplink as the causal query, defeating the intended independent-comparator semantics.
+3. `healthy_peer_feeds` could include `affected_feed` or duplicate entries. That could make the healthy-peer dropped-frame aggregate self-referential or overweight one feed without any configuration failure.
+4. `runtime/README.md` still described the old MCP 1.1.0 baseline and an obsolete implementation next step, so runtime documentation was no longer coherent with the executable repository.
 
 ### Exact changes made
 
-#### 1. Bounded Cloud Run watchdog and checkpoint HMAC configuration
+#### 1. Enforced independent healthy comparator mappings
 
-Commits:
-- `4380b8a5803e2a51d86bba8f233946abd4e6f8ac`
-- `c1f34ad9b72d46a5868fe69e28f7c14072922147`
+Commit: `b8dd30ec86c7d7bf2531948649a2c78050910395`
 
-`runtime/cloudrun_entrypoint.py` now:
-- accepts remediation/recovery execution watchdog values only from 1 through 600 seconds, inclusive;
-- rejects blank, malformed, non-finite, sub-second, and above-10-minute values with one bounded startup error;
-- requires checkpoint HMAC keys to be 32-512 UTF-8 bytes;
-- rejects leading/trailing whitespace and ASCII control characters in the checkpoint HMAC key before constructing production bootstrap arguments;
-- reads the raw checkpoint secret for validation rather than passing through `_required()`, which strips whitespace and would have hidden malformed boundary whitespace.
+`runtime/telemetry.py` now rejects profiles where:
+- `healthy_uplink` equals `affected_uplink`;
+- `healthy_peer_feeds` contains `affected_feed`;
+- `healthy_peer_feeds` contains duplicate feed bindings.
 
-The raw-secret correction was made immediately after inspection caught that `_required()` normalization would otherwise make the new whitespace regression ineffective.
+These checks happen during `TelemetryProfile` construction, so unsafe mappings fail before PromQL is generated or any incident investigation begins.
 
-#### 2. Added focused Cloud Run regressions
+#### 2. Added focused telemetry regressions
 
-Commit: `adf8b2ad8c934a8fa3257d40afa9afef6efa014b`
+Commit: `0787d2f12b1bc97f90bb538d20957a47cf353323`
 
-`runtime/tests/test_cloudrun_entrypoint.py` now covers:
-- accepted watchdog boundaries and representative in-range values (`1`, `17.5`, `600`);
-- rejected values including zero, sub-second, above-600, negatives, NaN/infinities, blanks, and malformed strings;
-- HMAC keys below 32 bytes and above 512 bytes;
-- leading/trailing whitespace and embedded control-character rejection;
-- continued acceptance of a bounded 32-byte key and GCS checkpoint composition.
+`runtime/tests/test_telemetry.py` now covers all three new semantic invariants while preserving the existing custom-mapping, escaping, fixed-query-budget, recovery-window, and missing-evidence behavior.
 
-#### 3. Aligned deployment-time validation with runtime validation
+#### 3. Reconciled stale runtime documentation
 
-Commit: `d9a21fed9f578b36a75ddbf30c60c945d2f49781`
+Commit: `a6aceddd03f48790e63b0485cdb5b80268a94487`
 
-`scripts/deploy_cloud_run.sh` now enforces the same inclusive 1-600 second watchdog range before invoking `gcloud`, rather than accepting any positive finite number. This prevents a deployment command from succeeding only for the container to refuse startup with stricter runtime validation.
-
-#### 4. Updated production deployment documentation
-
-Commit: `dfe3805196f2e961e00292607dc607b9cf96255c`
-
-`GOOGLE_CLOUD_DEPLOYMENT.md` now:
-- names the current official Grafana MCP baseline `grafana/mcp-grafana:1.4.1`;
-- documents the 1-600 second watchdog safety range and fail-closed behavior;
-- documents the 32-512 byte checkpoint HMAC bounds plus whitespace/control-character rejection;
-- includes the watchdog environment variable in optional deployment configuration;
-- updates failure behavior to match the executable production guardrails.
+`runtime/README.md` now:
+- describes the current `grafana/mcp-grafana:1.4.1` baseline;
+- records server-side `--disable-write`, `--disable-proxied`, and `datasource,prometheus,loki` constraints;
+- documents live registry `readOnlyHint=true` enforcement and bounded stdio behavior;
+- documents the independent healthy-comparator mapping requirement;
+- removes the obsolete MCP 1.1.0/early-remediation implementation narrative;
+- sets the current validation priority to telemetry/MCP regression execution, MCP 1.4.1 live smoke, and the private Cloud Run metrics acceptance.
 
 ### Checks / results
 
-- Direct authenticated GitHub repository inspection and all repository writes succeeded.
-- A fresh executable checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution environment still failed with `Could not resolve host: github.com` before tests could run.
+- Authenticated GitHub inspection and all three repository writes succeeded.
+- A fresh checkout/test attempt was made with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution environment again failed with `Could not resolve host: github.com` before repository tests could execute.
 - No GitHub Actions workflow was triggered or rerun as a workaround.
-- An isolated Python proof of the exact new watchdog/HMAC predicates passed: accepted `1`, `17.5`, `600`, and a 32-byte key; rejected all configured out-of-range/non-finite watchdog cases and short/oversized/whitespace/control-character HMAC cases.
-- Because the actual repository checkout remains unavailable, `runtime.tests.test_cloudrun_entrypoint` and shell-level deployment tests were not executed from the repository. There is no new repository-suite green claim.
+- An isolated Python proof of the exact new `TelemetryProfile` predicates succeeded: the default safe profile constructed successfully, and equal affected/healthy uplinks, affected-feed inclusion, and duplicate peer feeds were all rejected with the intended errors.
+- Because the actual repository checkout is still unavailable, `python -m unittest runtime.tests.test_telemetry -v` has not yet been executed against the committed files. There is no new repository-suite green claim.
 
 ### Decisions
 
-1. Treat an excessively large watchdog as a production safety misconfiguration rather than a valid customization; 10 minutes is the hard ceiling for this live remediation/recovery guardrail.
-2. Keep runtime and deployment-helper validation identical so bad configuration fails before cloud mutation whenever possible.
-3. Validate the raw checkpoint HMAC environment value before normalization because normalization can hide malformed secret boundaries.
-4. Bound checkpoint secret size as well as minimum length; this is a persisted-authority credential and production configuration should have a finite input envelope.
-5. Continue avoiding noisy GitHub Actions merely to work around the transient local DNS/checkout issue.
+1. Treat healthy-peer evidence as an independent-comparator contract, not merely a naming convention.
+2. Fail unsafe telemetry mappings at profile construction time rather than allowing diagnosis to run with self-referential evidence.
+3. Preserve exact label-value semantics; the new validation rejects exact overlap/duplicates but does not silently normalize user label values.
+4. Keep documentation aligned with the current MCP/runtime implementation rather than retaining historical hackathon-era version text.
+5. Continue avoiding noisy GitHub Actions merely to work around the transient checkout/DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_cloudrun_entrypoint` must be run from an actual checkout to verify the committed regression module and imports end-to-end.
-- Any existing shell/deployment-helper tests should be run against the updated 1-600 second validation.
+- `runtime.tests.test_telemetry` needs execution from an actual checkout.
+- `runtime.tests.test_cloudrun_entrypoint` and `runtime.tests.test_deploy_cloud_run_script` still need a current repository run.
 - `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins` still need an actual repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required before calling that dependency baseline production-ready.
 - The strengthened Cloud Run bridge six-module set still needs an executable run.
-- The execution-reconciliation/operator/Playwright safety set from previous runs still needs a current run.
+- The execution-reconciliation/operator/Playwright safety set still needs a current run.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
-- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
-
-## Run log — 2026-09-12 — hermetic Cloud Run deploy-script regression
-
-### Inspected at start
-
-Read `progress.md` completely before choosing work. Inspected the current repository metadata, `scripts/deploy_cloud_run.sh`, `scripts/gcp_identifiers.py`, the runtime test inventory, and `runtime/cloudrun_entrypoint.py` to verify the immutable production composition and the exact deployment-time validation boundary.
-
-All writes were limited to `UnknownGod2011/Grafana`. No workflow was triggered or rerun, and no Google Cloud, Grafana, Gemini, or remediation resource was contacted or mutated.
-
-### Findings
-
-1. The preceding run hardened the shell deployment helper to reject watchdog values outside 1-600 seconds, but that shell boundary had no dedicated regression test.
-2. A runtime-only test is insufficient for this class of bug because a future edit could change quoting, defaulting, environment serialization, validation order, or cloud-command ordering in `deploy_cloud_run.sh` while leaving the Python entrypoint tests green.
-3. The highest-value safe test is hermetic: place a fake `gcloud` earlier in `PATH`, let the real identifier validator execute locally, and assert invalid watchdog configuration exits before the fake cloud command sees any call.
-
-### Exact changes made
-
-Commit: `29b40b55f447fe68baa858b36f40adbe269e37d0`
-
-Added `runtime/tests/test_deploy_cloud_run_script.py`.
-
-The new POSIX/bash regression:
-- supplies only syntactically valid deployment identifiers and Secret Manager IDs;
-- substitutes a temporary fake `gcloud` executable that records argv instead of touching Google Cloud;
-- verifies blank, zero, sub-second, above-600, negative, non-finite, comma-containing, and malformed watchdog values all exit with code 2;
-- verifies every unsafe case fails before any `gcloud` invocation;
-- verifies accepted values `1`, `17.5`, and `600` reach exactly the expected two `gcloud` commands and are serialized into `--set-env-vars` unchanged;
-- verifies an unset watchdog uses the safe canonical default `60`;
-- skips cleanly on non-POSIX hosts or hosts without bash rather than pretending to validate shell semantics on an incompatible platform;
-- uses a 15-second subprocess timeout so a broken deployment script cannot hang the test runner.
-
-### Checks / results
-
-- Authenticated GitHub inspection and creation of the new regression module succeeded.
-- A fresh real checkout was attempted after the commit. DNS resolution still failed with `Could not resolve host: github.com` before repository tests could execute.
-- No GitHub Actions workflow was started or rerun as a workaround.
-- Because the test must exercise the committed shell script and sibling `gcp_identifiers.py`, an isolated reimplementation would not constitute the same test; no green result is claimed for `runtime.tests.test_deploy_cloud_run_script` yet.
-
-### Decisions
-
-1. Treat shell deployment orchestration as production code worthy of direct regression coverage, not merely documentation around Python runtime validation.
-2. Keep the test hermetic and cloud-free: fake only `gcloud`; execute the real local identifier validator and real deployment shell logic.
-3. Require invalid configuration to fail before *any* cloud CLI call, preserving the existing fail-before-mutation safety principle.
-4. Do not trigger CI merely to bypass the current transient checkout/DNS failure.
-
-### Blockers / unknowns
-
-- `runtime.tests.test_deploy_cloud_run_script` still needs execution from a real checkout on a POSIX/bash environment.
-- `runtime.tests.test_cloudrun_entrypoint` still needs a current repository run alongside the new shell regression.
-- The MCP timeout/surface/image-pin regressions and live pinned `grafana/mcp-grafana:1.4.1` smoke remain pending.
-- The six-module Cloud Run bridge set, operator/Playwright safety set, and private Cloud Run metrics acceptance remain pending.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**When executable checkout is available, run `python -m unittest runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script` first. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; then proceed to the six Cloud Run bridge modules and the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**When executable checkout is available, run `python -m unittest runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v` first. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
