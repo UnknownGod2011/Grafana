@@ -20,6 +20,7 @@ queries, credentials, activation hashes, exception messages, or raw evidence.
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -30,6 +31,11 @@ from log_activation import LogActivationRecord, verify_log_activation_record
 from mcp_log_client import McpLokiLogClient
 from mcp_metric_client import McpPrometheusMetricClient
 from telemetry import TelemetryProfile
+
+
+MAX_EXTERNAL_PROBE_TTL_SECONDS = 300.0
+MAX_FAILURE_BACKOFF_SECONDS = 300.0
+MAX_STALE_GRACE_SECONDS = 900.0
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,16 @@ class _ExternalProbeState:
     last_success_monotonic: float | None = None
     next_probe_monotonic: float = 0.0
     public_status: str = "failed"
+
+
+def _bounded_seconds(name: str, value: object, maximum: float) -> float:
+    """Return a finite positive timing value inside a fixed safety envelope."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite number of seconds")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0 or normalized > maximum:
+        raise ValueError(f"{name} must be greater than 0 and at most {maximum:g} seconds")
+    return normalized
 
 
 def _verify_mcp_datasource_access(client: object, datasource_uid: str) -> None:
@@ -101,11 +117,22 @@ class EvidencePlaneReadinessProbe:
         failure_backoff_seconds: float = 5.0,
         stale_grace_seconds: float = 30.0,
     ) -> None:
-        if external_probe_ttl_seconds <= 0:
-            raise ValueError("external_probe_ttl_seconds must be positive")
-        if failure_backoff_seconds <= 0:
-            raise ValueError("failure_backoff_seconds must be positive")
-        if stale_grace_seconds < external_probe_ttl_seconds:
+        ttl = _bounded_seconds(
+            "external_probe_ttl_seconds",
+            external_probe_ttl_seconds,
+            MAX_EXTERNAL_PROBE_TTL_SECONDS,
+        )
+        backoff = _bounded_seconds(
+            "failure_backoff_seconds",
+            failure_backoff_seconds,
+            MAX_FAILURE_BACKOFF_SECONDS,
+        )
+        stale_grace = _bounded_seconds(
+            "stale_grace_seconds",
+            stale_grace_seconds,
+            MAX_STALE_GRACE_SECONDS,
+        )
+        if stale_grace < ttl:
             raise ValueError("stale_grace_seconds must be at least the probe TTL")
         self._profile = profile
         self._activation = activation
@@ -114,9 +141,9 @@ class EvidencePlaneReadinessProbe:
         self._logs = logs
         self._now_unix = now_unix
         self._monotonic = monotonic or time.monotonic
-        self._ttl = float(external_probe_ttl_seconds)
-        self._failure_backoff = float(failure_backoff_seconds)
-        self._stale_grace = float(stale_grace_seconds)
+        self._ttl = ttl
+        self._failure_backoff = backoff
+        self._stale_grace = stale_grace
         self._lock = threading.Lock()
         self._external = {
             "prometheus": _ExternalProbeState(),
