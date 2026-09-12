@@ -314,7 +314,8 @@ def _service_metrics(service: IncidentService) -> str:
         metrics += exporter()
     checkpoint_state = service.checkpoint_state()
     conflict_blocked = 1 if checkpoint_state == "conflicted" else 0
-    execution_uncertain = 1 if checkpoint_state == "execution_uncertain" else 0
+    reconciliation_state = _execution_reconciliation_state(service)
+    execution_uncertain = 1 if checkpoint_state == "execution_uncertain" or reconciliation_state != "clear" else 0
     execution_phase = _execution_checkpoint_phase(service)
     execution = _remediation_execution_observability(service)
     reconciliation_reason = _execution_reconciliation_reason(service)
