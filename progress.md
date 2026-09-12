@@ -20,6 +20,7 @@ Core invariants retained:
 - Grafana MCP smoke requests are time-bounded, stdout JSON-RPC frames are individually bounded, strict framing/response integrity fails closed, and pending stdout frames are held in a fixed-capacity queue.
 - Cloud Run remediation/recovery execution watchdog configuration is bounded to 1-600 seconds so operator configuration cannot effectively disable the watchdog with an arbitrarily large value.
 - Cloud Run checkpoint HMAC keys are bounded to 32-512 UTF-8 bytes and reject leading/trailing whitespace or control characters before runtime composition.
+- The Cloud Run deployment helper has a hermetic shell regression boundary that rejects unsafe watchdog values before any `gcloud` invocation and verifies safe serialization using a fake local `gcloud`.
 
 ## Retained validation baseline
 
@@ -126,6 +127,58 @@ Commit: `dfe3805196f2e961e00292607dc607b9cf96255c`
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
+## Run log — 2026-09-12 — hermetic Cloud Run deploy-script regression
+
+### Inspected at start
+
+Read `progress.md` completely before choosing work. Inspected the current repository metadata, `scripts/deploy_cloud_run.sh`, `scripts/gcp_identifiers.py`, the runtime test inventory, and `runtime/cloudrun_entrypoint.py` to verify the immutable production composition and the exact deployment-time validation boundary.
+
+All writes were limited to `UnknownGod2011/Grafana`. No workflow was triggered or rerun, and no Google Cloud, Grafana, Gemini, or remediation resource was contacted or mutated.
+
+### Findings
+
+1. The preceding run hardened the shell deployment helper to reject watchdog values outside 1-600 seconds, but that shell boundary had no dedicated regression test.
+2. A runtime-only test is insufficient for this class of bug because a future edit could change quoting, defaulting, environment serialization, validation order, or cloud-command ordering in `deploy_cloud_run.sh` while leaving the Python entrypoint tests green.
+3. The highest-value safe test is hermetic: place a fake `gcloud` earlier in `PATH`, let the real identifier validator execute locally, and assert invalid watchdog configuration exits before the fake cloud command sees any call.
+
+### Exact changes made
+
+Commit: `29b40b55f447fe68baa858b36f40adbe269e37d0`
+
+Added `runtime/tests/test_deploy_cloud_run_script.py`.
+
+The new POSIX/bash regression:
+- supplies only syntactically valid deployment identifiers and Secret Manager IDs;
+- substitutes a temporary fake `gcloud` executable that records argv instead of touching Google Cloud;
+- verifies blank, zero, sub-second, above-600, negative, non-finite, comma-containing, and malformed watchdog values all exit with code 2;
+- verifies every unsafe case fails before any `gcloud` invocation;
+- verifies accepted values `1`, `17.5`, and `600` reach exactly the expected two `gcloud` commands and are serialized into `--set-env-vars` unchanged;
+- verifies an unset watchdog uses the safe canonical default `60`;
+- skips cleanly on non-POSIX hosts or hosts without bash rather than pretending to validate shell semantics on an incompatible platform;
+- uses a 15-second subprocess timeout so a broken deployment script cannot hang the test runner.
+
+### Checks / results
+
+- Authenticated GitHub inspection and creation of the new regression module succeeded.
+- A fresh real checkout was attempted after the commit. DNS resolution still failed with `Could not resolve host: github.com` before repository tests could execute.
+- No GitHub Actions workflow was started or rerun as a workaround.
+- Because the test must exercise the committed shell script and sibling `gcp_identifiers.py`, an isolated reimplementation would not constitute the same test; no green result is claimed for `runtime.tests.test_deploy_cloud_run_script` yet.
+
+### Decisions
+
+1. Treat shell deployment orchestration as production code worthy of direct regression coverage, not merely documentation around Python runtime validation.
+2. Keep the test hermetic and cloud-free: fake only `gcloud`; execute the real local identifier validator and real deployment shell logic.
+3. Require invalid configuration to fail before *any* cloud CLI call, preserving the existing fail-before-mutation safety principle.
+4. Do not trigger CI merely to bypass the current transient checkout/DNS failure.
+
+### Blockers / unknowns
+
+- `runtime.tests.test_deploy_cloud_run_script` still needs execution from a real checkout on a POSIX/bash environment.
+- `runtime.tests.test_cloudrun_entrypoint` still needs a current repository run alongside the new shell regression.
+- The MCP timeout/surface/image-pin regressions and live pinned `grafana/mcp-grafana:1.4.1` smoke remain pending.
+- The six-module Cloud Run bridge set, operator/Playwright safety set, and private Cloud Run metrics acceptance remain pending.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
+
 ## Single best next step
 
-**As soon as executable checkout is available, run `runtime.tests.test_cloudrun_entrypoint` plus any deploy-script regression suite first to verify the new runtime/deployment safety bounds. Then run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke. If those are clean, proceed to the six Cloud Run bridge modules and the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**When executable checkout is available, run `python -m unittest runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script` first. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; then proceed to the six Cloud Run bridge modules and the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
