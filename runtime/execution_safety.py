@@ -87,6 +87,19 @@ class ExecutionSafeIncidentService(IncidentService):
             reason = self._execution_reconciliation_reason
             return reason if reason in _RECONCILIATION_REASONS else "phase_unavailable"
 
+    def execution_reconciliation_reference(self) -> str | None:
+        """Return the stable StageGuard idempotency reference for operator reconciliation.
+
+        The value is a deterministic ``sg-`` hash, not provider response detail or
+        credentials. It is exposed only while execution remains ambiguous so an
+        authenticated operator can correlate StageGuard state with the provider's
+        idempotency/reconciliation record without reconstructing the approved action.
+        """
+        with self._lock:
+            if not self._execution_uncertain:
+                return None
+            return self._execution_uncertain_operation_id
+
     def _phase_capable_store(self):
         store = self._checkpoint_store
         if store is None or not bool(getattr(store, "supports_execution_phase", False)):
