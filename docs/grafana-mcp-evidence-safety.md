@@ -22,6 +22,23 @@ Official Grafana documentation:
 - MCP tool/RBAC reference: https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/
 - Tool enable/disable and `--disable-write`: https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/oss-mcp/configure/enable-and-disable-tools/
 
+## Live server surface enforcement
+
+Static Compose flags are necessary but not sufficient for a dependency boundary that can evolve upstream. `runtime/mcp_smoke.py` therefore validates the tool surface returned by the running official server before it issues evidence queries.
+
+The smoke requires:
+
+1. `tools/list` to return a well-formed list of uniquely named tool objects;
+2. `list_datasources` and `query_prometheus` to be present;
+3. **every advertised tool**, including optional Loki/Prometheus/datasource tools, to carry MCP `annotations.readOnlyHint=true`;
+4. the configured datasource query to execute successfully after that surface check.
+
+A missing annotation is treated the same as `readOnlyHint=false`: the smoke fails closed. This is intentional. If an upstream image begins registering a newly write-capable or ambiguously annotated tool despite StageGuard's configured flags, the release acceptance should stop before the server is trusted as the evidence plane.
+
+This runtime assertion is defense in depth. Server-side `--disable-write`, `--disable-proxied`, the narrow enabled categories, and least-privilege Grafana credentials remain required and are not replaced by MCP annotations.
+
+Upstream's contribution guidance explicitly requires write tools to respect `--disable-write`, and the official configuration documents `--enable-write-tools` as the mechanism for selectively re-enabling individual tools. StageGuard does not use that escape hatch.
+
 ## Metric evidence contract
 
 `runtime/mcp_metric_client.py` deliberately fails closed at the MCP boundary. A bounded instant query is usable only when all of the following hold:
@@ -84,6 +101,7 @@ Any change to the MCP adapters or investigator should retain tests for:
 - malformed MCP envelopes;
 - tool errors;
 - read-only tool discovery;
+- live smoke rejection of malformed/duplicate tool discovery and any advertised tool lacking `readOnlyHint=true`;
 - datasource/query input validation;
 - Loki result bounds and truncation semantics;
 - structured/sanitized evidence-unavailable abstention;
