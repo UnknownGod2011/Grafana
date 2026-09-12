@@ -18,6 +18,7 @@ import cloud_run_metrics_acceptance as acceptance  # noqa: E402
 from cloud_run_metrics_bridge import (  # noqa: E402
     BridgeConfigurationError,
     CloudRunMetricsClient,
+    MIN_NETWORK_BEARER_TOKEN_LENGTH,
     make_server,
     normalize_bridge_bearer_token,
 )
@@ -26,6 +27,9 @@ from cloud_run_metrics_bridge import (  # noqa: E402
 VALID_METRICS = b"""# TYPE stageguard_remediation_execution_deadline_exceeded gauge
 stageguard_remediation_execution_deadline_exceeded 0
 """
+NETWORK_SECRET = "network-scrape-secret-0123456789abcdef"
+LOCAL_SECRET = "local-scrape-secret"
+EPHEMERAL_SECRET = "ephemeral-local-secret-0123456789abcdef"
 
 
 class _Response:
@@ -74,17 +78,35 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
     def test_bridge_bearer_token_validation_is_fail_closed(self) -> None:
         self.assertIsNone(normalize_bridge_bearer_token(None))
         self.assertEqual(normalize_bridge_bearer_token("scrape-secret"), "scrape-secret")
-        for invalid in ("", " scrape-secret", "scrape-secret ", "a\nb", "a\rb"):
+        self.assertEqual(normalize_bridge_bearer_token("abc.DEF_123-~+/=="), "abc.DEF_123-~+/==")
+        for invalid in (
+            "",
+            " scrape-secret",
+            "scrape-secret ",
+            "a\nb",
+            "a\rb",
+            "two words",
+            "comma,separated",
+            "unicode-雪",
+        ):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(BridgeConfigurationError):
                     normalize_bridge_bearer_token(invalid)
 
-    def test_non_loopback_bind_requires_both_opt_in_and_inbound_auth(self) -> None:
+    def test_non_loopback_bind_requires_opt_in_auth_and_minimum_secret_length(self) -> None:
         client = self._client()
         with self.assertRaises(BridgeConfigurationError):
             make_server(client, "0.0.0.0", 0)
         with self.assertRaises(BridgeConfigurationError):
             make_server(client, "0.0.0.0", 0, allow_network_bind=True)
+        with self.assertRaises(BridgeConfigurationError):
+            make_server(
+                client,
+                "0.0.0.0",
+                0,
+                allow_network_bind=True,
+                bearer_token="x" * (MIN_NETWORK_BEARER_TOKEN_LENGTH - 1),
+            )
 
         with mock.patch("cloud_run_metrics_bridge.ThreadingHTTPServer") as server_class:
             make_server(
@@ -92,12 +114,21 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
                 "0.0.0.0",
                 9112,
                 allow_network_bind=True,
-                bearer_token="network-scrape-secret",
+                bearer_token=NETWORK_SECRET,
             )
         server_class.assert_called_once()
         _address, handler = server_class.call_args.args
         self.assertEqual(_address, ("0.0.0.0", 9112))
-        self.assertEqual(handler.bridge_bearer_token, "network-scrape-secret")
+        self.assertEqual(handler.bridge_bearer_token, NETWORK_SECRET)
+
+    def test_loopback_can_still_use_short_valid_local_secret(self) -> None:
+        client = self._client()
+        with mock.patch("cloud_run_metrics_bridge.ThreadingHTTPServer") as server_class:
+            make_server(client, "127.0.0.1", 9112, bearer_token="dev-secret")
+        server_class.assert_called_once()
+        _address, handler = server_class.call_args.args
+        self.assertEqual(_address, ("127.0.0.1", 9112))
+        self.assertEqual(handler.bridge_bearer_token, "dev-secret")
 
     def test_healthz_stays_public_but_readyz_and_metrics_require_bearer(self) -> None:
         calls: list[str] = []
@@ -105,7 +136,7 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
             self._client(calls),
             "127.0.0.1",
             0,
-            bearer_token="local-scrape-secret",
+            bearer_token=LOCAL_SECRET,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -129,7 +160,7 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
 
             request = urllib.request.Request(
                 f"{base}/metrics",
-                headers={"Authorization": "Bearer local-scrape-secret"},
+                headers={"Authorization": f"Bearer {LOCAL_SECRET}"},
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 self.assertEqual(response.status, 200)
@@ -168,12 +199,11 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
         config = acceptance._prometheus_config(
             49123,
             acceptance.DEFAULT_JOB_NAME,
-            "ephemeral-local-secret",
+            EPHEMERAL_SECRET,
         )
         self.assertIn("host.docker.internal:49123", config)
         self.assertIn("authorization:", config)
-        self.assertIn("type: Bearer", config)
-        self.assertIn('credentials: "ephemeral-local-secret"', config)
+        self.assertIn(f'credentials: "{EPHEMERAL_SECRET}"', config)
         self.assertNotIn("cloud-run-id-token", config)
         self.assertNotIn("stageguard.example", config)
 
@@ -191,7 +221,7 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
 
         with mock.patch.object(acceptance, "verify_unauthorized_upstream", return_value=403):
             with mock.patch.object(acceptance, "_docker_available", return_value=None):
-                with mock.patch.object(acceptance.secrets, "token_urlsafe", return_value="ephemeral-local-secret"):
+                with mock.patch.object(acceptance.secrets, "token_urlsafe", return_value=EPHEMERAL_SECRET):
                     with mock.patch.object(acceptance, "_start_bridge", side_effect=starts) as start_bridge:
                         with mock.patch.object(acceptance, "_stop_bridge"):
                             with mock.patch.object(acceptance, "wait_for_bridge_ready") as ready:
@@ -212,19 +242,19 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
 
         self.assertEqual(result.recovered_up, 1.0)
         self.assertEqual(len(captured_config), 1)
-        self.assertIn('credentials: "ephemeral-local-secret"', captured_config[0])
+        self.assertIn(f'credentials: "{EPHEMERAL_SECRET}"', captured_config[0])
         self.assertEqual(
             start_bridge.call_args_list[0].kwargs,
-            {"bearer_token": "ephemeral-local-secret"},
+            {"bearer_token": EPHEMERAL_SECRET},
         )
         self.assertEqual(start_bridge.call_args_list[1].args, (client, 49123))
         self.assertEqual(
             start_bridge.call_args_list[1].kwargs,
-            {"bearer_token": "ephemeral-local-secret"},
+            {"bearer_token": EPHEMERAL_SECRET},
         )
         self.assertEqual(ready.call_count, 2)
         for call in ready.call_args_list:
-            self.assertEqual(call.args[2], "ephemeral-local-secret")
+            self.assertEqual(call.args[2], EPHEMERAL_SECRET)
         self.assertEqual(client.fetch.call_count, 2)
 
 
