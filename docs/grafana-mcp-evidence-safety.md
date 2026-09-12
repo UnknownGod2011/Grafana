@@ -2,7 +2,18 @@
 
 StageGuard treats Grafana as an operational evidence plane, not as an untrusted bag of values that can be passed directly into incident policy.
 
-The runtime uses the official Grafana MCP server for read-only Prometheus and Loki access. Local/reference deployment starts `grafana/mcp-grafana:1.3.0` with `--disable-write`, limits enabled tools to `datasource,prometheus,loki`, disables proxied tools, and caps Loki results. Production deployments should preserve the same least-privilege shape even when authentication or transport differs.
+The runtime uses the official Grafana MCP server for read-only Prometheus and Loki access. Local/reference deployment starts `grafana/mcp-grafana:1.4.1` with `--disable-write`, limits enabled tools to `datasource,prometheus,loki`, disables proxied tools, and caps Loki results. Production deployments should preserve the same least-privilege shape even when authentication or transport differs.
+
+## Reviewed dependency baseline
+
+The reference deployment is pinned to official Grafana MCP `v1.4.1`, published **2026-09-11**. The pin is deliberate rather than a floating `latest` dependency.
+
+- Release: https://github.com/grafana/mcp-grafana/releases/tag/v1.4.1
+- Upstream repository: https://github.com/grafana/mcp-grafana
+
+The `v1.4.1` release includes a breaking Sift-tool input change: `find_error_pattern_logs` and `find_slow_requests` use `labelSelector` instead of the earlier `labels` map. StageGuard does **not** enable the Sift tool category; its reference MCP process enables only `datasource,prometheus,loki`, retains `--disable-write`, and retains `--disable-proxied`. Therefore that breaking change is outside StageGuard's configured evidence contract.
+
+The preceding `v1.4.0` release added selective `--enable-write-tools` behavior beneath `--disable-write`. StageGuard intentionally does not pass `--enable-write-tools`; server-side writes remain disabled. Any future MCP upgrade must preserve that invariant and must pass the image-pin/least-privilege regression before the pin changes.
 
 Official Grafana documentation:
 
@@ -77,6 +88,7 @@ Any change to the MCP adapters or investigator should retain tests for:
 - Loki result bounds and truncation semantics;
 - structured/sanitized evidence-unavailable abstention;
 - programming exceptions continuing to propagate;
-- evidence-unavailable abstentions being unable to execute remediation even with an otherwise matching approval.
+- evidence-unavailable abstentions being unable to execute remediation even with an otherwise matching approval;
+- exact official MCP image pinning and preservation of `--disable-write`, `--disable-proxied`, and the bounded `datasource,prometheus,loki` tool surface.
 
 A live smoke should additionally confirm the official server can query the configured Grafana datasource using the repository-pinned MCP image before a release is considered production-ready.
