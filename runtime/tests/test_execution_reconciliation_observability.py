@@ -108,6 +108,34 @@ class ExecutionReconciliationObservabilityTests(unittest.TestCase):
         for value in secret_values:
             self.assertNotIn(value, metrics)
 
+    def test_execution_uncertainty_metric_tracks_reconciliation_barrier(self):
+        """Prometheus must agree with the composite no-replay safety contract.
+
+        A service can retain a checkpoint conflict while execution reconciliation is
+        still non-clear. In that state the operator/readiness contract correctly
+        treats remediation as uncertain, so the dedicated uncertainty gauge must
+        also remain asserted instead of reporting a misleading zero.
+        """
+        uncertain = ObservableService(
+            "durable_dispatching",
+            checkpoint_state="conflicted",
+            integrity="failed",
+            reconciliation_state="reloaded",
+        )
+        clear_conflict = ObservableService(
+            "clear",
+            checkpoint_state="conflicted",
+            reconciliation_state="clear",
+        )
+        with patch("api._get_readiness_probe", return_value=ReadyProbe()):
+            uncertain_metrics = _service_metrics(uncertain)
+            clear_metrics = _service_metrics(clear_conflict)
+
+        self.assertIn("stageguard_remediation_execution_uncertain 1", uncertain_metrics)
+        self.assertIn("stageguard_remediation_execution_uncertain 0", clear_metrics)
+        self.assertEqual("execution_uncertain_audit_failed", _lifecycle_safety_state(uncertain))
+        self.assertEqual("checkpoint_conflicted", _lifecycle_safety_state(clear_conflict))
+
     def test_dual_execution_and_audit_failure_has_one_explicit_operator_state(self):
         reference = "sg-" + "a" * 40
         service = ObservableService(
@@ -132,6 +160,7 @@ class ExecutionReconciliationObservabilityTests(unittest.TestCase):
             metrics = _service_metrics(service)
         self.assertFalse(readiness["ready"])
         self.assertEqual("execution_uncertain_audit_failed", readiness["checks"]["lifecycle_safety"])
+        self.assertIn("stageguard_remediation_execution_uncertain 1", metrics)
         safety_lines = [
             line for line in metrics.splitlines()
             if line.startswith("stageguard_lifecycle_safety_state{")
