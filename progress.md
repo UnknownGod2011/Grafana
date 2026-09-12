@@ -16,6 +16,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Durable checkpoint/audit failures fail closed and uncommitted state is not operator-visible lifecycle authority.
 - Once provider dispatch may have occurred, persistence uncertainty blocks replay.
 - Browser/API/onboarding/CLI surfaces must not expose provider failure detail or turn evidence loss into actionable state.
+- Authentication failures expose only the bounded StageGuard-owned message vocabulary; unknown/custom identity-provider detail collapses to `authentication required`.
 - Expected evidence transport/protocol/datasource failures cross runtime boundaries as `EvidenceUnavailable`; unexpected programming/policy exceptions fail loudly inside the runtime and process-level entrypoints fail closed without exposing raw exception text.
 - Metric and Loki activation records are bounded, schema/version validated, expiry constrained, datasource/contract pinned, and rejected when malformed.
 - Telemetry activation v2 pins the exact profile-derived ordered eight-query contract and normalized observed samples.
@@ -48,28 +49,16 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Metric activation v2 verifies the exact ordered profile-derived preflight contract and hashes normalized observed sample values.
 - Persisted/manual activation authority validates canonical SHA-256 digests, trimmed production identity, integer non-negative timestamps, strict expiry ordering, a seven-day maximum lifetime, and strict explicit-clock types.
 
-Recent commits:
-- `dfe6a5cf5164aa1553d6b146487ff7517dc6294d` — Harden telemetry activation record validation
-- `4e6e3264e88ef19c80de7e522544273cf52ff0d4` — Add activation record integrity regressions
-
 ### Loki onboarding / activation
 
 - `preflight_loki()` catches only `EvidenceUnavailable` and emits stable redacted detail; unexpected programming/policy exceptions propagate.
 - Loki activation v2 requires the exact policy-owned LogQL/limit contract, bounded line count/window metadata, no truncation/error detail, canonical persisted-record shape, and bounded validity.
 
-Recent commits:
-- `09b7a9e52e290cfd7b4c4113374aaa7388d47fb6` — Harden Loki preflight and activation authority
-- `abddb80c002041024d5cfa0cdd4acc12a2e61c0f` — Add Loki activation safety regressions
+### Operator/process disclosure boundaries
 
-### Preflight CLI boundary
-
-- The process-level preflight CLI no longer serializes raw exception messages. Startup/config/MCP/provider failures now return only `ready=false`, the stable message `preflight failed`, and the exception class name.
-- This prevents secret-bearing endpoint URLs, bearer tokens, backend response text, and similar provider detail from crossing the operator-visible CLI boundary.
-- Regression coverage checks both the pure failure payload and the actual `main()` error path.
-
-Recent commits:
-- `7de4377a0822f388a1b26273f7de8d23da97e917` — Redact preflight CLI failure details
-- `678744f574216c07af65122d904dc0774e024ac5` — Add preflight CLI redaction regressions
+- Preflight CLI failures no longer serialize raw exception messages; they return a stable `ready=false` envelope plus exception class only.
+- Authentication failures now preserve only a fixed StageGuard-owned public message set. Arbitrary `AuthenticationError` text from custom identity providers is converted to `authentication required` before existing API/console rendering can expose it.
+- HTTP regression coverage exercises this behavior on `/console`, authenticated GET, and authenticated POST surfaces while retaining actionable built-in bearer/IAP messages.
 
 ### Cloud Run / MCP safety retained
 
@@ -79,55 +68,60 @@ Recent commits:
 - Private metrics acceptance job identity is allowlisted and bounded before any Cloud Run/Docker action.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image pin regressions.
 
-## Run log — 2026-09-13 — preflight CLI secret-redaction boundary
+## Run log — 2026-09-13 — authentication disclosure boundary
 
 ### Inspected at start
 
-Read this `progress.md` completely before deciding what to change. Inspected repository metadata and reviewed:
-- `runtime/preflight.py`
-- `runtime/onboarding.py` behavior via `runtime/tests/test_onboarding.py`
-- `runtime/activation.py`
-- `runtime/log_activation.py`
-- `runtime/bootstrap.py`
-- `runtime/README.md`
+Read this `progress.md` completely before selecting work. Inspected repository metadata and reviewed:
+- `README.md`
+- `runtime/api.py`, including console, authenticated GET/POST, readiness, metrics, lifecycle, and error paths
+- `runtime/identity.py`
+- `runtime/incident_service.py` error/state semantics
+- `runtime/tests/test_api.py`
+- `runtime/tests/test_api_evidence_unavailable_mutations.py`
+- `runtime/tests/test_identity.py`
 
-No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, IAM binding, or remediation provider was modified.
+No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions job was modified or manually triggered.
 
 ### Finding
 
-The underlying metric and Loki onboarding functions had already been hardened to redact expected evidence-source failures, but `runtime/preflight.py` still wrapped the complete flow in `except Exception` and printed `f"{type(exc).__name__}: {exc}"`. Constructor failures, malformed provider responses, config/parser failures, or unexpected MCP errors can contain endpoint URLs, credentials, backend response bodies, or other sensitive detail. That contradicted the repository's operator-surface redaction invariant.
+The API intentionally uses `str(AuthenticationError)` for 401 details on the operator console and authenticated GET/POST surfaces. Built-in StageGuard identity providers currently raise bounded messages, but `IdentityProvider` is an extension point. A custom provider could raise `AuthenticationError` containing verifier responses, private endpoints, tenant detail, or secret-bearing diagnostics, and the API would echo that text verbatim. This contradicted the existing operator-surface redaction invariant.
 
 ### Exact changes made
 
-1. Added `_failure_payload(exc)` in `runtime/preflight.py`.
-2. The CLI now returns only:
-   - `ready: false`
-   - `error: "preflight failed"`
-   - `error_type: <exception class>`
-3. Raw exception text is never serialized by this process-level error path.
-4. Added `runtime/tests/test_preflight_cli.py` with regressions proving:
-   - secret-bearing exception messages are absent from serialized failure output;
-   - `main()` returns exit code 2 and emits only the safe envelope when telemetry/profile startup fails.
+1. Hardened `runtime/identity.py` `AuthenticationError` with a fixed StageGuard-owned public-detail vocabulary.
+2. Existing safe/actionable built-in messages remain unchanged (`invalid bearer credential`, `invalid IAP assertion`, etc.).
+3. Any unknown/custom `AuthenticationError` string now renders as exactly `authentication required`; the original exception object/cause can still exist internally without its text crossing the HTTP boundary.
+4. Added `runtime/tests/test_api_auth_error_redaction.py`.
+5. The new HTTP-level regressions use a deliberately secret-bearing custom identity provider and verify redaction on:
+   - `GET /console`
+   - `GET /v1/incident`
+   - `POST /v1/investigate`
+6. The regression also verifies the expected `WWW-Authenticate` challenge remains and that StageGuard-owned bearer/IAP messages remain actionable.
+
+Commits:
+- `ec3f5a80c37d1ba2bfeab7b4dcc192dcc2356f60` — Harden authentication error disclosure boundary
+- `365a0ec9cd7ea3b1d741030a8317a20e156dcc39` — Add authentication error redaction regressions
 
 ### Checks / results
 
-- Authenticated GitHub reads/writes succeeded and both commits landed on `UnknownGod2011/Grafana` main.
-- A fresh executable checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`.
-- The execution runner still failed before checkout with `Could not resolve host: github.com`.
-- No GitHub Actions workflow was triggered or rerun merely to bypass that transient DNS failure.
-- The exact new failure-envelope primitive was independently syntax/redaction checked locally and passed.
-- Because a real repository checkout was unavailable, `runtime.tests.test_preflight_cli` and the broader focused suite are **not yet claimed green**.
+- Authenticated GitHub repository reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
+- Attempted the previously blocked focused suite from a fresh checkout before making changes:
+  `python -m unittest runtime.tests.test_preflight_cli runtime.tests.test_activation runtime.tests.test_log_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v`
+- The execution environment again failed at `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` with `Could not resolve host: github.com`; no repository tests executed in that runner.
+- Checked GitHub for automatically associated workflow runs on the regression commit; none were present. No Actions workflow was manually rerun or triggered.
+- Therefore the new `test_api_auth_error_redaction` module and the previously pending focused suite are **not yet claimed green**.
 
 ### Decisions
 
-1. Treat the CLI as an operator-visible security boundary, not a debugging traceback surface.
-2. Preserve exception class names for coarse diagnosis while suppressing exception text.
-3. Keep detailed provider/MCP diagnostics out of stdout JSON; protected logging can be added separately if needed.
-4. Continue avoiding noisy GitHub Actions solely to compensate for runner DNS failure.
+1. Keep actionable authentication messages for StageGuard-owned providers rather than making every 401 opaque.
+2. Treat arbitrary/custom provider messages as untrusted disclosure input and collapse them to one stable generic detail.
+3. Enforce this at the exception boundary so all current API/console `str(AuthenticationError)` call sites inherit the same rule without duplicated redaction logic.
+4. Do not create CI noise solely to compensate for the transient runner DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_preflight_cli`, `runtime.tests.test_activation`, `runtime.tests.test_log_activation`, `runtime.tests.test_onboarding`, `runtime.tests.test_cloud_run_metrics_acceptance`, `runtime.tests.test_telemetry`, `runtime.tests.test_cloudrun_entrypoint`, and `runtime.tests.test_deploy_cloud_run_script` still need a current repository run.
+- `runtime.tests.test_api_auth_error_redaction`, `runtime.tests.test_identity`, and the prior focused activation/onboarding/Cloud Run suite need a current executable checkout.
 - MCP timeout/surface/image-pin regressions still need an actual repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The strengthened Cloud Run bridge and execution-reconciliation/operator/Playwright safety sets still need current execution.
@@ -136,4 +130,4 @@ The underlying metric and Loki onboarding functions had already been hardened to
 
 ## Single best next step
 
-**As soon as executable checkout works, run `python -m unittest runtime.tests.test_preflight_cli runtime.tests.test_activation runtime.tests.test_log_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v`. Fix any regressions before changing another production boundary. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke, then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, run `python -m unittest runtime.tests.test_api_auth_error_redaction runtime.tests.test_identity runtime.tests.test_preflight_cli runtime.tests.test_activation runtime.tests.test_log_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v`. Fix any regression before adding another production boundary. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke, then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
