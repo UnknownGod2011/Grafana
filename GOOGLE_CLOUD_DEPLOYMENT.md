@@ -10,7 +10,7 @@ Build the dedicated API image from the repository root:
 docker build -f Dockerfile.api -t stageguard-api .
 ```
 
-`Dockerfile.api` is intentionally separate from `runtime/Dockerfile`, which remains the local telemetry simulator image. The API image runs as non-root UID/GID `10001`, listens on Cloud Run's `PORT` through `0.0.0.0`, embeds the official Grafana MCP binary from `grafana/mcp-grafana:1.3.0`, launches it directly over stdio, restricts it to `datasource,prometheus,loki` with writes/proxying disabled, and contains no environment switch that enables production remediation.
+`Dockerfile.api` is intentionally separate from `runtime/Dockerfile`, which remains the local telemetry simulator image. The API image runs as non-root UID/GID `10001`, listens on Cloud Run's `PORT` through `0.0.0.0`, embeds the official Grafana MCP binary from `grafana/mcp-grafana:1.4.1`, launches it directly over stdio, restricts it to `datasource,prometheus,loki` with writes/proxying disabled, and contains no environment switch that enables production remediation.
 
 ## Required runtime configuration
 
@@ -32,10 +32,10 @@ Standard production deployment also requires authenticated GCS checkpointing:
 ```text
 STAGEGUARD_CHECKPOINT_BUCKET=<existing GCS bucket>
 STAGEGUARD_CHECKPOINT_OBJECT=stageguard/incident-checkpoint.json
-STAGEGUARD_CHECKPOINT_HMAC_KEY=<Secret Manager supplied key, at least 32 UTF-8 bytes>
+STAGEGUARD_CHECKPOINT_HMAC_KEY=<Secret Manager supplied key, 32-512 UTF-8 bytes>
 ```
 
-The object is a single bounded checkpoint updated with generation preconditions. It is signed with HMAC before storage and verified before restore, so storage write permission alone cannot forge trusted StageGuard state. `STAGEGUARD_CHECKPOINT_HMAC_KEY` is injected through Cloud Run Secret Manager integration and must not be placed in ordinary environment configuration, shell history, or repository files.
+The object is a single bounded checkpoint updated with generation preconditions. It is signed with HMAC before storage and verified before restore, so storage write permission alone cannot forge trusted StageGuard state. `STAGEGUARD_CHECKPOINT_HMAC_KEY` is injected through Cloud Run Secret Manager integration and must not be placed in ordinary environment configuration, shell history, or repository files. The Cloud Run entrypoint rejects keys shorter than 32 bytes, larger than 512 bytes, or containing leading/trailing whitespace or control characters; generate a random secret rather than a human-readable phrase.
 
 Optional Gemini advisory briefings remain explicit:
 
@@ -45,6 +45,14 @@ GOOGLE_CLOUD_PROJECT=<project-id>
 GOOGLE_CLOUD_LOCATION=global
 STAGEGUARD_GEMINI_MODEL=gemini-2.5-flash
 ```
+
+The remediation/recovery execution watchdog defaults to 60 seconds and may only be configured inside the fixed production safety range of 1 through 600 seconds:
+
+```text
+STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS=60
+```
+
+Values outside that range, non-finite numbers, blanks, and malformed numbers refuse startup instead of silently weakening the watchdog.
 
 `scripts/deploy_cloud_run.sh` always forwards `GOOGLE_CLOUD_PROJECT=${PROJECT_ID}`. Location/model default to `global` and `gemini-2.5-flash`. No corresponding `STAGEGUARD_ENABLE_REMEDIATION` variable exists in the standard production entrypoint.
 
@@ -121,6 +129,7 @@ CHECKPOINT_OBJECT=stageguard/incident-checkpoint.json
 ENABLE_GEMINI=false
 GOOGLE_CLOUD_LOCATION=global
 STAGEGUARD_GEMINI_MODEL=gemini-2.5-flash
+STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS=60
 ```
 
 The telemetry/activation files, Grafana token, and checkpoint HMAC key are resolved from Secret Manager. Secret payloads are never placed directly in the command's ordinary environment-variable list.
@@ -167,7 +176,8 @@ Readiness responses expose only bounded `ok`, `failed`, `missing`, or `blocked` 
 ## Failure behavior
 
 - Missing telemetry mapping, activation files, IAP audience, or required durable checkpoint inputs: startup/deployment is refused.
-- Invalid checkpoint bucket/object identifiers or HMAC keys shorter than 32 bytes: startup is refused.
+- Invalid checkpoint bucket/object identifiers, checkpoint HMAC keys outside 32-512 UTF-8 bytes, or checkpoint HMAC keys with boundary whitespace/control characters: startup is refused.
+- Remediation execution watchdog values below 1 second, above 600 seconds, non-finite, blank, or malformed: startup is refused.
 - Missing checkpoint HMAC Secret Manager access: deployment doctor fails closed.
 - Missing `storage.objects.get`: restart checkpoint reads cannot be trusted and deployment doctor fails closed.
 - Missing `storage.objects.create`: first checkpoint creation cannot succeed and deployment doctor fails closed.
