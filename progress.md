@@ -17,12 +17,13 @@ Core invariants retained:
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
-- The reference Grafana MCP dependency is version-pinned; server-side write/proxy restrictions are regression-locked; the live smoke now also rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
+- The reference Grafana MCP dependency is version-pinned; server-side write/proxy restrictions are regression-locked; the live smoke rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
+- Grafana MCP smoke requests are bounded so a started-but-silent subprocess cannot hang release/operator acceptance indefinitely.
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
-- Focused core/API/UI suite from the last executable run: 81/81 passed.
+- Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest checkpoint/acceptance hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires an executable live smoke before a production-ready claim.
@@ -38,94 +39,95 @@ Core invariants retained:
 - Separate inbound scrape credentials from upstream Google ID tokens.
 - Non-loopback bridge listeners fail closed without explicit network binding plus strong inbound authentication.
 - Official Grafana MCP upgraded to reviewed `v1.4.1` with exact image pin and least-privilege command regression coverage.
+- Live MCP registry validation requires all advertised tools to be explicitly read-only.
 
-## Run log — 2026-09-12 — live Grafana MCP tool-surface hardening
+## Run log — 2026-09-12 — bounded Grafana MCP smoke execution
 
 ### Inspected at start
 
-Read the previous `progress.md` completely before deciding what to change. Inspected the current repository/default branch, `runtime/mcp_smoke.py`, `runtime/tests/test_observability_image_pins.py`, `docs/grafana-mcp-evidence-safety.md`, `README.md`, the runtime tree, and the official Grafana MCP documentation/upstream guidance relevant to `--disable-write` and `--enable-write-tools`.
+Read this `progress.md` completely before deciding what to change. Inspected the repository root/runtime tree, `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_surface.py`, and `docs/grafana-mcp-evidence-safety.md`. Also reviewed current upstream Grafana MCP annotation work and official repository guidance relevant to the evidence-only tool boundary.
 
-All repository writes were limited to `UnknownGod2011/Grafana`. No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
+All repository writes in this run were limited to `UnknownGod2011/Grafana`. No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
 
 ### Finding
 
-The reference stack statically pins `grafana/mcp-grafana:1.4.1` and regression-locks `--disable-write`, `--disable-proxied`, `datasource,prometheus,loki`, and the absence of `--enable-write-tools`. However, the live MCP smoke only required `list_datasources` and `query_prometheus` to advertise `readOnlyHint=true`.
+The newly strengthened live MCP smoke failed closed on unsafe/malformed tool registration, but its stdio request path still used blocking `readline()` with no protocol deadline. If the MCP subprocess started successfully and then stopped replying to `initialize`, `tools/list`, or `tools/call`, the acceptance command could hang indefinitely instead of producing a bounded failure.
 
-That left an upgrade/runtime drift gap: the server could theoretically register an additional write-capable or ambiguously annotated tool while the two required reads still passed the smoke. Static Compose assertions would not prove the effective runtime tool registry remained evidence-only.
-
-Current upstream guidance confirms that write tools are expected to respect `--disable-write` and that `--enable-write-tools` selectively re-enables individual tools. StageGuard intentionally does not use that escape hatch.
+For a production release check this is a reliability and operational-safety gap: dependency health must include bounded response behavior, not only tool semantics after a response eventually arrives.
 
 Relevant upstream references reviewed:
 - https://github.com/grafana/mcp-grafana
-- https://github.com/grafana/mcp-grafana/blob/main/CONTRIBUTING.md
+- https://github.com/grafana/mcp-grafana/issues/1009 (upstream work requiring explicit MCP tool annotations; reinforces why StageGuard validates the effective advertised registry rather than assuming annotations/configuration intent)
 
 ### Exact changes made
 
-#### 1. Hardened `runtime/mcp_smoke.py`
+#### 1. Bounded every stdio JSON-RPC request
 
-Commit: `2e4c361f1fffd736a74313309b776d065439834d`.
+Commits:
+- `20c6048dc9a7fd43510b77ad9b3e557660a0a9a1`
+- `62af4832ead5a032ac3890d9ca6c23772ed4b939`
 
-The smoke now:
-- validates that `tools/list` contains a list rather than accepting malformed shapes;
-- requires every tool entry to be an object with a non-empty string name;
-- rejects duplicate tool names;
-- still requires `list_datasources` and `query_prometheus`;
-- rejects **any advertised tool** whose `annotations.readOnlyHint` is absent or not exactly `true`;
-- performs the real datasource and Prometheus query only after the complete advertised surface passes that read-only gate;
-- reports the bounded sorted advertised read-only tool names on success for operator/release evidence.
+`runtime/mcp_smoke.py` now:
+- uses a dedicated daemon stdout-reader thread and queue rather than blocking the request path directly on `readline()`;
+- applies a monotonic deadline to each JSON-RPC request;
+- defaults to a 15-second per-request timeout;
+- supports `STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS` for explicit tuning;
+- rejects nonnumeric, non-finite, non-positive, or >120-second timeout configuration;
+- reports which MCP method timed out without dumping credentials/provider data;
+- turns broken stdin writes into bounded `McpError` failures;
+- terminates and, if necessary, kills an unresponsive subprocess during cleanup;
+- joins/closes the stdout reader cleanly to avoid leaked pipe handles.
 
-This makes the smoke fail closed on effective runtime tool-registration drift instead of trusting configuration intent alone.
+The existing all-tools `readOnlyHint=true` registry gate and real datasource/Prometheus query remain unchanged.
 
-#### 2. Added dependency-free smoke-surface regressions
+#### 2. Added dependency-free timeout regressions
 
-Created `runtime/tests/test_mcp_smoke_surface.py`.
+Created `runtime/tests/test_mcp_smoke_timeout.py`.
 
-Commit: `e05bcbc55e48b0cb3e46e10ae6a6a7ac3cd54f8c`.
+Commit: `f71c389bc607b9e60f0efd1828e4954645f60788`.
 
 Coverage includes:
-- valid required + optional explicit read-only tools;
-- missing required read tools;
-- `readOnlyHint=false`;
-- missing/invalid annotations;
-- malformed `tools` field;
-- malformed tool entries;
-- missing, blank, or non-string names;
-- duplicate advertised names.
+- default and explicit timeout parsing;
+- invalid/unsafe timeout configuration;
+- a real local Python subprocess returning a matching JSON-RPC response;
+- a real local Python subprocess that deliberately remains silent, proving request timeout rather than indefinite blocking;
+- constructor rejection of non-positive/non-finite timeout values.
 
-The tests exercise pure validation functions and require no Grafana, Docker, token, or MCP process.
+The test requires no Docker, Grafana, token, or external service.
 
-#### 3. Updated MCP evidence-safety documentation
+#### 3. Documented bounded smoke behavior
 
-Commit: `69d6685dafda5a88b65f1e8457482af4643736e7`.
+Updated `docs/grafana-mcp-evidence-safety.md`.
 
-`docs/grafana-mcp-evidence-safety.md` now documents the live server surface contract and explicitly states that missing `readOnlyHint` is treated the same as `false`. It also clarifies that annotation validation is defense in depth and does not replace server-side `--disable-write`, `--disable-proxied`, narrow categories, or least-privilege Grafana credentials.
+Commit: `7b12a33e0271e5cc7d0852a266517b044335a603`.
+
+The document now records the 15-second default/120-second maximum, the environment override, fail-closed invalid configuration, subprocess cleanup behavior, and the expectation that timeout/cleanup behavior remains regression-covered.
 
 ### Checks / results
 
 - Direct authenticated GitHub repository inspection and writes succeeded.
-- Reviewed current official/upstream Grafana MCP read-only/write-tool behavior before implementing the guard.
-- Attempted a fresh local checkout followed by:
-  - `python -m unittest runtime.tests.test_observability_image_pins runtime.tests.test_mcp_smoke_surface`
-- The local execution environment again failed before checkout with `Could not resolve host: github.com`.
+- A fresh local repository checkout was attempted for `runtime.tests.test_mcp_smoke_surface` + `runtime.tests.test_mcp_smoke_timeout`, but the execution environment still failed at clone time with `Could not resolve host: github.com`.
 - No GitHub Actions workflow was triggered or rerun as a workaround.
+- Because checkout remained unavailable, I built a dependency-free local mirror of the new `StdioClient` timeout path and exercised the responsive/silent subprocess behavior directly. Result: **3/3 passed**.
+- The first mirror run exposed a `ResourceWarning` for an unclosed stdout pipe; the production implementation was then hardened to join the reader and close stdout. Re-running the mirror with `ResourceWarning` promoted to an error passed **3/3** without warnings.
 - No Docker image was pulled and no live MCP 1.4.1 smoke was claimed.
 
-Therefore there is **no new green executable-test claim** for this run. The implementation is committed, but focused unit execution and the real MCP 1.4.1 smoke remain required.
+Therefore there is still **no new green repository-suite claim**. The protocol mechanics were executable-tested in isolation, while the committed unit modules and real MCP stack still need execution from a functioning checkout.
 
 ### Decisions
 
-1. Validate the effective live MCP tool registry, not only Compose flags.
-2. Treat missing read-only annotations as unsafe/ambiguous for StageGuard's evidence-only boundary.
-3. Apply the invariant to every advertised tool, including future optional datasource/Prometheus/Loki tools, so upstream registration drift cannot hide behind the two required tools.
-4. Keep the live query in the same smoke so release acceptance proves both capability and least privilege.
-5. Preserve server-side controls and credential least privilege; MCP annotations are an additional guard, not an authorization mechanism.
+1. MCP acceptance must be bounded in time as well as bounded in capability.
+2. Use a platform-neutral reader thread/queue instead of `select()` on subprocess pipes so the smoke remains usable on Windows and Unix-like development hosts.
+3. Put a hard maximum on operator-configurable request deadlines so a typo cannot silently restore effectively unbounded waiting.
+4. Keep timeouts per request, not one global smoke deadline, so slow startup/query phases are diagnosable by method while still bounded.
+5. Preserve the all-tools explicit-read-only gate; timeout hardening does not relax dependency security.
 6. Avoid noisy CI solely to work around the transient checkout/DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_mcp_smoke_surface` and `runtime.tests.test_observability_image_pins` still need executable local runs.
+- `runtime.tests.test_mcp_smoke_surface`, `runtime.tests.test_mcp_smoke_timeout`, and `runtime.tests.test_observability_image_pins` still need execution from the actual repository checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required before calling that dependency baseline production-ready.
-- It remains to confirm that every tool actually exposed by 1.4.1 under StageGuard's exact `datasource,prometheus,loki --disable-write --disable-proxied` configuration carries `readOnlyHint=true`; if upstream omits an annotation on a genuinely read-only tool, the smoke will intentionally fail and the compatibility decision must be explicit rather than silently relaxed.
+- It remains to confirm that every tool actually exposed by 1.4.1 under StageGuard's exact `datasource,prometheus,loki --disable-write --disable-proxied` configuration carries `readOnlyHint=true`.
 - The strengthened Cloud Run bridge six-module set still needs an executable run.
 - The execution-reconciliation/operator/Playwright safety set from previous runs still needs a current run.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -133,4 +135,4 @@ Therefore there is **no new green executable-test claim** for this run. The impl
 
 ## Single best next step
 
-**As soon as executable checkout/Docker access works, run `runtime.tests.test_observability_image_pins` and `runtime.tests.test_mcp_smoke_surface`, then execute `python runtime/mcp_smoke.py` against the repository-pinned Grafana MCP 1.4.1 stack. If the live tool registry passes the all-tools `readOnlyHint=true` gate and the Prometheus query succeeds, continue with the six focused Cloud Run bridge modules and private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up 1 -> 0 -> 1` acceptance.**
+**As soon as executable repository checkout/Docker access works, run `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins`, then execute `python runtime/mcp_smoke.py` against the pinned Grafana MCP 1.4.1 stack. This must prove both bounded request behavior and an all-explicit-read-only live registry while successfully querying StageGuard Prometheus evidence. If clean, continue with the six focused Cloud Run bridge modules and the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up 1 -> 0 -> 1` acceptance.**
