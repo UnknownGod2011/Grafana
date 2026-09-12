@@ -7,10 +7,12 @@ headers, never accepts an arbitrary upstream path, never follows upstream
 redirects, and never logs tokens or upstream error bodies.
 
 An optional *inbound* bearer token can protect /readyz and /metrics when the
-bridge must bind beyond loopback (for example, so Prometheus in Docker can
-scrape the host). This token is independent from the Google ID token: callers
-never receive or control the upstream credential. /healthz remains process-only
-liveness and does not mint an upstream token.
+bridge is loopback-only. If the bridge binds beyond loopback (for example, so
+Prometheus in Docker can scrape the host), inbound bearer authentication is
+mandatory in addition to explicit network-bind opt-in. This token is
+independent from the Google ID token: callers never receive or control the
+upstream credential. /healthz remains process-only liveness and does not mint
+an upstream token.
 
 A successful upstream HTTP response is not sufficient evidence that the bridge
 reached StageGuard. Every accepted payload must contain exactly one finite,
@@ -279,9 +281,12 @@ def make_server(
     allow_network_bind: bool = False,
     bearer_token: str | None = None,
 ) -> ThreadingHTTPServer:
-    if not _is_loopback(host) and not allow_network_bind:
+    is_loopback = _is_loopback(host)
+    if not is_loopback and not allow_network_bind:
         raise BridgeConfigurationError("non-loopback metrics bridge bind requires --allow-network-bind")
     normalized_token = normalize_bridge_bearer_token(bearer_token)
+    if not is_loopback and normalized_token is None:
+        raise BridgeConfigurationError("non-loopback metrics bridge bind requires inbound bearer authentication")
     handler = type(
         "ConfiguredMetricsBridgeHandler",
         (MetricsBridgeHandler,),
@@ -301,7 +306,7 @@ def main() -> int:
     parser.add_argument(
         "--bearer-token",
         default=os.environ.get("STAGEGUARD_BRIDGE_BEARER_TOKEN"),
-        help="optional inbound bearer token protecting /readyz and /metrics",
+        help="inbound bearer token protecting /readyz and /metrics; required for non-loopback binds",
     )
     parser.add_argument(
         "--allow-cross-origin-audience",
