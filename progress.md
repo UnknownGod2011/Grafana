@@ -25,6 +25,7 @@ Core invariants retained:
 - `ExecutionSafeIncidentService` prioritizes `execution_uncertain` once provider dispatch may have occurred, even when audit integrity also failed.
 - Authenticated lifecycle responses expose a bounded composite `safety_state` and a strict `sg-<40 lowercase hex>` `execution_reconciliation_reference` only when appropriate.
 - `/readyz` and Prometheus expose fixed-cardinality lifecycle-safety state without exporting the reconciliation reference.
+- The dedicated Prometheus remediation-uncertainty gauge now follows both checkpoint execution uncertainty and any non-clear execution-reconciliation barrier, so it cannot contradict the composite no-replay safety state.
 - The operator console treats any non-`ok` composite safety state as an independent fail-closed interlock.
 - `execution_uncertain_audit_failed` renders a prominent `DO NOT REPLAY REMEDIATION` state and keeps investigation, Gemini briefing, approval, and execution disabled.
 - Base and anchored checkpoint-backed transition failures restore the last committed snapshot and prevent append-before-persistence residue from becoming operator-visible committed history.
@@ -173,6 +174,61 @@ No green repository-suite or Playwright claim is made for this run.
 - The disposable private Cloud Run acceptance still requires a private StageGuard test service, working least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
+## Run log — 2026-09-12 — reconciliation/Prometheus safety consistency
+
+### Inspected at start
+
+Read `progress.md` completely before deciding what to change. Then inspected `runtime/api.py`, `runtime/tests/test_execution_reconciliation_observability.py`, `runtime/operator_console.py`, and the real-browser `runtime/tests/test_operator_browser_execution_uncertain.py` acceptance. A fresh local checkout was attempted first and again failed with `Could not resolve host: github.com`; repository inspection and writes therefore used the GitHub repository connector directly.
+
+### Finding
+
+`_lifecycle_safety_state()` correctly treats any non-clear execution-reconciliation state as execution uncertainty, including the dual `execution_uncertain_audit_failed` no-replay condition. The dedicated Prometheus gauge `stageguard_remediation_execution_uncertain`, however, was computed only from `checkpoint_state == "execution_uncertain"`.
+
+That created a contradictory observability possibility: a process could expose `lifecycle_safety=execution_uncertain_audit_failed` and block operator replay while the dedicated remediation-uncertainty gauge reported `0` if the checkpoint surface still read `conflicted` and the reconciliation state remained non-clear. For a production incident commander, Grafana must not under-report the exact state that operators are told is unsafe.
+
+### Exact changes made
+
+1. Updated `runtime/api.py` so `stageguard_remediation_execution_uncertain` is asserted whenever either:
+   - checkpoint state is `execution_uncertain`, or
+   - the bounded execution reconciliation state is anything other than `clear`.
+
+   This aligns Prometheus with the same no-replay predicate used by the lifecycle safety contract.
+
+   Commit: `4faa33af85e4dee7274623a45f77e47233564905`.
+
+2. Strengthened `runtime/tests/test_execution_reconciliation_observability.py` with a regression where checkpoint state remains `conflicted` while reconciliation is `reloaded`/non-clear. The test requires:
+   - `stageguard_remediation_execution_uncertain 1` for the uncertain state;
+   - the gauge to remain `0` for a plain checkpoint conflict with clear reconciliation;
+   - the uncertain case to map to `execution_uncertain_audit_failed`;
+   - the plain conflict to remain `checkpoint_conflicted`.
+
+   The existing dual execution/audit failure test now also explicitly requires the uncertainty gauge to be `1`.
+
+   Commit: `dd68bcc45fdcb40a6a78547a72d47156e1112459`.
+
+### Checks / results
+
+- Re-read the production commit diff from GitHub and confirmed it is narrowly scoped to the metric predicate; no unrelated runtime behavior changed.
+- Re-read the regression commit diff and confirmed coverage includes both the non-clear reconciliation case and the clear-conflict control case.
+- The local execution environment still cannot resolve `github.com`, so the focused unittest module and the broader operator/safety set could not be executed from a checkout during this run.
+- No GitHub Actions workflow was created, modified, triggered, or rerun as a workaround.
+- No GCP/IAM/Cloud Run, Grafana Cloud, Gemini provider, remediation provider, audit store, or other external runtime resource was mutated.
+- No new green test-suite claim is made.
+
+### Decisions
+
+1. Treat reconciliation state as part of the canonical execution-uncertainty signal, not merely a UI concern.
+2. Keep the metric fixed-cardinality and continue excluding the `sg-...` reconciliation reference from Prometheus.
+3. Preserve checkpoint-conflict telemetry independently; a dual failure may legitimately assert both conflict and execution-uncertainty indicators.
+4. Avoid adding new dashboard/UI features until the current safety and Cloud Run acceptance surfaces are executable again.
+
+### Blockers / unknowns
+
+- The modified execution-reconciliation observability regression still needs execution in a working checkout.
+- Both Playwright safety acceptances and the focused operator/transition suites still need a current combined run.
+- The disposable private Cloud Run acceptance still requires a private test service, least-privilege ADC invoker identity, and Docker.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
+
 ## Single best next step
 
-**As soon as checkout execution is available, run the complete focused operator/safety set including both Playwright modules and fix any integration mismatch first. If those pass, move to the private Cloud Run `ADC -> /metrics -> bridge -> Prometheus up 1 -> 0 -> 1` acceptance, because that is now the highest-value remaining production integration proof rather than adding more operator UI features.**
+**As soon as checkout execution is available, run `tests.test_execution_reconciliation_observability` first to validate the corrected Prometheus no-replay signal, then run the complete focused operator/safety set including both Playwright modules. If those are clean, move directly to the private Cloud Run `ADC -> /metrics -> bridge -> Prometheus up 1 -> 0 -> 1` acceptance rather than adding more UI surface.**
