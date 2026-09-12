@@ -1,3 +1,4 @@
+import math
 import pathlib
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ from activation import (
     write_activation_record,
 )
 from incident_service import IncidentService, MemoryAuditLog
-from onboarding import preflight_telemetry
+from onboarding import PreflightResult, PreflightSlot, preflight_telemetry
 from remediation import ActionResult
 from telemetry import TelemetryProfile, investigation_queries, recovery_queries
 
@@ -55,6 +56,21 @@ def successful_preflight(p):
     return preflight_telemetry(RecordingClient({q: 1.0 for q in queries}), p)
 
 
+def forged_preflight(p, *, value=1.0, detail=None):
+    slots = tuple(
+        PreflightSlot(
+            phase="investigation" if index < 5 else "recovery",
+            name=f"slot-{index}",
+            promql=f"vector({index})",
+            status="ok",
+            value=value,
+            detail=detail,
+        )
+        for index in range(8)
+    )
+    return PreflightResult(production_id=p.production_id, ready=True, slots=slots)
+
+
 class ActivationTests(unittest.TestCase):
     def test_successful_preflight_can_be_pinned_and_round_tripped(self):
         p = profile()
@@ -73,6 +89,40 @@ class ActivationTests(unittest.TestCase):
         result = preflight_telemetry(RecordingClient({q: None for q in queries}), p)
         with self.assertRaisesRegex(ValueError, "did not pass preflight"):
             create_activation_record(p, "prom-main", result, now_unix=1000)
+
+    def test_forged_ok_preflight_requires_numeric_samples(self):
+        p = profile()
+        for value in (None, True, "1.0"):
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(ValueError, "numeric sample"):
+                    create_activation_record(
+                        p,
+                        "prom-main",
+                        forged_preflight(p, value=value),
+                        now_unix=1000,
+                    )
+
+    def test_forged_ok_preflight_requires_finite_samples(self):
+        p = profile()
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite sample"):
+                    create_activation_record(
+                        p,
+                        "prom-main",
+                        forged_preflight(p, value=value),
+                        now_unix=1000,
+                    )
+
+    def test_forged_ok_preflight_cannot_carry_error_detail(self):
+        p = profile()
+        with self.assertRaisesRegex(ValueError, "without error detail"):
+            create_activation_record(
+                p,
+                "prom-main",
+                forged_preflight(p, detail="provider warning"),
+                now_unix=1000,
+            )
 
     def test_profile_change_after_preflight_is_rejected(self):
         p = profile()
