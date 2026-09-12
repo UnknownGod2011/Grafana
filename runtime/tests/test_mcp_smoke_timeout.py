@@ -5,7 +5,7 @@ import sys
 import time
 import unittest
 
-from runtime.mcp_smoke import McpError, StdioClient, _request_timeout_seconds
+from runtime.mcp_smoke import MAX_STDIO_LINE_CHARS, McpError, StdioClient, _request_timeout_seconds
 
 
 _RESPONDER = r'''
@@ -63,6 +63,16 @@ for _line in sys.stdin:
 '''
 
 
+def _oversized_stdout_script() -> str:
+    return f'''
+import sys
+for _line in sys.stdin:
+    sys.stdout.write("x" * {MAX_STDIO_LINE_CHARS + 1})
+    sys.stdout.flush()
+    break
+'''
+
+
 class McpSmokeTimeoutTests(unittest.TestCase):
     def test_default_and_explicit_timeout_parsing(self) -> None:
         self.assertEqual(_request_timeout_seconds(None), 15.0)
@@ -104,6 +114,19 @@ class McpSmokeTimeoutTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(McpError, "stdout contained non-JSON data"):
                 client.request("ping")
+        finally:
+            client.close()
+
+    def test_oversized_stdout_frame_fails_before_json_parsing(self) -> None:
+        client = StdioClient(
+            [sys.executable, "-u", "-c", _oversized_stdout_script()],
+            request_timeout_seconds=2.0,
+        )
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(McpError, "exceeded the maximum allowed JSON-RPC frame size"):
+                client.request("ping")
+            self.assertLess(time.monotonic() - started, 2.0)
         finally:
             client.close()
 
