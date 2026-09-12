@@ -7,6 +7,8 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from activation import (
+    ACTIVATION_VERSION,
+    ActivationRecord,
     create_activation_record,
     load_activation_record,
     verify_activation_record,
@@ -50,31 +52,37 @@ def profile():
     )
 
 
-def successful_preflight(p):
+def successful_preflight(p, value=1.0):
     queries = [q for q, _ in investigation_queries(p).values()]
     queries += [q for q, _ in recovery_queries(p).values()]
-    return preflight_telemetry(RecordingClient({q: 1.0 for q in queries}), p)
+    return preflight_telemetry(RecordingClient({q: value for q in queries}), p)
 
 
 def forged_preflight(p, *, value=1.0, detail=None):
-    slots = tuple(
-        PreflightSlot(
-            phase="investigation" if index < 5 else "recovery",
-            name=f"slot-{index}",
-            promql=f"vector({index})",
-            status="ok",
-            value=value,
-            detail=detail,
-        )
-        for index in range(8)
-    )
-    return PreflightResult(production_id=p.production_id, ready=True, slots=slots)
+    slots = []
+    for phase, queries in (
+        ("investigation", investigation_queries(p)),
+        ("recovery", recovery_queries(p)),
+    ):
+        for name, (promql, _expectation) in queries.items():
+            slots.append(
+                PreflightSlot(
+                    phase=phase,
+                    name=name,
+                    promql=promql,
+                    status="ok",
+                    value=value,
+                    detail=detail,
+                )
+            )
+    return PreflightResult(production_id=p.production_id, ready=True, slots=tuple(slots))
 
 
 class ActivationTests(unittest.TestCase):
     def test_successful_preflight_can_be_pinned_and_round_tripped(self):
         p = profile()
         record = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
+        self.assertEqual(ACTIVATION_VERSION, record.version)
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "activation.json"
             write_activation_record(path, record)
@@ -123,6 +131,49 @@ class ActivationTests(unittest.TestCase):
                 forged_preflight(p, detail="provider warning"),
                 now_unix=1000,
             )
+
+    def test_forged_ok_preflight_with_arbitrary_promql_is_rejected(self):
+        p = profile()
+        forged = PreflightResult(
+            production_id=p.production_id,
+            ready=True,
+            slots=tuple(
+                PreflightSlot(
+                    phase="investigation" if index < 6 else "recovery",
+                    name=f"forged-{index}",
+                    promql=f"vector({index})",
+                    status="ok",
+                    value=1.0,
+                )
+                for index in range(8)
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "contract does not match"):
+            create_activation_record(p, "prom-main", forged, now_unix=1000)
+
+    def test_forged_ok_preflight_with_reordered_real_slots_is_rejected(self):
+        p = profile()
+        original = successful_preflight(p)
+        forged = PreflightResult(
+            production_id=p.production_id,
+            ready=True,
+            slots=tuple(reversed(original.slots)),
+        )
+        with self.assertRaisesRegex(ValueError, "contract does not match"):
+            create_activation_record(p, "prom-main", forged, now_unix=1000)
+
+    def test_activation_digest_binds_observed_sample_values(self):
+        p = profile()
+        first = create_activation_record(p, "prom-main", successful_preflight(p, 1.0), now_unix=1000)
+        second = create_activation_record(p, "prom-main", successful_preflight(p, 2.0), now_unix=1000)
+        self.assertNotEqual(first.slot_digest_sha256, second.slot_digest_sha256)
+
+    def test_legacy_activation_version_is_rejected(self):
+        p = profile()
+        current = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
+        legacy = ActivationRecord(**{**current.to_dict(), "version": ACTIVATION_VERSION - 1})
+        with self.assertRaisesRegex(ValueError, "unsupported activation record version"):
+            verify_activation_record(legacy, p, "prom-main", now_unix=1001)
 
     def test_profile_change_after_preflight_is_rejected(self):
         p = profile()
