@@ -29,6 +29,7 @@ import argparse
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -51,6 +52,8 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 DEFAULT_PROMETHEUS_START_TIMEOUT_SECONDS = 45.0
 DEFAULT_SCRAPE_TIMEOUT_SECONDS = 45.0
 ALLOWED_UNAUTHORIZED_STATUSES = frozenset({401, 403})
+MAX_JOB_NAME_LENGTH = 128
+_JOB_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
 
 
 class AcceptanceError(RuntimeError):
@@ -65,6 +68,23 @@ class AcceptanceResult:
     prometheus_up: float
     outage_up: float
     recovered_up: float
+
+
+def normalize_job_name(value: str) -> str:
+    """Return one unambiguous Prometheus job identity for the acceptance probe.
+
+    The same value is embedded in generated YAML and in the exact PromQL
+    selector used for the up/down/up proof. Restricting it to a deliberately
+    small label-safe alphabet prevents config/query injection and accidental
+    selectors that can broaden the acceptance target set.
+    """
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise AcceptanceError("Prometheus job name must be a non-empty trimmed string")
+    if len(value) > MAX_JOB_NAME_LENGTH:
+        raise AcceptanceError(f"Prometheus job name must be at most {MAX_JOB_NAME_LENGTH} characters")
+    if _JOB_NAME_RE.fullmatch(value) is None:
+        raise AcceptanceError("Prometheus job name contains unsupported characters")
+    return value
 
 
 def _request_status_without_redirects(url: str, timeout_seconds: float) -> int:
@@ -128,6 +148,7 @@ def wait_for_prometheus_up(
     timeout_seconds: float,
 ) -> float:
     """Wait for one finite Prometheus ``up`` sample equal to ``expected``."""
+    job_name = normalize_job_name(job_name)
     if expected not in (0.0, 1.0):
         raise ValueError("expected Prometheus up value must be 0 or 1")
     query = urllib.parse.urlencode({"query": f'up{{job="{job_name}"}}'})
@@ -170,6 +191,7 @@ def fetch_prometheus_up(prometheus_url: str, job_name: str, timeout_seconds: flo
 
 
 def _prometheus_config(bridge_port: int, job_name: str, bearer_token: str | None = None) -> str:
+    job_name = normalize_job_name(job_name)
     auth = ""
     if bearer_token is not None:
         # JSON strings are valid YAML scalars and avoid injection through a
@@ -180,7 +202,7 @@ def _prometheus_config(bridge_port: int, job_name: str, bearer_token: str | None
         "  scrape_interval: 2s\n"
         "  scrape_timeout: 2s\n"
         "scrape_configs:\n"
-        f"  - job_name: {job_name!r}\n"
+        f"  - job_name: {json.dumps(job_name)}\n"
         f"{auth}"
         "    static_configs:\n"
         f"      - targets: ['host.docker.internal:{bridge_port}']\n"
@@ -301,6 +323,7 @@ def run_acceptance(
     job_name: str = DEFAULT_JOB_NAME,
     client_factory: Callable[..., CloudRunMetricsClient] = CloudRunMetricsClient,
 ) -> AcceptanceResult:
+    job_name = normalize_job_name(job_name)
     metrics_url, target_origin = normalize_target(target)
     unauthorized_status = verify_unauthorized_upstream(metrics_url, timeout_seconds)
     client = client_factory(target, audience=audience, timeout_seconds=timeout_seconds)
