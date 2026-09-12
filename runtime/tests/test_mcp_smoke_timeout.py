@@ -18,6 +18,43 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"ok": True}}), flush=True)
 '''
 
+_NOTIFICATION_THEN_RESPONSE = r'''
+import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}}), flush=True)
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"ok": True}}), flush=True)
+'''
+
+_DIRTY_STDOUT = r'''
+import sys
+for _line in sys.stdin:
+    print("unexpected log line on stdout", flush=True)
+    break
+'''
+
+_WRONG_ID = r'''
+import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"] + 1, "result": {"ok": True}}), flush=True)
+    break
+'''
+
+_MALFORMED_ENVELOPE = r'''
+import json
+import sys
+for _line in sys.stdin:
+    print(json.dumps({"jsonrpc": "1.0", "id": 1, "result": {"ok": True}}), flush=True)
+    break
+'''
+
 _SILENT = r'''
 import sys
 import time
@@ -46,6 +83,49 @@ class McpSmokeTimeoutTests(unittest.TestCase):
         try:
             result = client.request("ping", {"value": 1})
             self.assertEqual(result, {"ok": True})
+        finally:
+            client.close()
+
+    def test_notifications_are_allowed_while_waiting_for_response(self) -> None:
+        client = StdioClient(
+            [sys.executable, "-u", "-c", _NOTIFICATION_THEN_RESPONSE],
+            request_timeout_seconds=1.0,
+        )
+        try:
+            self.assertEqual(client.request("ping"), {"ok": True})
+        finally:
+            client.close()
+
+    def test_non_json_stdout_fails_closed(self) -> None:
+        client = StdioClient(
+            [sys.executable, "-u", "-c", _DIRTY_STDOUT],
+            request_timeout_seconds=1.0,
+        )
+        try:
+            with self.assertRaisesRegex(McpError, "stdout contained non-JSON data"):
+                client.request("ping")
+        finally:
+            client.close()
+
+    def test_unexpected_response_id_fails_closed(self) -> None:
+        client = StdioClient(
+            [sys.executable, "-u", "-c", _WRONG_ID],
+            request_timeout_seconds=1.0,
+        )
+        try:
+            with self.assertRaisesRegex(McpError, "unexpected response id"):
+                client.request("ping")
+        finally:
+            client.close()
+
+    def test_invalid_jsonrpc_version_fails_closed(self) -> None:
+        client = StdioClient(
+            [sys.executable, "-u", "-c", _MALFORMED_ENVELOPE],
+            request_timeout_seconds=1.0,
+        )
+        try:
+            with self.assertRaisesRegex(McpError, "jsonrpc=2.0"):
+                client.request("ping")
         finally:
             client.close()
 
