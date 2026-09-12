@@ -17,7 +17,7 @@ Core invariants retained:
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; server-side write/proxy restrictions are regression-locked; the live smoke rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
-- Grafana MCP smoke requests are time-bounded, stdio framing/response integrity fails closed, and individual stdout protocol frames are bounded before JSON parsing.
+- Grafana MCP smoke requests are time-bounded, stdout JSON-RPC frames are individually bounded, strict framing/response integrity fails closed, and pending stdout frames are held in a fixed-capacity queue so notification/output floods cannot create unbounded process memory growth.
 
 ## Retained validation baseline
 
@@ -27,74 +27,71 @@ Core invariants retained:
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest checkpoint/acceptance hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires an executable live smoke before a production-ready claim.
 
-## Run log — 2026-09-12 — MCP stdio frame-size hardening
+## Run log — 2026-09-12 — MCP pending-frame queue hardening
 
 ### Inspected at start
 
-Read this `progress.md` completely before deciding what to change. Inspected:
+Read this `progress.md` completely before deciding what to change. Inspected the current default-branch repository state and then reviewed:
 - `runtime/mcp_smoke.py`
 - `runtime/tests/test_mcp_smoke_timeout.py`
 - `docs/grafana-mcp-evidence-safety.md`
-
-Also reviewed current official MCP SDK transport guidance. Relevant references:
-- https://php.sdk.modelcontextprotocol.io/run/stdio/ — official stdio transport exposes `maxLineBytes` and rejects oversized lines.
-- https://ruby.sdk.modelcontextprotocol.io/server/transports/ — official stdio transport exposes `max_line_bytes` to bound a newline-delimited frame.
-- https://go.sdk.modelcontextprotocol.io/protocol/ — stdio is newline-delimited JSON over stdin/stdout.
-- https://github.com/grafana/mcp-grafana — official Grafana MCP repository.
+- current `main` branch head (`a4254bd64d90e44b8756f059dcb1fbf4d36e0b72` at run start)
 
 All repository writes in this run were limited to `UnknownGod2011/Grafana`. No unrelated repository, workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
 
 ### Finding
 
-The MCP smoke already bounded request latency and failed closed on malformed JSON-RPC, but the stdout reader used unbounded line iteration. A broken or compromised MCP subprocess could therefore emit an arbitrarily large newline-delimited or unterminated stdout frame and force the client to accumulate a large amount of data before the request timeout meaningfully protected the caller. Request deadlines and frame-size bounds protect different failure modes, so both are needed at this dependency boundary.
+The MCP smoke had already bounded two important dimensions: each request has a deadline, and each newline-delimited stdout frame is capped before JSON parsing. However, the reader thread fed those frames into an **unbounded `queue.Queue`**. A broken or compromised MCP subprocess could emit a large stream of individually valid, individually sub-1-MiB notifications faster than the single sequential request consumer could process them. That output could accumulate in process memory without violating either the per-request timeout or per-frame limit. This is a distinct producer/consumer resource-exhaustion boundary.
 
 ### Exact changes made
 
-#### 1. Bounded MCP stdout protocol frames
+#### 1. Bounded the pending MCP stdout queue
 
-Commit: `8737b83da2f05e6dffb2f959d03eda0e48818e2d`
+Commit: `cb8174ed6b42da1f984d328c2c2b1f078dd21e2c`
 
 `runtime/mcp_smoke.py` now:
-- defines a fixed `MAX_STDIO_LINE_CHARS = 1_048_576` acceptance bound;
-- reads stdout with `readline(MAX_STDIO_LINE_CHARS + 1)` instead of unbounded line iteration;
-- emits a structured `McpError` through the reader queue when a frame exceeds that bound;
-- fails the active request before JSON parsing when the oversized-frame marker is received;
-- preserves existing request deadlines, strict JSON-RPC validation, notification handling, response-id checks, and subprocess cleanup.
+- defines a fixed `MAX_STDOUT_QUEUE_FRAMES = 16` limit;
+- constructs the stdout handoff queue with `maxsize=16` rather than leaving it unbounded;
+- uses non-blocking `put_nowait` in the stdout reader so the reader thread can never deadlock indefinitely waiting for queue capacity;
+- records overflow with a `threading.Event` sentinel and stops reading further protocol data when capacity is exceeded;
+- checks the overflow sentinel while waiting for a response and fails closed with a bounded-capacity `McpError` rather than draining an attacker-controlled backlog;
+- applies the same non-blocking handoff to oversized-frame errors and EOF markers, preserving the existing subprocess cleanup path;
+- retains the existing request deadline, 1,048,576-character frame limit, strict JSON-RPC validation, notification support, response-ID matching, and read-only tool-surface enforcement.
 
-The bound is intentionally fixed rather than made casually configurable. StageGuard's release smoke performs `initialize`, `tools/list`, datasource discovery, and a bounded instant Prometheus query; legitimate frames for that acceptance path should be far below 1 MiB. Raising the trust boundary should require an explicit code review.
+The queue limit is fixed rather than environment-configurable. This smoke has one outstanding request at a time and does not need a deep asynchronous event backlog; increasing the pending-frame trust boundary should require code review.
 
-#### 2. Added a real-subprocess oversized-frame regression
+#### 2. Added a deterministic notification-flood regression
 
-Commit: `2e919541c25803259333d764a67120af3f83c4ce`
+Commit: `90afa2bbee587bfe03810b5321c60ef568847eee`
 
-`runtime/tests/test_mcp_smoke_timeout.py` now includes a subprocess that writes `MAX_STDIO_LINE_CHARS + 1` characters to stdout. The regression requires StageGuard to raise the frame-size `McpError` promptly, before the output is passed to JSON parsing. Existing tests for normal replies, notifications, stray stdout, mismatched IDs, invalid JSON-RPC versions, silent-server timeout, and timeout configuration remain intact.
+`runtime/tests/test_mcp_smoke_timeout.py` now includes a real local subprocess that emits `MAX_STDOUT_QUEUE_FRAMES + 1` JSON-RPC notifications before it begins consuming requests. The regression waits for the overflow sentinel, verifies the queue never exceeds its configured capacity, and requires the next request to fail closed with the queue-capacity error. Existing timeout, valid response, notification, dirty stdout, oversized frame, wrong response ID, invalid JSON-RPC version, and constructor validation coverage remains in place.
 
-#### 3. Documented the resource-exhaustion boundary
+#### 3. Documented the third stdio resource bound
 
-Commit: `2bd04f7eccd6ef534e2b9ce68a6ba088bb9ecc2f`
+Commit: `0cb235a996732c5568d59eb589df8afcaaa90d2b`
 
-`docs/grafana-mcp-evidence-safety.md` now records:
-- the fixed 1,048,576-character stdout frame ceiling;
-- why request deadlines alone do not bound per-frame memory;
-- the fail-closed behavior before JSON parsing;
-- current official MCP SDK examples that also expose bounded stdio line/frame settings;
-- the regression expectation for oversized stdout frames.
+`docs/grafana-mcp-evidence-safety.md` now describes the MCP stdio safety contract as three independent limits:
+1. bounded request time;
+2. bounded individual stdout frame size;
+3. bounded pending stdout-frame count.
+
+The documentation also explains why notification floods are different from a single oversized frame, why bounded legitimate notifications remain supported, and why the queue depth is intentionally fixed.
 
 ### Checks / results
 
-- Direct authenticated GitHub repository inspection and writes succeeded.
-- A fresh repository checkout was attempted with `git clone https://github.com/UnknownGod2011/grafana.git`; the local execution environment still failed with `Could not resolve host: github.com`.
+- Direct authenticated GitHub repository inspection and all three repository writes succeeded.
+- A fresh checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution environment still failed with `Could not resolve host: github.com`.
 - No GitHub Actions workflow was triggered or rerun as a workaround.
-- Because the repository checkout remains unavailable, the actual repository unittest module was not executed and there is **no new green repository-suite claim**.
-- An isolated subprocess-level proof of the exact bounded-read primitive was executed locally: a child wrote `1,048,577` stdout characters with no newline, the reader used `readline(1,048,577)`, and the oversized frame was detected in `0.447s`. This validates the transport primitive only; it does not replace the committed unittest or live MCP smoke.
+- Because an executable checkout remains unavailable, `runtime.tests.test_mcp_smoke_timeout` was **not** executed from the actual repository and there is no new green repository-suite claim.
+- An isolated subprocess proof of the exact new queue primitive was executed locally: a child emitted 17 JSON-RPC notification frames into a queue capped at 16; the overflow sentinel became true and observed queue size remained exactly 16. This validates the producer/consumer bound itself, not the committed unittest module or live Grafana MCP integration.
 
 ### Decisions
 
-1. Keep both request-time and per-frame bounds; they mitigate distinct hang/resource-exhaustion modes.
-2. Fail an oversized frame before JSON parsing rather than attempting truncation or recovery, because truncating protocol data could create ambiguous semantics.
-3. Keep the smoke frame ceiling fixed in code so a deployment environment cannot silently weaken release acceptance.
-4. Preserve strict stdout-as-protocol behavior and continue allowing legitimate JSON-RPC notifications while one request is outstanding.
-5. Continue avoiding noisy GitHub Actions merely to work around a transient local DNS/checkout issue.
+1. Bound the number of pending protocol frames in addition to request time and per-frame size; all three protect different failure modes.
+2. Use non-blocking producer insertion and fail closed on overflow rather than blocking the reader thread, silently dropping notifications, or expanding the queue.
+3. Keep the queue limit fixed in code so deployment configuration cannot silently weaken release acceptance.
+4. Preserve legitimate JSON-RPC notifications; only sustained output that exceeds the bounded consumer backlog is rejected.
+5. Continue avoiding noisy GitHub Actions merely to work around the transient local DNS/checkout issue.
 
 ### Blockers / unknowns
 
