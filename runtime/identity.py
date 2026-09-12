@@ -39,7 +39,31 @@ class OperatorIdentity:
 
 
 class AuthenticationError(Exception):
-    """Raised when a request cannot be mapped to a trusted operator."""
+    """Raised when a request cannot be mapped to a trusted operator.
+
+    The HTTP layer deliberately renders ``str(exc)`` for authentication
+    failures. Keep that surface bounded even when a custom identity provider
+    raises ``AuthenticationError`` with provider/verifier detail: only the
+    small StageGuard-owned message vocabulary below is allowed through.
+    Unknown messages collapse to a generic authentication failure.
+    """
+
+    _PUBLIC_DETAILS = frozenset(
+        {
+            "bearer authentication required",
+            "invalid bearer credential",
+            "verified IAP authentication required",
+            "IAP assertion is too large",
+            "invalid IAP assertion",
+            "IAP assertion is missing a stable subject",
+            "invalid IAP operator identity",
+        }
+    )
+    _FALLBACK_DETAIL = "authentication required"
+
+    def __str__(self) -> str:
+        detail = super().__str__()
+        return detail if detail in self._PUBLIC_DETAILS else self._FALLBACK_DETAIL
 
 
 class IdentityProvider(Protocol):
