@@ -41,6 +41,12 @@ class TelemetryProfile:
             raise ValueError("production_id, affected_feed, and affected_uplink must be non-empty")
         if not self.healthy_uplink.strip() or not self.healthy_peer_feeds or any(not x.strip() for x in self.healthy_peer_feeds):
             raise ValueError("healthy peer bindings must be non-empty")
+        if self.healthy_uplink == self.affected_uplink:
+            raise ValueError("healthy_uplink must differ from affected_uplink")
+        if self.affected_feed in self.healthy_peer_feeds:
+            raise ValueError("healthy_peer_feeds must not include affected_feed")
+        if len(set(self.healthy_peer_feeds)) != len(self.healthy_peer_feeds):
+            raise ValueError("healthy_peer_feeds must not contain duplicates")
         for field in ("dropped_frames_metric", "packet_loss_metric", "cpu_metric", "gpu_metric"):
             _identifier(getattr(self, field), "metric identifier", _IDENTIFIER)
         for field in ("production_label", "feed_label", "uplink_label"):
