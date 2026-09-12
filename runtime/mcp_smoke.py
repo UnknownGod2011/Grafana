@@ -17,6 +17,7 @@ DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_STDIO_LINE_CHARS = 1_048_576
+MAX_STDOUT_QUEUE_FRAMES = 16
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -58,7 +59,10 @@ class StdioClient:
             bufsize=1,
         )
         self._next_id = 1
-        self._stdout_queue: queue.Queue[str | McpError | None] = queue.Queue()
+        self._stdout_queue: queue.Queue[str | McpError | None] = queue.Queue(
+            maxsize=MAX_STDOUT_QUEUE_FRAMES
+        )
+        self._stdout_overflow = threading.Event()
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
             name="stageguard-mcp-stdout",
@@ -66,10 +70,22 @@ class StdioClient:
         )
         self._stdout_thread.start()
 
+    def _offer_stdout(self, item: str | McpError | None) -> bool:
+        """Offer one stdout event without ever letting the reader block on queue growth."""
+        try:
+            self._stdout_queue.put_nowait(item)
+            return True
+        except queue.Full:
+            # A producer that can outrun the single sequential consumer is not a
+            # trustworthy release-smoke peer. Stop reading and make the request path
+            # fail closed rather than converting the queue into an unbounded buffer.
+            self._stdout_overflow.set()
+            return False
+
     def _read_stdout(self) -> None:
         stdout = self.proc.stdout
         if stdout is None:
-            self._stdout_queue.put(None)
+            self._offer_stdout(None)
             return
         try:
             while True:
@@ -81,15 +97,16 @@ class StdioClient:
                 if not line:
                     break
                 if len(line) > MAX_STDIO_LINE_CHARS:
-                    self._stdout_queue.put(
+                    self._offer_stdout(
                         McpError(
                             "MCP stdio response exceeded the maximum allowed JSON-RPC frame size"
                         )
                     )
                     return
-                self._stdout_queue.put(line)
+                if not self._offer_stdout(line):
+                    return
         finally:
-            self._stdout_queue.put(None)
+            self._offer_stdout(None)
 
     def send(self, message: dict[str, Any]) -> None:
         if self.proc.stdin is None:
@@ -100,12 +117,19 @@ class StdioClient:
         except (BrokenPipeError, OSError) as exc:
             raise McpError("MCP stdin closed while sending request") from exc
 
+    def _raise_if_stdout_overflowed(self) -> None:
+        if self._stdout_overflow.is_set():
+            raise McpError(
+                "MCP stdio stdout exceeded the bounded pending-frame queue capacity"
+            )
+
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._next_id
         self._next_id += 1
         self.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}})
         deadline = time.monotonic() + self.request_timeout_seconds
         while True:
+            self._raise_if_stdout_overflowed()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise McpError(
@@ -117,6 +141,7 @@ class StdioClient:
                 raise McpError(
                     f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response"
                 ) from exc
+            self._raise_if_stdout_overflowed()
             if isinstance(line, McpError):
                 raise line
             if line is None:
