@@ -72,6 +72,18 @@ class TelemetryProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TelemetryProfile(production_label='production_id="other"')
 
+    def test_healthy_uplink_must_be_independent_from_affected_uplink(self):
+        with self.assertRaisesRegex(ValueError, "healthy_uplink must differ from affected_uplink"):
+            TelemetryProfile(affected_uplink="uplink-b", healthy_uplink="uplink-b")
+
+    def test_healthy_peer_set_must_not_include_affected_feed(self):
+        with self.assertRaisesRegex(ValueError, "healthy_peer_feeds must not include affected_feed"):
+            TelemetryProfile(affected_feed="cam-3", healthy_peer_feeds=("cam-1", "cam-3"))
+
+    def test_healthy_peer_set_must_not_contain_duplicates(self):
+        with self.assertRaisesRegex(ValueError, "healthy_peer_feeds must not contain duplicates"):
+            TelemetryProfile(healthy_peer_feeds=("cam-1", "cam-1"))
+
     def test_recovery_contract_remains_exactly_two_queries(self):
         queries = recovery_queries(self.custom_profile())
         self.assertEqual({"packet_loss", "dropped_frames"}, set(queries))
