@@ -1,3 +1,4 @@
+import json
 import math
 import pathlib
 import tempfile
@@ -8,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from activation import (
     ACTIVATION_VERSION,
+    MAX_TTL_SECONDS,
     ActivationRecord,
     create_activation_record,
     load_activation_record,
@@ -172,8 +174,76 @@ class ActivationTests(unittest.TestCase):
         p = profile()
         current = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
         legacy = ActivationRecord(**{**current.to_dict(), "version": ACTIVATION_VERSION - 1})
-        with self.assertRaisesRegex(ValueError, "unsupported activation record version"):
+        with self.assertRaisesRegex(ValueError, "unsupported activation"):
             verify_activation_record(legacy, p, "prom-main", now_unix=1001)
+
+    def test_creation_rejects_invalid_explicit_clock(self):
+        p = profile()
+        preflight = successful_preflight(p)
+        for value in (True, -1, 1.5, "1000"):
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(ValueError, "now_unix"):
+                    create_activation_record(p, "prom-main", preflight, now_unix=value)
+
+    def test_verify_rejects_manually_extended_lifetime(self):
+        p = profile()
+        record = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
+        forged = ActivationRecord(
+            **{
+                **record.to_dict(),
+                "expires_at_unix": record.created_at_unix + MAX_TTL_SECONDS + 1,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "lifetime exceeds"):
+            verify_activation_record(forged, p, "prom-main", now_unix=1001)
+
+    def test_load_rejects_noncanonical_sha256_fields(self):
+        p = profile()
+        record = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
+        mutations = (
+            ("profile_sha256", "A" * 64),
+            ("datasource_sha256", "g" * 64),
+            ("slot_digest_sha256", "0" * 63),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "activation.json"
+            for field, value in mutations:
+                with self.subTest(field=field):
+                    path.write_text(
+                        json.dumps({**record.to_dict(), field: value}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+                        load_activation_record(path)
+
+    def test_load_rejects_invalid_timestamp_relationships(self):
+        p = profile()
+        record = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
+        mutations = (
+            {"created_at_unix": -1},
+            {"expires_at_unix": record.created_at_unix},
+            {"expires_at_unix": record.created_at_unix + MAX_TTL_SECONDS + 1},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "activation.json"
+            for mutation in mutations:
+                with self.subTest(mutation=mutation):
+                    path.write_text(
+                        json.dumps({**record.to_dict(), **mutation}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(ValueError):
+                        load_activation_record(path)
+
+    def test_write_revalidates_manually_constructed_record(self):
+        p = profile()
+        record = create_activation_record(p, "prom-main", successful_preflight(p), now_unix=1000)
+        forged = ActivationRecord(**{**record.to_dict(), "production_id": " prod-42"})
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "activation.json"
+            with self.assertRaisesRegex(ValueError, "boundary whitespace"):
+                write_activation_record(path, forged)
+            self.assertFalse(path.exists())
 
     def test_profile_change_after_preflight_is_rejected(self):
         p = profile()
