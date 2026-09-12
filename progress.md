@@ -13,6 +13,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use.
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
+- Remediation adapter response detail and arbitrary provider metadata are untrusted and must be discarded before they become lifecycle, API, or audit state; only narrowly validated StageGuard-owned production operation metadata may survive.
 - Durable checkpoint/audit failures fail closed and uncommitted state is not operator-visible lifecycle authority.
 - Once provider dispatch may have occurred, persistence uncertainty blocks replay.
 - Browser/API/onboarding/CLI surfaces must not expose provider failure detail or turn evidence loss into actionable state.
@@ -59,6 +60,8 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Preflight CLI failures no longer serialize raw exception messages; they return a stable `ready=false` envelope plus exception class only.
 - Authentication failures now preserve only a fixed StageGuard-owned public message set. Arbitrary `AuthenticationError` text from custom identity providers is converted to `authentication required` before existing API/console rendering can expose it.
 - HTTP regression coverage exercises this behavior on `/console`, authenticated GET, and authenticated POST surfaces while retaining actionable built-in bearer/IAP messages.
+- Remediation adapter results are normalized immediately after dispatch: provider-controlled detail becomes a StageGuard-owned accepted/rejected message and arbitrary metadata is removed.
+- The built-in allowlisted production adapter retains only validated `adapter`, deterministic `operation_id`, bounded `attempt_count`, and HTTP `transport_status`; extra provider fields are discarded before outcome/audit serialization.
 
 ### Cloud Run / MCP safety retained
 
@@ -68,60 +71,69 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Private metrics acceptance job identity is allowlisted and bounded before any Cloud Run/Docker action.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image pin regressions.
 
-## Run log — 2026-09-13 — authentication disclosure boundary
+## Run log — 2026-09-13 — remediation result disclosure boundary
 
 ### Inspected at start
 
 Read this `progress.md` completely before selecting work. Inspected repository metadata and reviewed:
-- `README.md`
-- `runtime/api.py`, including console, authenticated GET/POST, readiness, metrics, lifecycle, and error paths
-- `runtime/identity.py`
-- `runtime/incident_service.py` error/state semantics
-- `runtime/tests/test_api.py`
-- `runtime/tests/test_api_evidence_unavailable_mutations.py`
-- `runtime/tests/test_identity.py`
+- `ARCHITECTURE.md`
+- `runtime/incident_service.py`, especially remediation outcome publication and audit payloads
+- `runtime/remediation.py`
+- `runtime/production_remediation.py`
+- `runtime/incident_checkpoint.py`
+- `runtime/execution_safety.py`
+- `runtime/tests/test_remediation.py`
+- `runtime/tests/test_production_remediation.py`
+- `runtime/tests/test_incident_service.py`
 
 No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions job was modified or manually triggered.
 
 ### Finding
 
-The API intentionally uses `str(AuthenticationError)` for 401 details on the operator console and authenticated GET/POST surfaces. Built-in StageGuard identity providers currently raise bounded messages, but `IdentityProvider` is an extension point. A custom provider could raise `AuthenticationError` containing verifier responses, private endpoints, tenant detail, or secret-bearing diagnostics, and the API would echo that text verbatim. This contradicted the existing operator-surface redaction invariant.
+`RemediationClient` is an extension boundary. A custom adapter could return an `ActionResult` whose `detail` contained provider response bodies, private endpoints, or credentials and whose `metadata` contained arbitrary secret-bearing structures. `remediate_and_verify()` previously retained that result verbatim. The incident snapshot serializes the remediation outcome and `IncidentService.execute_approved()` also copied action metadata into the durable remediation-completed audit payload. Although the checkpoint serializer already intentionally persists only the action acceptance bit, API/operator snapshots and durable audit state could still receive provider-controlled detail/metadata.
 
 ### Exact changes made
 
-1. Hardened `runtime/identity.py` `AuthenticationError` with a fixed StageGuard-owned public-detail vocabulary.
-2. Existing safe/actionable built-in messages remain unchanged (`invalid bearer credential`, `invalid IAP assertion`, etc.).
-3. Any unknown/custom `AuthenticationError` string now renders as exactly `authentication required`; the original exception object/cause can still exist internally without its text crossing the HTTP boundary.
-4. Added `runtime/tests/test_api_auth_error_redaction.py`.
-5. The new HTTP-level regressions use a deliberately secret-bearing custom identity provider and verify redaction on:
-   - `GET /console`
-   - `GET /v1/incident`
-   - `POST /v1/investigate`
-6. The regression also verifies the expected `WWW-Authenticate` challenge remains and that StageGuard-owned bearer/IAP messages remain actionable.
+1. Added a remediation result normalization boundary in `runtime/remediation.py` immediately after adapter dispatch.
+2. Provider-controlled `ActionResult.detail` is replaced with one of two StageGuard-owned messages: `remediation action accepted` or `remediation action rejected or failed`.
+3. Arbitrary adapter metadata is discarded before it can become lifecycle state.
+4. The built-in production adapter's useful operation metadata survives only when:
+   - `adapter == allowlisted_production`;
+   - `operation_id` exactly equals StageGuard's deterministic operation ID for the approved evidence/action;
+   - `attempt_count` is an integer in the bounded `0..3` range; and
+   - `transport_status` is `None` or a valid integer HTTP status `100..599`.
+5. Extra provider fields are discarded even when the recognized production metadata is otherwise valid.
+6. Added `runtime/tests/test_remediation_result_boundary.py` covering:
+   - secret-bearing accepted adapter detail/metadata redaction;
+   - secret-bearing rejected adapter redaction;
+   - retention of validated StageGuard production operation metadata while dropping an extra provider secret; and
+   - end-to-end incident snapshot plus audit payload redaction.
 
 Commits:
-- `ec3f5a80c37d1ba2bfeab7b4dcc192dcc2356f60` — Harden authentication error disclosure boundary
-- `365a0ec9cd7ea3b1d741030a8317a20e156dcc39` — Add authentication error redaction regressions
+- `6f2775f3957fa2c9e84c138ca0a2319d007261f5` — Harden remediation result disclosure boundary
+- `4be25f927708afe89f6655336f78e9d984fe200d` — Add remediation result disclosure regressions
 
 ### Checks / results
 
 - Authenticated GitHub repository reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Attempted the previously blocked focused suite from a fresh checkout before making changes:
-  `python -m unittest runtime.tests.test_preflight_cli runtime.tests.test_activation runtime.tests.test_log_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v`
-- The execution environment again failed at `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` with `Could not resolve host: github.com`; no repository tests executed in that runner.
-- Checked GitHub for automatically associated workflow runs on the regression commit; none were present. No Actions workflow was manually rerun or triggered.
-- Therefore the new `test_api_auth_error_redaction` module and the previously pending focused suite are **not yet claimed green**.
+- Attempted a fresh checkout and focused run:
+  `python -m unittest runtime.tests.test_remediation_result_boundary runtime.tests.test_remediation runtime.tests.test_production_remediation runtime.tests.test_incident_service -v`
+- The execution environment failed before tests at `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` with `Could not resolve host: github.com`.
+- No GitHub Actions workflow was triggered to bypass the transient DNS failure.
+- Therefore the new remediation-result regression module and affected existing remediation/service modules are **not yet claimed green**.
 
 ### Decisions
 
-1. Keep actionable authentication messages for StageGuard-owned providers rather than making every 401 opaque.
-2. Treat arbitrary/custom provider messages as untrusted disclosure input and collapse them to one stable generic detail.
-3. Enforce this at the exception boundary so all current API/console `str(AuthenticationError)` call sites inherit the same rule without duplicated redaction logic.
-4. Do not create CI noise solely to compensate for the transient runner DNS failure.
+1. Normalize adapter results immediately after dispatch rather than redacting only the HTTP layer. This gives API snapshots and durable audit payloads the same provider-detail-free lifecycle object.
+2. Keep the checkpoint format unchanged because `incident_checkpoint.py` already persists only the remediation acceptance bit and restores provider-detail-free state.
+3. Preserve the deterministic production operation identity and bounded transport facts because they are operationally useful for reconciliation, while rejecting all arbitrary provider metadata.
+4. Do not log or preserve raw provider diagnostics as lifecycle authority; deployment-specific adapters can use their own protected diagnostic channel if required.
+5. Do not create CI noise solely to compensate for the transient runner DNS failure.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_api_auth_error_redaction`, `runtime.tests.test_identity`, and the prior focused activation/onboarding/Cloud Run suite need a current executable checkout.
+- `runtime.tests.test_remediation_result_boundary`, `runtime.tests.test_remediation`, `runtime.tests.test_production_remediation`, and `runtime.tests.test_incident_service` need a current executable checkout.
+- The prior auth/identity/activation/onboarding/Cloud Run focused suite still needs a current executable checkout.
 - MCP timeout/surface/image-pin regressions still need an actual repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The strengthened Cloud Run bridge and execution-reconciliation/operator/Playwright safety sets still need current execution.
@@ -130,4 +142,4 @@ Commits:
 
 ## Single best next step
 
-**As soon as executable checkout works, run `python -m unittest runtime.tests.test_api_auth_error_redaction runtime.tests.test_identity runtime.tests.test_preflight_cli runtime.tests.test_activation runtime.tests.test_log_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v`. Fix any regression before adding another production boundary. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke, then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, run `python -m unittest runtime.tests.test_remediation_result_boundary runtime.tests.test_remediation runtime.tests.test_production_remediation runtime.tests.test_incident_service runtime.tests.test_api_auth_error_redaction runtime.tests.test_identity runtime.tests.test_preflight_cli runtime.tests.test_activation runtime.tests.test_log_activation runtime.tests.test_onboarding runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v`. Fix any regression before adding another production boundary. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke, then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
