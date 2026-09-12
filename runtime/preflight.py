@@ -13,6 +13,21 @@ from mcp_metric_client import McpPrometheusMetricClient
 from onboarding import load_telemetry_profile, preflight_telemetry
 
 
+def _failure_payload(exc: BaseException) -> dict[str, object]:
+    """Return operator-safe failure metadata without serializing exception detail.
+
+    MCP/provider/configuration exceptions can contain endpoint URLs, credentials, or
+    backend response bodies. The CLI is an operator-visible boundary, so exception
+    text must not cross it. The exception class is retained for coarse diagnosis;
+    detailed traceback/error text belongs on a protected diagnostic channel.
+    """
+    return {
+        "ready": False,
+        "error": "preflight failed",
+        "error_type": type(exc).__name__,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate and preflight StageGuard telemetry + log evidence")
     parser.add_argument("config", help="Path to versioned telemetry JSON")
@@ -58,7 +73,7 @@ def main() -> int:
                 )
                 write_log_activation_record(args.log_activation_output, log_activation)
     except Exception as exc:
-        print(json.dumps({"ready": False, "error": f"{type(exc).__name__}: {exc}"}, indent=2))
+        print(json.dumps(_failure_payload(exc), indent=2, sort_keys=True))
         return 2
 
     ready = metric_result.ready and log_result.ready
