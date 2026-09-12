@@ -15,6 +15,7 @@ Core invariants retained:
 - Browser/API surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Expected evidence transport/protocol/datasource failures cross runtime boundaries as `EvidenceUnavailable`; provider exception text is diagnostic-only and must not be copied into operator/onboarding results.
 - Unexpected programming/policy exceptions must fail loudly rather than being downgraded to telemetry unavailability.
+- Telemetry onboarding never treats NaN or infinities as successful evidence, and activation independently requires every `ok` slot to contain a finite numeric sample with no error detail.
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
@@ -46,6 +47,7 @@ Core invariants retained:
 - Enforced independent healthy comparator mappings.
 - Reconciled runtime documentation with the Grafana MCP 1.4.1 baseline and current safety controls.
 - Hardened onboarding to catch only `EvidenceUnavailable`, redact provider detail from operator-visible preflight state, and fail unexpected programming/policy exceptions loudly.
+- Refused NaN/infinite telemetry samples during preflight and independently revalidated finite numeric `ok` samples at the activation boundary.
 
 ## Run log — 2026-09-12 — private acceptance job identity boundary
 
@@ -116,6 +118,95 @@ Commit: `7c84133f0e540564e62ffea51cb0c8e437c28638`
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
+## Run log — 2026-09-12 — finite telemetry activation boundary
+
+### Inspected at start
+
+Read this `progress.md` completely before deciding what to change. Inspected repository metadata and reviewed:
+- `runtime/onboarding.py`
+- `runtime/activation.py`
+- `runtime/tests/test_onboarding.py`
+- `runtime/tests/test_activation.py`
+- `runtime/cloud_run_metrics_acceptance.py`
+- `runtime/cloud_run_metrics_bridge.py`
+- runtime/test directory structure
+
+No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, IAM binding, or remediation provider was modified.
+
+### Findings
+
+1. `preflight_telemetry()` treated every non-`None` adapter result as an `ok` sample after `float(value)`. Prometheus can represent `NaN`, `+Inf`, and `-Inf`, so an unusable semantic measurement could incorrectly satisfy onboarding readiness.
+2. The same coercion silently accepted adapter contract violations such as `True` or the string `"1.0"`, which can hide programming/integration defects instead of failing loudly.
+3. `create_activation_record()` trusted `PreflightResult.ready` plus eight `status == "ok"` slots without independently validating the slot values. A malformed or manually constructed preflight could therefore be pinned despite missing/non-finite values or attached error detail.
+
+### Exact changes made
+
+#### 1. Refused non-finite telemetry during onboarding
+
+Commit: `04356574bd3598569be831bb912b388384993465`
+
+`runtime/onboarding.py` now:
+- accepts finite `int`/`float` samples only;
+- explicitly rejects booleans and nonnumeric adapter return types with `TypeError`, preserving the fail-loud programming-contract invariant;
+- maps `NaN` and infinities to a non-ready `status="invalid"` slot;
+- stores `value=None` for invalid samples so operator-visible JSON never contains non-standard JSON `NaN`/`Infinity` values;
+- retains the generic `query returned a non-finite sample` detail without provider text.
+
+#### 2. Added onboarding regressions
+
+Commit: `43833872e5f98f8b7c29d9b0ba74a113ed47e1ee`
+
+`runtime/tests/test_onboarding.py` now verifies:
+- `NaN`, `+Inf`, and `-Inf` all refuse readiness while the remaining bounded slots are still checked;
+- invalid samples are serialized with `allow_nan=False` and do not leak `NaN`/`Infinity` tokens;
+- boolean, string, and arbitrary-object adapter returns fail loudly rather than being coerced;
+- existing missing-sample, evidence-redaction, and unexpected-exception behavior remains covered.
+
+#### 3. Revalidated successful evidence at activation
+
+Commit: `0b39c57d047b4c2a164dbb4eca87586b538ad88d`
+
+`runtime/activation.py` now has an independent `_validate_successful_preflight()` boundary that requires:
+- `ready=True`;
+- exactly eight slots;
+- every slot status to be `ok`;
+- every `ok` value to be numeric, non-boolean, and finite;
+- every `ok` slot to carry no error/detail text.
+
+This prevents activation from relying solely on a caller-controlled status flag and keeps the production pinning boundary fail-closed even if a malformed `PreflightResult` is constructed outside the normal onboarding function.
+
+#### 4. Added activation-forgery regressions
+
+Commit: `db47909d34bcdf1a0b0ce6892d1d8bf8399ff8b8`
+
+`runtime/tests/test_activation.py` now constructs deliberately forged ready/ok preflights and verifies activation rejects:
+- `None`, boolean, and string slot values;
+- `NaN`, `+Inf`, and `-Inf` slot values;
+- `ok` slots that still contain error detail.
+
+### Checks / results
+
+- Authenticated GitHub reads and all repository writes succeeded.
+- A fresh executable checkout was attempted again with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the runner failed with `Could not resolve host: github.com` before tests could execute.
+- No GitHub Actions workflow was triggered or rerun as a workaround.
+- Because the runner cannot obtain an executable checkout, the changed onboarding/activation modules are not claimed green yet.
+
+### Decisions
+
+1. Treat finite numeric telemetry as part of the activation trust boundary, not merely a presentation/data-quality concern.
+2. Mark Prometheus non-finite values as operationally invalid evidence so all eight preflight checks still complete and operators can see which semantic slot is unusable.
+3. Treat adapter type violations as programming/integration errors and fail loudly instead of normalizing them into ordinary evidence loss.
+4. Revalidate the complete successful-preflight shape at activation so downstream safety does not depend on `PreflightResult.ready` being trustworthy by construction.
+5. Continue avoiding noisy GitHub Actions solely to work around the transient runner DNS failure.
+
+### Blockers / unknowns
+
+- `runtime.tests.test_onboarding` and `runtime.tests.test_activation` require execution from an actual checkout after these changes.
+- The previously pending Cloud Run acceptance/onboarding/telemetry/entrypoint/deploy-script combined set still requires a current repository run.
+- MCP timeout/surface/image-pin regressions and a live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remain required.
+- The private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance still requires external credentials/service state and Docker.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
+
 ## Single best next step
 
-**When executable checkout is available, run `python -m unittest runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_onboarding runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v` first. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**When executable checkout is available, run `python -m unittest runtime.tests.test_onboarding runtime.tests.test_activation runtime.tests.test_cloud_run_metrics_acceptance runtime.tests.test_telemetry runtime.tests.test_cloudrun_entrypoint runtime.tests.test_deploy_cloud_run_script -v` first. If clean, run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke; then proceed to the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
