@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """Private scrape bridge for an authenticated StageGuard Cloud Run service.
 
-Prometheus scrapes this tiny bridge on a trusted local/private network. The
-bridge obtains a short-lived Google-signed ID token for the configured Cloud
-Run audience and forwards only GET /metrics. It never forwards caller headers,
-never accepts an arbitrary upstream path, never follows upstream redirects,
-and never logs tokens or upstream error bodies.
+The bridge obtains a short-lived Google-signed ID token for the configured
+Cloud Run audience and forwards only GET /metrics. It never forwards caller
+headers, never accepts an arbitrary upstream path, never follows upstream
+redirects, and never logs tokens or upstream error bodies.
 
-``/healthz`` is intentionally process-only liveness. ``/readyz`` verifies the
-complete authenticated upstream metrics path and fails closed with a sanitized
-response when ADC, IAM, network, or the StageGuard metrics endpoint is broken.
+An optional *inbound* bearer token can protect /readyz and /metrics when the
+bridge must bind beyond loopback (for example, so Prometheus in Docker can
+scrape the host). This token is independent from the Google ID token: callers
+never receive or control the upstream credential. /healthz remains process-only
+liveness and does not mint an upstream token.
 
-A successful HTTP response is not sufficient evidence that the bridge reached
-a healthy StageGuard metrics endpoint. Every accepted payload must contain
-exactly one finite, boolean-valued, label-free remediation-deadline sentinel
-and no additional series in that sentinel metric family. This prevents an
-authenticated proxy/login/error page, empty/comment-only exposition, or
-ambiguous/spoofed safety series from being reported as bridge readiness.
-
-The production dependency set already includes ``google-auth``. Tests inject a
-token supplier and opener, so they remain credential-free.
+A successful upstream HTTP response is not sufficient evidence that the bridge
+reached StageGuard. Every accepted payload must contain exactly one finite,
+boolean-valued, label-free remediation-deadline sentinel and no additional
+series in that sentinel metric family.
 """
 from __future__ import annotations
 
 import argparse
+import hmac
 import ipaddress
 import math
 import os
@@ -50,14 +47,6 @@ class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _open_without_redirects(request: urllib.request.Request, *, timeout: float):
-    """Open exactly one configured URL with redirect handling disabled.
-
-    ``urllib`` adds ordinary request headers to redirected requests by default.
-    The Cloud Run ID token is therefore also installed as an *unredirected*
-    header below, and production transport refuses redirects entirely. Both
-    controls are intentional: an authenticated scrape must terminate at the
-    configured StageGuard origin rather than trusting a provider/proxy redirect.
-    """
     return urllib.request.build_opener(_RejectRedirectHandler()).open(request, timeout=timeout)
 
 
@@ -101,33 +90,25 @@ def normalize_audience(value: str) -> str:
     return urlunsplit(("https", parsed.netloc, "", "", ""))
 
 
-def _is_sentinel_family_token(token: bytes) -> bool:
-    """Return whether an exposition token belongs to the safety sentinel family.
+def normalize_bridge_bearer_token(value: str | None) -> str | None:
+    """Validate an optional inbound scrape credential without logging it."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise BridgeConfigurationError("bridge bearer token must be a non-empty trimmed string")
+    if "\r" in value or "\n" in value:
+        raise BridgeConfigurationError("bridge bearer token must not contain line breaks")
+    return value
 
-    Prometheus text samples place the metric name, optionally followed by a
-    label set, in the first whitespace-delimited token. StageGuard's sentinel
-    is intentionally label-free. A token such as ``metric{source=\"x\"}``
-    therefore represents an additional, unauthorized series and must make the
-    payload ambiguous rather than being ignored.
-    """
+
+def _is_sentinel_family_token(token: bytes) -> bool:
     return token == SAFETY_SENTINEL_METRIC or token.startswith(SAFETY_SENTINEL_METRIC + b"{")
 
 
 def validate_stageguard_metrics(body: bytes) -> None:
-    """Require one authoritative finite StageGuard deadline sentinel sample.
-
-    The sentinel is intentionally a label-free 0/1 gauge emitted by StageGuard's
-    own ``/metrics`` implementation. The bridge does not attempt to become a
-    general Prometheus parser; it establishes only the minimum identity/integrity
-    property needed before forwarding an authenticated scrape response.
-
-    Any additional labeled series in the same sentinel metric family is rejected
-    even when one valid bare sample is also present. Ignoring such a series would
-    let a semantically ambiguous safety exposition pass readiness validation.
-    """
+    """Require one authoritative finite StageGuard deadline sentinel sample."""
     if not isinstance(body, bytes):
         raise RuntimeError("upstream metrics response was not bytes")
-
     samples: list[bytes] = []
     for raw_line in body.splitlines():
         line = raw_line.strip()
@@ -141,10 +122,8 @@ def validate_stageguard_metrics(body: bytes) -> None:
         if len(fields) != 2:
             raise RuntimeError("upstream StageGuard safety sentinel was malformed")
         samples.append(fields[1])
-
     if len(samples) != 1:
         raise RuntimeError("upstream StageGuard safety sentinel was missing or ambiguous")
-
     try:
         value = float(samples[0].decode("ascii"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -158,7 +137,7 @@ def google_id_token(audience: str) -> str:
     try:
         import google.auth.transport.requests
         import google.oauth2.id_token
-    except ImportError as exc:  # pragma: no cover - exercised by deployment packaging
+    except ImportError as exc:  # pragma: no cover
         raise RuntimeError("google-auth is required for Cloud Run metrics authentication") from exc
     request = google.auth.transport.requests.Request()
     token = google.oauth2.id_token.fetch_id_token(request, audience)
@@ -204,15 +183,9 @@ class CloudRunMetricsClient:
             raise RuntimeError("could not obtain an ID token")
         request = urllib.request.Request(
             self.metrics_url,
-            headers={
-                "Accept": "text/plain",
-                "User-Agent": "stageguard-metrics-bridge/1",
-            },
+            headers={"Accept": "text/plain", "User-Agent": "stageguard-metrics-bridge/1"},
             method="GET",
         )
-        # Python documents that ordinary Request headers are copied onto
-        # redirected requests. Keep the bearer credential explicitly
-        # unredirected even though the production opener also rejects redirects.
         request.add_unredirected_header("Authorization", f"Bearer {token}")
         with self._opener(request, timeout=self.timeout_seconds) as response:
             body = response.read(MAX_METRICS_BYTES + 1)
@@ -224,25 +197,44 @@ class CloudRunMetricsClient:
 
 class MetricsBridgeHandler(BaseHTTPRequestHandler):
     client: CloudRunMetricsClient
+    bridge_bearer_token: str | None = None
     server_version = "StageGuardMetricsBridge/1"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
-    def _headers(self, status: int, content_type: str, length: int) -> None:
+    def _headers(self, status: int, content_type: str, length: int, *, authenticate: bool = False) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if authenticate:
+            self.send_header("WWW-Authenticate", 'Bearer realm="stageguard-metrics"')
         self.end_headers()
+
+    def _authorized(self) -> bool:
+        expected = self.bridge_bearer_token
+        if expected is None:
+            return True
+        presented = self.headers.get("Authorization")
+        if not isinstance(presented, str) or not presented.startswith("Bearer "):
+            return False
+        candidate = presented[len("Bearer ") :]
+        return hmac.compare_digest(candidate, expected)
+
+    def _require_authorization(self) -> bool:
+        if self._authorized():
+            return True
+        body = b"unauthorized\n"
+        self._headers(401, "text/plain; charset=utf-8", len(body), authenticate=True)
+        self.wfile.write(body)
+        return False
 
     def _upstream_ready(self) -> bool:
         try:
             self.client.fetch()
         except Exception:
-            # Readiness is intentionally fail-closed and sanitized. Never expose
-            # target URLs, tokens, ADC details, provider bodies, or exception text.
             return False
         return True
 
@@ -251,6 +243,8 @@ class MetricsBridgeHandler(BaseHTTPRequestHandler):
             body = b'{"ok":true}'
             self._headers(200, "application/json", len(body))
             self.wfile.write(body)
+            return
+        if self.path in {"/readyz", "/metrics"} and not self._require_authorization():
             return
         if self.path == "/readyz":
             if self._upstream_ready():
@@ -269,8 +263,6 @@ class MetricsBridgeHandler(BaseHTTPRequestHandler):
         try:
             body = self.client.fetch()
         except Exception:
-            # Deliberately do not expose token, target URL, ADC details, provider
-            # response bodies, or exception text to the scrape client.
             body = b"stageguard metrics upstream unavailable\n"
             self._headers(502, "text/plain; charset=utf-8", len(body))
             self.wfile.write(body)
@@ -285,10 +277,16 @@ def make_server(
     port: int = 9112,
     *,
     allow_network_bind: bool = False,
+    bearer_token: str | None = None,
 ) -> ThreadingHTTPServer:
     if not _is_loopback(host) and not allow_network_bind:
         raise BridgeConfigurationError("non-loopback metrics bridge bind requires --allow-network-bind")
-    handler = type("ConfiguredMetricsBridgeHandler", (MetricsBridgeHandler,), {"client": client})
+    normalized_token = normalize_bridge_bearer_token(bearer_token)
+    handler = type(
+        "ConfiguredMetricsBridgeHandler",
+        (MetricsBridgeHandler,),
+        {"client": client, "bridge_bearer_token": normalized_token},
+    )
     return ThreadingHTTPServer((host, port), handler)
 
 
@@ -300,6 +298,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=9112)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--allow-network-bind", action="store_true")
+    parser.add_argument(
+        "--bearer-token",
+        default=os.environ.get("STAGEGUARD_BRIDGE_BEARER_TOKEN"),
+        help="optional inbound bearer token protecting /readyz and /metrics",
+    )
     parser.add_argument(
         "--allow-cross-origin-audience",
         action="store_true",
@@ -314,7 +317,13 @@ def main() -> int:
         timeout_seconds=args.timeout_seconds,
         allow_cross_origin_audience=args.allow_cross_origin_audience,
     )
-    server = make_server(client, args.host, args.port, allow_network_bind=args.allow_network_bind)
+    server = make_server(
+        client,
+        args.host,
+        args.port,
+        allow_network_bind=args.allow_network_bind,
+        bearer_token=args.bearer_token,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
