@@ -55,34 +55,28 @@ Safety properties:
 python runtime/mcp_smoke.py
 ```
 
-The smoke client launches `grafana/mcp-grafana:1.1.0` in stdio mode via Docker Compose, initializes MCP, verifies that `list_datasources` and `query_prometheus` are advertised as read-only tools, then executes this instant query through Grafana:
+The reference stack pins `grafana/mcp-grafana:1.4.1` in stdio mode. The smoke client initializes MCP, validates the live tool registry, requires every advertised tool to carry `annotations.readOnlyHint=true`, and then executes bounded evidence reads through Grafana. The MCP service is constrained server-side with `--disable-write`, `--disable-proxied`, and only the `datasource,prometheus,loki` categories enabled.
 
-```promql
-network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}
-```
-
-With the default faulted fixture, the returned value should be approximately `18`. The MCP service is constrained with `--disable-write`, only the `datasource,prometheus` categories are enabled, and proxied tools are disabled.
-
-If an MCP protocol upgrade is required, override `STAGEGUARD_MCP_PROTOCOL_VERSION`. If Docker is not the desired client launcher, override `STAGEGUARD_MCP_COMMAND`.
+The smoke transport also fails closed on malformed JSON-RPC, mismatched response IDs, request timeouts, frames larger than 1 MiB, or more than 16 pending stdout frames. If an MCP protocol upgrade is required, override `STAGEGUARD_MCP_PROTOCOL_VERSION`. If Docker is not the desired client launcher, override `STAGEGUARD_MCP_COMMAND`.
 
 ## Bounded incident investigator
 
 `investigator.py` is the deterministic policy/evidence core that sits between telemetry tools and any Gemini reasoning layer. It has a deliberately tiny read-only boundary (`MetricQueryClient.instant`) and executes exactly six fixed PromQL reads covering four required evidence classes:
 
-1. **Symptom** — Camera 3 dropped-frame rate is elevated.
-2. **Causal** — `uplink-b` packet loss is elevated.
-3. **Contradiction** — Camera 3 encoder CPU and GPU are both healthy, arguing against encoder saturation.
-4. **Healthy peer** — `uplink-a` and Cameras 1/2 remain healthy.
+1. **Symptom** — the configured affected feed has elevated dropped-frame rate.
+2. **Causal** — the configured affected uplink has elevated packet loss.
+3. **Contradiction** — encoder CPU and GPU are healthy, arguing against encoder saturation.
+4. **Healthy peer** — an independently configured uplink and peer-feed set remain healthy.
+
+Telemetry mappings fail closed if the healthy comparator uplink is the affected uplink, if the affected feed is included in `healthy_peer_feeds`, or if the healthy peer list contains duplicates. Those constraints keep the contradiction/peer evidence independent instead of allowing a self-referential comparison to inflate diagnosis confidence.
 
 The policy will only emit the seeded high-confidence diagnosis when all four classes are present and support it. Missing telemetry produces `status="abstain"`; it never substitutes an LLM guess for absent evidence. A real symptom with contradictory causal evidence also abstains. A healthy symptom metric returns `status="no_incident"`.
 
-This split is intentional: Gemini can later decide *which incident workflow to invoke, summarize the evidence, and communicate with operators*, while the production-safety invariant stays deterministic and testable.
+This split is intentional: Gemini summarizes and communicates evidence, while the production-safety invariant stays deterministic and testable.
 
 ## Official MCP metric adapter
 
-`mcp_metric_client.py` now implements `MetricQueryClient` over the official Grafana MCP stdio transport. It initializes one MCP session, checks that `query_prometheus` advertises `readOnlyHint=true`, executes only instant PromQL queries, and records per-query latency/value provenance in `QueryTrace`.
-
-The parser follows the pinned `mcp-grafana v1.1.0` implementation rather than inventing a private schema: ordinary tool values are JSON-marshaled into MCP text content, and `query_prometheus` returns a `QueryPrometheusResult` with `data`, optional `hints`, and `warnings`. The adapter also accepts `structuredContent` defensively for forward compatibility.
+`mcp_metric_client.py` implements `MetricQueryClient` over the official Grafana MCP stdio transport. It initializes one MCP session, checks that the Prometheus query tool is read-only, executes only instant PromQL queries, and records per-query latency/value provenance in `QueryTrace`.
 
 Safety behavior is fail-closed:
 
@@ -132,17 +126,17 @@ max(rate(video_frames_dropped_total{production_id="broadcast-alpha",feed_id=~"ca
 
 ## Tests
 
-No third-party Python packages are required for the current runtime tests:
+No third-party Python packages are required for the core runtime tests:
 
 ```bash
 python -m unittest discover -s runtime/tests -v
-python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/mcp_metric_client.py runtime/investigator.py
+python -m py_compile runtime/bootstrap_grafana.py runtime/mcp_smoke.py runtime/mcp_metric_client.py runtime/investigator.py runtime/telemetry.py
 ```
 
-`test_investigator.py` covers the successful four-evidence diagnosis, healthy state, missing causal evidence, missing contradiction evidence, contradictory cause evidence, and the fixed six-query budget.
+`test_telemetry.py` covers custom mappings, PromQL escaping, independent healthy comparator validation, fixed query budgets, recovery windows, and missing-evidence abstention.
 
-`test_mcp_metric_client.py` covers the pinned Prometheus vector shape, scalar shape, empty results, structured-content compatibility, multiple-series rejection, tool errors, and malformed values without requiring a live Grafana instance.
+`test_mcp_metric_client.py` covers Prometheus result parsing, empty results, structured-content compatibility, multiple-series rejection, tool errors, and malformed values without requiring a live Grafana instance.
 
-## Next implementation step
+## Current validation priority
 
-Execute the full local stack on a Docker-capable host and run `mcp_smoke.py`, then run the bounded investigator through `McpPrometheusMetricClient` and capture all six `QueryTrace` records. If that succeeds, implement the next safety boundary: a human-approved remediation command model plus telemetry-based recovery verification that cannot be satisfied by a successful action response alone.
+On a Docker-capable checkout, first run the current telemetry/MCP regression modules and the live `grafana/mcp-grafana:1.4.1` smoke. Then execute the private Cloud Run metrics acceptance path (`ADC -> /metrics -> authenticated bridge -> Prometheus up 1 -> 0 -> 1`) before treating the production observability path as release-ready.
