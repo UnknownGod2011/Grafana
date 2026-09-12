@@ -79,6 +79,26 @@ class CloudRunMetricsBridgeInboundAuthTests(unittest.TestCase):
                 with self.assertRaises(BridgeConfigurationError):
                     normalize_bridge_bearer_token(invalid)
 
+    def test_non_loopback_bind_requires_both_opt_in_and_inbound_auth(self) -> None:
+        client = self._client()
+        with self.assertRaises(BridgeConfigurationError):
+            make_server(client, "0.0.0.0", 0)
+        with self.assertRaises(BridgeConfigurationError):
+            make_server(client, "0.0.0.0", 0, allow_network_bind=True)
+
+        with mock.patch("cloud_run_metrics_bridge.ThreadingHTTPServer") as server_class:
+            make_server(
+                client,
+                "0.0.0.0",
+                9112,
+                allow_network_bind=True,
+                bearer_token="network-scrape-secret",
+            )
+        server_class.assert_called_once()
+        _address, handler = server_class.call_args.args
+        self.assertEqual(_address, ("0.0.0.0", 9112))
+        self.assertEqual(handler.bridge_bearer_token, "network-scrape-secret")
+
     def test_healthz_stays_public_but_readyz_and_metrics_require_bearer(self) -> None:
         calls: list[str] = []
         server = make_server(
