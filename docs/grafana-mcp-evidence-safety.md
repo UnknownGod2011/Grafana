@@ -35,6 +35,8 @@ The smoke requires:
 
 A missing annotation is treated the same as `readOnlyHint=false`: the smoke fails closed. This is intentional. If an upstream image begins registering a newly write-capable or ambiguously annotated tool despite StageGuard's configured flags, the release acceptance should stop before the server is trusted as the evidence plane.
 
+The stdio protocol path is bounded as well. Every JSON-RPC request has a 15-second timeout by default, configurable with `STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS` to a positive finite value no greater than 120 seconds. A subprocess that starts but never answers `initialize`, `tools/list`, or `tools/call` therefore fails the smoke instead of hanging a release or operator workflow indefinitely. Invalid timeout configuration fails before the MCP subprocess is trusted. The subprocess is terminated and, if necessary, killed during cleanup so timeout failures do not leave a stranded smoke container.
+
 This runtime assertion is defense in depth. Server-side `--disable-write`, `--disable-proxied`, the narrow enabled categories, and least-privilege Grafana credentials remain required and are not replaced by MCP annotations.
 
 Upstream's contribution guidance explicitly requires write tools to respect `--disable-write`, and the official configuration documents `--enable-write-tools` as the mechanism for selectively re-enabling individual tools. StageGuard does not use that escape hatch.
@@ -102,6 +104,7 @@ Any change to the MCP adapters or investigator should retain tests for:
 - tool errors;
 - read-only tool discovery;
 - live smoke rejection of malformed/duplicate tool discovery and any advertised tool lacking `readOnlyHint=true`;
+- bounded MCP request timeouts and cleanup when a subprocess becomes silent;
 - datasource/query input validation;
 - Loki result bounds and truncation semantics;
 - structured/sanitized evidence-unavailable abstention;
