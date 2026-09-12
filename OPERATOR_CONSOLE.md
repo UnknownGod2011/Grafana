@@ -11,6 +11,18 @@ StageGuard serves a minimal same-origin operator cockpit at `GET /console` from 
 5. For a diagnosed incident, type the complete current revision into the approval field. The approval button remains disabled until the text exactly matches that revision, then an explicit confirmation is required.
 6. Execution is available only after server-side approval exists and no outcome has already consumed it. Recovery state is rendered from the server response; action acceptance is not presented as recovery proof.
 
+## No-replay remediation interlock
+
+The cockpit treats authenticated `safety_state` as an independent lifecycle interlock. Any non-`ok` value disables investigation, Gemini briefing, approval input, approval, and execution even if older detailed fields appear superficially actionable.
+
+The highest-severity states are `execution_uncertain` and `execution_uncertain_audit_failed`. They mean provider dispatch may already have occurred and therefore the operator must **not replay remediation**. The cockpit renders a prominent `DO NOT REPLAY REMEDIATION` panel and keeps unsafe lifecycle controls disabled.
+
+When the API supplies `execution_reconciliation_reference`, the browser accepts it only if it matches the bounded StageGuard format `sg-<40 lowercase hex>`. Invalid, malformed, provider-derived, or arbitrary values render as unavailable. The reference is intended only to correlate the prior idempotent provider operation during reconciliation; it is not an execution token and is never sent back by the browser as an action identifier.
+
+For `execution_uncertain_audit_failed`, the cockpit additionally states that durable audit integrity failed. The operator must preserve both fail-closed barriers: do not replay the provider action, repair/reload durable state as appropriate, reconcile provider status through the server-side reconciliation path, and require fresh Grafana evidence before any new approval becomes actionable.
+
+The reconciliation reference is intentionally limited to authenticated lifecycle responses. It is not rendered into readiness or Prometheus metrics, preventing secret-like exposure and high-cardinality telemetry.
+
 ## Incident timeline contract
 
 Authenticated operators can request:
@@ -55,10 +67,10 @@ The cockpit is deliberately small and dependency-free:
 - the cockpit uses neither `localStorage` nor `sessionStorage`;
 - there is no browser-side Grafana URL/token, Gemini API key, remediation token, datasource UID configuration, PromQL, LogQL, endpoint, action target, Cloud Logging credential, or raw operator identity.
 
-The browser is a presentation and confirmation surface only. Server-side lifecycle validation remains authoritative for revision matching, diagnosis eligibility, approval, single-use execution, audit, and telemetry recovery verification.
+The browser is a presentation and confirmation surface only. Server-side lifecycle validation remains authoritative for revision matching, diagnosis eligibility, approval, single-use execution, audit, reconciliation, and telemetry recovery verification.
 
 ## Local testing
 
 A static-bearer deployment can exercise the HTTP assets with an explicit `Authorization` header. For an interactive browser, local development is better run with the loopback development identity provider; never bind that identity mode to a non-loopback interface.
 
-Credential-free regression coverage lives in `runtime/tests/test_operator_console.py`, `runtime/tests/test_audit_timeline.py`, and `runtime/tests/test_durable_audit_reader.py`. It checks authentication, CSP/no-store behavior, absence of embedded credential markers, exact revision binding, lack of browser persistence, bounded timeline pagination, incident scoping, actor pseudonymization, payload redaction, malformed-query rejection, durable query bounds/log pinning/document validation, durable/local merge conflict handling, and independence of `/healthz` and `/metrics`.
+Credential-free regression coverage lives in `runtime/tests/test_operator_console.py`, `runtime/tests/test_operator_integrity_policy.py`, `runtime/tests/test_operator_browser_evidence_unavailable.py`, `runtime/tests/test_audit_timeline.py`, and `runtime/tests/test_durable_audit_reader.py`. It checks authentication, CSP/no-store behavior, absence of embedded credential markers, exact revision binding, composite safety blocking, strict reconciliation-reference validation, no-replay guidance, evidence-unavailable handling, lack of browser persistence, bounded timeline pagination, incident scoping, actor pseudonymization, payload redaction, malformed-query rejection, durable query bounds/log pinning/document validation, durable/local merge conflict handling, and independence of `/healthz` and `/metrics`.
