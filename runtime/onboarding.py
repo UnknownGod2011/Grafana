@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Protocol
 
+from evidence_errors import EvidenceUnavailable
 from telemetry import TelemetryProfile, investigation_queries, recovery_queries
 
 CONFIG_VERSION = 1
@@ -107,9 +108,15 @@ def load_telemetry_profile(path: str | Path) -> TelemetryProfile:
 def preflight_telemetry(client: MetricQueryClient, profile: TelemetryProfile) -> PreflightResult:
     """Execute exactly eight bounded read-only checks and refuse ambiguous evidence.
 
-    The metric adapter already rejects multi-series instant results as ambiguous.
-    This layer records that rejection per semantic slot instead of allowing one
-    broken slot to hide the status of the remaining onboarding checks.
+    Evidence adapters must translate expected transport, protocol, datasource,
+    and ambiguity failures into ``EvidenceUnavailable``. Only that expected
+    operational failure is converted into a non-ready slot. Its exception text
+    is deliberately not copied into the result because provider messages may
+    contain URLs, credentials, or other sensitive integration details.
+
+    Programming and policy errors are not swallowed here: unexpected exceptions
+    propagate so broken onboarding code cannot be mistaken for ordinary telemetry
+    unavailability.
     """
     checks: list[tuple[str, str, str]] = []
     checks.extend(
@@ -127,7 +134,7 @@ def preflight_telemetry(client: MetricQueryClient, profile: TelemetryProfile) ->
     for phase, name, promql in checks:
         try:
             value = client.instant(promql)
-        except Exception as exc:
+        except EvidenceUnavailable:
             slots.append(
                 PreflightSlot(
                     phase=phase,
@@ -135,7 +142,7 @@ def preflight_telemetry(client: MetricQueryClient, profile: TelemetryProfile) ->
                     promql=promql,
                     status="error",
                     value=None,
-                    detail=f"{type(exc).__name__}: {exc}",
+                    detail="evidence source unavailable",
                 )
             )
             continue
