@@ -12,13 +12,12 @@ Core invariants retained:
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
 - Durable checkpoint/audit failures fail closed and uncommitted state is not operator-visible lifecycle authority.
 - Once provider dispatch may have occurred, persistence uncertainty blocks replay.
-- Simultaneous execution uncertainty and audit-integrity failure remains externally visible as a bounded no-replay safety state.
 - Browser/API surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
-- The reference Grafana MCP dependency is version-pinned; server-side write/proxy restrictions are regression-locked; the live smoke rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
-- Grafana MCP smoke requests are bounded so a started-but-silent subprocess cannot hang release/operator acceptance indefinitely.
+- The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; server-side write/proxy restrictions are regression-locked; the live smoke rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
+- Grafana MCP smoke requests are time-bounded and the stdio protocol stream fails closed on framing/response-integrity violations.
 
 ## Retained validation baseline
 
@@ -27,105 +26,75 @@ Core invariants retained:
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest checkpoint/acceptance hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires an executable live smoke before a production-ready claim.
-- Baseline incident flow: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
 
-## Recent retained hardening
-
-- Composite lifecycle safety states and bounded `sg-<40 lowercase hex>` reconciliation references.
-- Operator `DO NOT REPLAY REMEDIATION` interlocks and browser acceptance coverage for post-provider persistence uncertainty.
-- Base/anchored snapshot-authority regressions preventing failed persistence from publishing uncommitted investigation, approval, or outcome state.
-- Evidence-unavailable lifecycle and authenticated bypass regressions.
-- Cloud Run metrics audience, redirect, sentinel-family, authenticated bridge, and disposable `up: 1 -> 0 -> 1` acceptance scaffolding.
-- Separate inbound scrape credentials from upstream Google ID tokens.
-- Non-loopback bridge listeners fail closed without explicit network binding plus strong inbound authentication.
-- Official Grafana MCP upgraded to reviewed `v1.4.1` with exact image pin and least-privilege command regression coverage.
-- Live MCP registry validation requires all advertised tools to be explicitly read-only.
-
-## Run log — 2026-09-12 — bounded Grafana MCP smoke execution
+## Run log — 2026-09-12 — MCP stdio protocol-integrity hardening
 
 ### Inspected at start
 
-Read this `progress.md` completely before deciding what to change. Inspected the repository root/runtime tree, `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_surface.py`, and `docs/grafana-mcp-evidence-safety.md`. Also reviewed current upstream Grafana MCP annotation work and official repository guidance relevant to the evidence-only tool boundary.
+Read this `progress.md` completely before deciding what to change. Inspected `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_timeout.py`, and `docs/grafana-mcp-evidence-safety.md` on the repository default branch. Also reviewed current MCP stdio guidance confirming that stdout is the protocol channel and ordinary logging belongs on stderr.
 
-All repository writes in this run were limited to `UnknownGod2011/Grafana`. No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
+Relevant references reviewed:
+- https://modelcontextprotocol.io (MCP project documentation)
+- https://ts.sdk.modelcontextprotocol.io/v2/get-started/first-server (official TypeScript SDK guidance: stdout is the protocol channel; use stderr for logs)
+- https://py.sdk.modelcontextprotocol.io/get-started/real-host/ (official Python SDK host guidance describing stray stdout as protocol corruption)
+- https://github.com/grafana/mcp-grafana (official Grafana MCP repository)
+
+All repository writes in this run were limited to `UnknownGod2011/Grafana`. No unrelated repository, workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
 
 ### Finding
 
-The newly strengthened live MCP smoke failed closed on unsafe/malformed tool registration, but its stdio request path still used blocking `readline()` with no protocol deadline. If the MCP subprocess started successfully and then stopped replying to `initialize`, `tools/list`, or `tools/call`, the acceptance command could hang indefinitely instead of producing a bounded failure.
-
-For a production release check this is a reliability and operational-safety gap: dependency health must include bounded response behavior, not only tool semantics after a response eventually arrives.
-
-Relevant upstream references reviewed:
-- https://github.com/grafana/mcp-grafana
-- https://github.com/grafana/mcp-grafana/issues/1009 (upstream work requiring explicit MCP tool annotations; reinforces why StageGuard validates the effective advertised registry rather than assuming annotations/configuration intent)
+The previous bounded stdio client silently skipped malformed/non-JSON stdout and silently skipped responses whose JSON-RPC id did not match the one outstanding StageGuard request. Because StageGuard's smoke client is deliberately sequential and has only one request in flight, those conditions are not useful concurrency behavior: they indicate a corrupted protocol stream, buggy server/wrapper, or an invalid response. Silently ignoring them could turn an immediate integrity failure into a misleading timeout and make dependency acceptance harder to diagnose.
 
 ### Exact changes made
 
-#### 1. Bounded every stdio JSON-RPC request
+#### 1. Fail closed on corrupted MCP stdout
 
-Commits:
-- `20c6048dc9a7fd43510b77ad9b3e557660a0a9a1`
-- `62af4832ead5a032ac3890d9ca6c23772ed4b939`
+Commit: `2316cb3668fe340aa855e9ad545e8ac20921b46e`
 
 `runtime/mcp_smoke.py` now:
-- uses a dedicated daemon stdout-reader thread and queue rather than blocking the request path directly on `readline()`;
-- applies a monotonic deadline to each JSON-RPC request;
-- defaults to a 15-second per-request timeout;
-- supports `STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS` for explicit tuning;
-- rejects nonnumeric, non-finite, non-positive, or >120-second timeout configuration;
-- reports which MCP method timed out without dumping credentials/provider data;
-- turns broken stdin writes into bounded `McpError` failures;
-- terminates and, if necessary, kills an unresponsive subprocess during cleanup;
-- joins/closes the stdout reader cleanly to avoid leaked pipe handles.
+- rejects non-JSON stdout immediately instead of skipping it;
+- rejects non-object JSON messages;
+- requires every incoming protocol message to declare `jsonrpc="2.0"`;
+- permits legitimate JSON-RPC notifications while waiting for a response;
+- rejects an id-bearing response whose id differs from the single outstanding request;
+- rejects messages that are neither a valid notification nor an id-bearing response;
+- keeps the existing per-request deadline and subprocess cleanup behavior unchanged.
 
-The existing all-tools `readOnlyHint=true` registry gate and real datasource/Prometheus query remain unchanged.
+This makes stray stdout logging or protocol desynchronization a direct acceptance failure rather than something that is hidden behind the timeout path.
 
-#### 2. Added dependency-free timeout regressions
+#### 2. Added stdio integrity regressions
 
-Created `runtime/tests/test_mcp_smoke_timeout.py`.
+Commit: `ec67b7a0c344ee96c479638723f4034844a2e190`
 
-Commit: `f71c389bc607b9e60f0efd1828e4954645f60788`.
-
-Coverage includes:
-- default and explicit timeout parsing;
-- invalid/unsafe timeout configuration;
-- a real local Python subprocess returning a matching JSON-RPC response;
-- a real local Python subprocess that deliberately remains silent, proving request timeout rather than indefinite blocking;
-- constructor rejection of non-positive/non-finite timeout values.
-
-The test requires no Docker, Grafana, token, or external service.
-
-#### 3. Documented bounded smoke behavior
-
-Updated `docs/grafana-mcp-evidence-safety.md`.
-
-Commit: `7b12a33e0271e5cc7d0852a266517b044335a603`.
-
-The document now records the 15-second default/120-second maximum, the environment override, fail-closed invalid configuration, subprocess cleanup behavior, and the expectation that timeout/cleanup behavior remains regression-covered.
+Expanded `runtime/tests/test_mcp_smoke_timeout.py` to cover:
+- a normal matching JSON-RPC response;
+- a legitimate notification followed by the expected response;
+- non-JSON stdout failing closed;
+- an unexpected response id failing closed;
+- an invalid JSON-RPC version failing closed;
+- the existing silent-server timeout behavior;
+- timeout configuration validation and constructor safety checks.
 
 ### Checks / results
 
 - Direct authenticated GitHub repository inspection and writes succeeded.
-- A fresh local repository checkout was attempted for `runtime.tests.test_mcp_smoke_surface` + `runtime.tests.test_mcp_smoke_timeout`, but the execution environment still failed at clone time with `Could not resolve host: github.com`.
+- A fresh checkout was attempted before making changes with:
+  `python -m unittest runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface runtime.tests.test_observability_image_pins`
+- The environment again failed before checkout with `Could not resolve host: github.com`.
 - No GitHub Actions workflow was triggered or rerun as a workaround.
-- Because checkout remained unavailable, I built a dependency-free local mirror of the new `StdioClient` timeout path and exercised the responsive/silent subprocess behavior directly. Result: **3/3 passed**.
-- The first mirror run exposed a `ResourceWarning` for an unclosed stdout pipe; the production implementation was then hardened to join the reader and close stdout. Re-running the mirror with `ResourceWarning` promoted to an error passed **3/3** without warnings.
-- No Docker image was pulled and no live MCP 1.4.1 smoke was claimed.
-
-Therefore there is still **no new green repository-suite claim**. The protocol mechanics were executable-tested in isolation, while the committed unit modules and real MCP stack still need execution from a functioning checkout.
+- Because the actual repository could not be checked out, the newly committed tests were not executed in this run and there is **no new green repository-suite claim**.
 
 ### Decisions
 
-1. MCP acceptance must be bounded in time as well as bounded in capability.
-2. Use a platform-neutral reader thread/queue instead of `select()` on subprocess pipes so the smoke remains usable on Windows and Unix-like development hosts.
-3. Put a hard maximum on operator-configurable request deadlines so a typo cannot silently restore effectively unbounded waiting.
-4. Keep timeouts per request, not one global smoke deadline, so slow startup/query phases are diagnosable by method while still bounded.
-5. Preserve the all-tools explicit-read-only gate; timeout hardening does not relax dependency security.
-6. Avoid noisy CI solely to work around the transient checkout/DNS failure.
+1. Treat stdout as a strict MCP protocol channel; malformed lines are integrity failures, not ignorable noise.
+2. Because this smoke client is sequential with exactly one outstanding request, a different response id is a protocol violation and should fail immediately.
+3. Continue allowing valid server notifications while a response is outstanding.
+4. Preserve bounded request deadlines as defense against a server that sends no protocol message at all.
+5. Avoid noisy GitHub Actions merely to work around a transient local DNS/checkout problem.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_mcp_smoke_surface`, `runtime.tests.test_mcp_smoke_timeout`, and `runtime.tests.test_observability_image_pins` still need execution from the actual repository checkout.
+- `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins` still need execution from the actual repository checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required before calling that dependency baseline production-ready.
 - It remains to confirm that every tool actually exposed by 1.4.1 under StageGuard's exact `datasource,prometheus,loki --disable-write --disable-proxied` configuration carries `readOnlyHint=true`.
 - The strengthened Cloud Run bridge six-module set still needs an executable run.
@@ -135,4 +104,4 @@ Therefore there is still **no new green repository-suite claim**. The protocol m
 
 ## Single best next step
 
-**As soon as executable repository checkout/Docker access works, run `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins`, then execute `python runtime/mcp_smoke.py` against the pinned Grafana MCP 1.4.1 stack. This must prove both bounded request behavior and an all-explicit-read-only live registry while successfully querying StageGuard Prometheus evidence. If clean, continue with the six focused Cloud Run bridge modules and the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout/Docker access works, run `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins`, then execute `python runtime/mcp_smoke.py` against pinned Grafana MCP 1.4.1. If those are clean, run the six focused Cloud Run bridge modules and then the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
