@@ -1,4 +1,5 @@
 import json
+import math
 import pathlib
 import sys
 import tempfile
@@ -53,6 +54,14 @@ class OnboardingTests(unittest.TestCase):
             },
         }
 
+    def profile_and_queries(self):
+        path = write_config(self.valid_document())
+        self.addCleanup(path.unlink)
+        profile = load_telemetry_profile(path)
+        all_queries = [q for q, _ in investigation_queries(profile).values()]
+        all_queries += [q for q, _ in recovery_queries(profile).values()]
+        return profile, all_queries
+
     def test_loads_versioned_profile(self):
         path = write_config(self.valid_document())
         self.addCleanup(path.unlink)
@@ -85,11 +94,7 @@ class OnboardingTests(unittest.TestCase):
             load_telemetry_profile(path)
 
     def test_ready_requires_all_eight_bounded_slots(self):
-        path = write_config(self.valid_document())
-        self.addCleanup(path.unlink)
-        profile = load_telemetry_profile(path)
-        all_queries = [q for q, _ in investigation_queries(profile).values()]
-        all_queries += [q for q, _ in recovery_queries(profile).values()]
+        profile, all_queries = self.profile_and_queries()
         client = RecordingClient(values={query: 1.0 for query in all_queries})
         result = preflight_telemetry(client, profile)
         self.assertTrue(result.ready)
@@ -98,11 +103,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertTrue(all(slot.status == "ok" for slot in result.slots))
 
     def test_missing_slot_refuses_activation_but_checks_remaining_slots(self):
-        path = write_config(self.valid_document())
-        self.addCleanup(path.unlink)
-        profile = load_telemetry_profile(path)
-        all_queries = [q for q, _ in investigation_queries(profile).values()]
-        all_queries += [q for q, _ in recovery_queries(profile).values()]
+        profile, all_queries = self.profile_and_queries()
         values = {query: 1.0 for query in all_queries}
         values[all_queries[2]] = None
         client = RecordingClient(values=values)
@@ -112,12 +113,39 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual("missing", result.slots[2].status)
         self.assertEqual(1, len(result.failures))
 
+    def test_non_finite_samples_refuse_activation_and_never_serialize_non_finite_json(self):
+        for sample in (math.nan, math.inf, -math.inf):
+            with self.subTest(sample=sample):
+                profile, all_queries = self.profile_and_queries()
+                values = {query: 1.0 for query in all_queries}
+                values[all_queries[3]] = sample
+                client = RecordingClient(values=values)
+
+                result = preflight_telemetry(client, profile)
+
+                self.assertFalse(result.ready)
+                self.assertEqual(8, len(client.calls))
+                self.assertEqual("invalid", result.slots[3].status)
+                self.assertIsNone(result.slots[3].value)
+                self.assertEqual("query returned a non-finite sample", result.slots[3].detail)
+                serialized = json.dumps(result.to_dict(), allow_nan=False)
+                self.assertNotIn("NaN", serialized)
+                self.assertNotIn("Infinity", serialized)
+
+    def test_adapter_type_violation_fails_loudly(self):
+        for sample in (True, "1.0", object()):
+            with self.subTest(sample=type(sample).__name__):
+                profile, all_queries = self.profile_and_queries()
+                values = {query: 1.0 for query in all_queries}
+                values[all_queries[0]] = sample
+                client = RecordingClient(values=values)
+
+                with self.assertRaisesRegex(TypeError, "numeric sample or None"):
+                    preflight_telemetry(client, profile)
+                self.assertEqual(1, len(client.calls))
+
     def test_expected_evidence_error_is_redacted_and_remaining_slots_are_checked(self):
-        path = write_config(self.valid_document())
-        self.addCleanup(path.unlink)
-        profile = load_telemetry_profile(path)
-        all_queries = [q for q, _ in investigation_queries(profile).values()]
-        all_queries += [q for q, _ in recovery_queries(profile).values()]
+        profile, all_queries = self.profile_and_queries()
         secret = "https://user:super-secret@example.invalid/api"
         client = RecordingClient(
             values={query: 1.0 for query in all_queries},
@@ -131,11 +159,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertNotIn("super-secret", json.dumps(result.to_dict()))
 
     def test_unexpected_programming_error_is_not_downgraded_to_telemetry_unavailability(self):
-        path = write_config(self.valid_document())
-        self.addCleanup(path.unlink)
-        profile = load_telemetry_profile(path)
-        all_queries = [q for q, _ in investigation_queries(profile).values()]
-        all_queries += [q for q, _ in recovery_queries(profile).values()]
+        profile, all_queries = self.profile_and_queries()
         client = RecordingClient(
             values={query: 1.0 for query in all_queries},
             errors={all_queries[1]: AssertionError("broken adapter invariant")},
