@@ -17,7 +17,9 @@ Core invariants retained:
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; server-side write/proxy restrictions are regression-locked; the live smoke rejects any advertised MCP tool that is not explicitly annotated `readOnlyHint=true`.
-- Grafana MCP smoke requests are time-bounded, stdout JSON-RPC frames are individually bounded, strict framing/response integrity fails closed, and pending stdout frames are held in a fixed-capacity queue so notification/output floods cannot create unbounded process memory growth.
+- Grafana MCP smoke requests are time-bounded, stdout JSON-RPC frames are individually bounded, strict framing/response integrity fails closed, and pending stdout frames are held in a fixed-capacity queue.
+- Cloud Run remediation/recovery execution watchdog configuration is bounded to 1-600 seconds so operator configuration cannot effectively disable the watchdog with an arbitrarily large value.
+- Cloud Run checkpoint HMAC keys are bounded to 32-512 UTF-8 bytes and reject leading/trailing whitespace or control characters before runtime composition.
 
 ## Retained validation baseline
 
@@ -26,78 +28,99 @@ Core invariants retained:
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest checkpoint/acceptance hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires an executable live smoke before a production-ready claim.
+- Recent MCP hardening added request deadlines, strict JSON-RPC framing/response-ID validation, a 1,048,576-character frame cap, and a 16-frame pending stdout queue; the actual repository regression modules still need a runnable checkout.
 
-## Run log — 2026-09-12 — MCP pending-frame queue hardening
+## Run log — 2026-09-12 — Cloud Run production safety bounds
 
 ### Inspected at start
 
-Read this `progress.md` completely before deciding what to change. Inspected the current default-branch repository state and then reviewed:
-- `runtime/mcp_smoke.py`
-- `runtime/tests/test_mcp_smoke_timeout.py`
-- `docs/grafana-mcp-evidence-safety.md`
-- current `main` branch head (`a4254bd64d90e44b8756f059dcb1fbf4d36e0b72` at run start)
+Read this `progress.md` completely before choosing work. Inspected the current default branch and reviewed:
+- `README.md`
+- `runtime/api.py`
+- `runtime/tests/test_api.py`
+- `runtime/cloudrun_entrypoint.py`
+- `runtime/tests/test_cloudrun_entrypoint.py`
+- `runtime/bootstrap.py`
+- `GOOGLE_CLOUD_DEPLOYMENT.md`
+- `scripts/deploy_cloud_run.sh`
+- current recent commits; run-start head was `b93a9d6abc52b3e2c528218316c2e777d8e1c4f8`.
 
-All repository writes in this run were limited to `UnknownGod2011/Grafana`. No unrelated repository, workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
+All repository writes were limited to `UnknownGod2011/Grafana`. No unrelated repository, GitHub Actions workflow, cloud resource, Grafana instance, Gemini endpoint, or remediation provider was modified.
 
-### Finding
+### Findings
 
-The MCP smoke had already bounded two important dimensions: each request has a deadline, and each newline-delimited stdout frame is capped before JSON parsing. However, the reader thread fed those frames into an **unbounded `queue.Queue`**. A broken or compromised MCP subprocess could emit a large stream of individually valid, individually sub-1-MiB notifications faster than the single sequential request consumer could process them. That output could accumulate in process memory without violating either the per-request timeout or per-frame limit. This is a distinct producer/consumer resource-exhaustion boundary.
+1. `runtime/cloudrun_entrypoint.py` accepted any finite positive `STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS`. A very large value could make the remediation watchdog operationally meaningless even though the code still considered it enabled.
+2. The checkpoint HMAC guard enforced only a minimum 32-byte length. It did not cap pathological secret size or reject accidental boundary whitespace/control characters. Because this secret authenticates persisted lifecycle authority, production composition should reject obviously malformed values early.
+3. `scripts/deploy_cloud_run.sh` independently validated the watchdog as merely positive, so deployment-time validation could accept a value that the hardened runtime would later reject.
+4. `GOOGLE_CLOUD_DEPLOYMENT.md` still named the older `grafana/mcp-grafana:1.3.0` image even though the repository is now pinned to 1.4.1.
 
 ### Exact changes made
 
-#### 1. Bounded the pending MCP stdout queue
+#### 1. Bounded Cloud Run watchdog and checkpoint HMAC configuration
 
-Commit: `cb8174ed6b42da1f984d328c2c2b1f078dd21e2c`
+Commits:
+- `4380b8a5803e2a51d86bba8f233946abd4e6f8ac`
+- `c1f34ad9b72d46a5868fe69e28f7c14072922147`
 
-`runtime/mcp_smoke.py` now:
-- defines a fixed `MAX_STDOUT_QUEUE_FRAMES = 16` limit;
-- constructs the stdout handoff queue with `maxsize=16` rather than leaving it unbounded;
-- uses non-blocking `put_nowait` in the stdout reader so the reader thread can never deadlock indefinitely waiting for queue capacity;
-- records overflow with a `threading.Event` sentinel and stops reading further protocol data when capacity is exceeded;
-- checks the overflow sentinel while waiting for a response and fails closed with a bounded-capacity `McpError` rather than draining an attacker-controlled backlog;
-- applies the same non-blocking handoff to oversized-frame errors and EOF markers, preserving the existing subprocess cleanup path;
-- retains the existing request deadline, 1,048,576-character frame limit, strict JSON-RPC validation, notification support, response-ID matching, and read-only tool-surface enforcement.
+`runtime/cloudrun_entrypoint.py` now:
+- accepts remediation/recovery execution watchdog values only from 1 through 600 seconds, inclusive;
+- rejects blank, malformed, non-finite, sub-second, and above-10-minute values with one bounded startup error;
+- requires checkpoint HMAC keys to be 32-512 UTF-8 bytes;
+- rejects leading/trailing whitespace and ASCII control characters in the checkpoint HMAC key before constructing production bootstrap arguments;
+- reads the raw checkpoint secret for validation rather than passing through `_required()`, which strips whitespace and would have hidden malformed boundary whitespace.
 
-The queue limit is fixed rather than environment-configurable. This smoke has one outstanding request at a time and does not need a deep asynchronous event backlog; increasing the pending-frame trust boundary should require code review.
+The raw-secret correction was made immediately after inspection caught that `_required()` normalization would otherwise make the new whitespace regression ineffective.
 
-#### 2. Added a deterministic notification-flood regression
+#### 2. Added focused Cloud Run regressions
 
-Commit: `90afa2bbee587bfe03810b5321c60ef568847eee`
+Commit: `adf8b2ad8c934a8fa3257d40afa9afef6efa014b`
 
-`runtime/tests/test_mcp_smoke_timeout.py` now includes a real local subprocess that emits `MAX_STDOUT_QUEUE_FRAMES + 1` JSON-RPC notifications before it begins consuming requests. The regression waits for the overflow sentinel, verifies the queue never exceeds its configured capacity, and requires the next request to fail closed with the queue-capacity error. Existing timeout, valid response, notification, dirty stdout, oversized frame, wrong response ID, invalid JSON-RPC version, and constructor validation coverage remains in place.
+`runtime/tests/test_cloudrun_entrypoint.py` now covers:
+- accepted watchdog boundaries and representative in-range values (`1`, `17.5`, `600`);
+- rejected values including zero, sub-second, above-600, negatives, NaN/infinities, blanks, and malformed strings;
+- HMAC keys below 32 bytes and above 512 bytes;
+- leading/trailing whitespace and embedded control-character rejection;
+- continued acceptance of a bounded 32-byte key and GCS checkpoint composition.
 
-#### 3. Documented the third stdio resource bound
+#### 3. Aligned deployment-time validation with runtime validation
 
-Commit: `0cb235a996732c5568d59eb589df8afcaaa90d2b`
+Commit: `d9a21fed9f578b36a75ddbf30c60c945d2f49781`
 
-`docs/grafana-mcp-evidence-safety.md` now describes the MCP stdio safety contract as three independent limits:
-1. bounded request time;
-2. bounded individual stdout frame size;
-3. bounded pending stdout-frame count.
+`scripts/deploy_cloud_run.sh` now enforces the same inclusive 1-600 second watchdog range before invoking `gcloud`, rather than accepting any positive finite number. This prevents a deployment command from succeeding only for the container to refuse startup with stricter runtime validation.
 
-The documentation also explains why notification floods are different from a single oversized frame, why bounded legitimate notifications remain supported, and why the queue depth is intentionally fixed.
+#### 4. Updated production deployment documentation
+
+Commit: `dfe3805196f2e961e00292607dc607b9cf96255c`
+
+`GOOGLE_CLOUD_DEPLOYMENT.md` now:
+- names the current official Grafana MCP baseline `grafana/mcp-grafana:1.4.1`;
+- documents the 1-600 second watchdog safety range and fail-closed behavior;
+- documents the 32-512 byte checkpoint HMAC bounds plus whitespace/control-character rejection;
+- includes the watchdog environment variable in optional deployment configuration;
+- updates failure behavior to match the executable production guardrails.
 
 ### Checks / results
 
-- Direct authenticated GitHub repository inspection and all three repository writes succeeded.
-- A fresh checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution environment still failed with `Could not resolve host: github.com`.
+- Direct authenticated GitHub repository inspection and all repository writes succeeded.
+- A fresh executable checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution environment still failed with `Could not resolve host: github.com` before tests could run.
 - No GitHub Actions workflow was triggered or rerun as a workaround.
-- Because an executable checkout remains unavailable, `runtime.tests.test_mcp_smoke_timeout` was **not** executed from the actual repository and there is no new green repository-suite claim.
-- An isolated subprocess proof of the exact new queue primitive was executed locally: a child emitted 17 JSON-RPC notification frames into a queue capped at 16; the overflow sentinel became true and observed queue size remained exactly 16. This validates the producer/consumer bound itself, not the committed unittest module or live Grafana MCP integration.
+- An isolated Python proof of the exact new watchdog/HMAC predicates passed: accepted `1`, `17.5`, `600`, and a 32-byte key; rejected all configured out-of-range/non-finite watchdog cases and short/oversized/whitespace/control-character HMAC cases.
+- Because the actual repository checkout remains unavailable, `runtime.tests.test_cloudrun_entrypoint` and shell-level deployment tests were not executed from the repository. There is no new repository-suite green claim.
 
 ### Decisions
 
-1. Bound the number of pending protocol frames in addition to request time and per-frame size; all three protect different failure modes.
-2. Use non-blocking producer insertion and fail closed on overflow rather than blocking the reader thread, silently dropping notifications, or expanding the queue.
-3. Keep the queue limit fixed in code so deployment configuration cannot silently weaken release acceptance.
-4. Preserve legitimate JSON-RPC notifications; only sustained output that exceeds the bounded consumer backlog is rejected.
+1. Treat an excessively large watchdog as a production safety misconfiguration rather than a valid customization; 10 minutes is the hard ceiling for this live remediation/recovery guardrail.
+2. Keep runtime and deployment-helper validation identical so bad configuration fails before cloud mutation whenever possible.
+3. Validate the raw checkpoint HMAC environment value before normalization because normalization can hide malformed secret boundaries.
+4. Bound checkpoint secret size as well as minimum length; this is a persisted-authority credential and production configuration should have a finite input envelope.
 5. Continue avoiding noisy GitHub Actions merely to work around the transient local DNS/checkout issue.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins` still need execution from the actual repository checkout.
+- `runtime.tests.test_cloudrun_entrypoint` must be run from an actual checkout to verify the committed regression module and imports end-to-end.
+- Any existing shell/deployment-helper tests should be run against the updated 1-600 second validation.
+- `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins` still need an actual repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required before calling that dependency baseline production-ready.
-- It remains to confirm every tool actually exposed by 1.4.1 under StageGuard's exact `datasource,prometheus,loki --disable-write --disable-proxied` configuration carries `readOnlyHint=true`.
 - The strengthened Cloud Run bridge six-module set still needs an executable run.
 - The execution-reconciliation/operator/Playwright safety set from previous runs still needs a current run.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -105,4 +128,4 @@ The documentation also explains why notification floods are different from a sin
 
 ## Single best next step
 
-**As soon as executable checkout/Docker access works, run `runtime.tests.test_mcp_smoke_timeout`, `runtime.tests.test_mcp_smoke_surface`, and `runtime.tests.test_observability_image_pins`, then execute `python runtime/mcp_smoke.py` against pinned Grafana MCP 1.4.1. If those are clean, run the six focused Cloud Run bridge modules and then the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout is available, run `runtime.tests.test_cloudrun_entrypoint` plus any deploy-script regression suite first to verify the new runtime/deployment safety bounds. Then run the MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke. If those are clean, proceed to the six Cloud Run bridge modules and the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
