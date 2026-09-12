@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Opt-in acceptance harness for StageGuard's private Cloud Run metrics path.
 
-This command is deliberately NOT a unit test and is never invoked automatically
-by CI. It validates an already-provisioned private StageGuard Cloud Run service
-using the caller's Application Default Credentials and an existing least-
-privilege ``roles/run.invoker`` grant.
+This command validates an already-provisioned private StageGuard Cloud Run
+service using Application Default Credentials and an existing least-privilege
+``roles/run.invoker`` grant.
 
 Acceptance path:
 
@@ -14,11 +13,15 @@ Acceptance path:
     -> authenticated Cloud Run /metrics still valid
     -> restart bridge on same port -> Prometheus up == 1
 
-It also performs a non-destructive negative request to the upstream ``/metrics``
-endpoint without a token and requires Cloud Run to reject it.
+The bridge binds beyond loopback so Prometheus in Docker can reach the host.
+For that reason this harness generates a fresh high-entropy bearer credential
+for every run. The credential protects bridge /readyz and /metrics, is written
+only into the temporary read-only Prometheus config, is never printed, and is
+independent from the Google ID token used upstream.
 
-The harness never creates IAM bindings, deploys services, writes secrets, prints
-ID tokens, calls StageGuard lifecycle endpoints, or triggers remediation.
+The harness never creates IAM bindings, deploys services, writes persistent
+secrets, prints credentials, calls StageGuard lifecycle endpoints, or triggers
+remediation.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import argparse
 import json
 import math
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -82,7 +86,6 @@ def _request_status_without_redirects(url: str, timeout_seconds: float) -> int:
 
 
 def verify_unauthorized_upstream(metrics_url: str, timeout_seconds: float) -> int:
-    """Require an unauthenticated request to be rejected by the upstream service."""
     status = _request_status_without_redirects(metrics_url, timeout_seconds)
     if status not in ALLOWED_UNAUTHORIZED_STATUSES:
         raise AcceptanceError(
@@ -92,12 +95,20 @@ def verify_unauthorized_upstream(metrics_url: str, timeout_seconds: float) -> in
     return status
 
 
-def wait_for_bridge_ready(base_url: str, timeout_seconds: float) -> None:
+def _bridge_request(url: str, bearer_token: str | None = None) -> urllib.request.Request:
+    headers = {"Accept": "application/json"}
+    if bearer_token is not None:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    return urllib.request.Request(url, headers=headers, method="GET")
+
+
+def wait_for_bridge_ready(base_url: str, timeout_seconds: float, bearer_token: str | None = None) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_status: int | None = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"{base_url}/readyz", timeout=2) as response:
+            request = _bridge_request(f"{base_url}/readyz", bearer_token)
+            with urllib.request.urlopen(request, timeout=2) as response:
                 last_status = int(response.status)
                 if response.status == 200 and response.read() == b'{"ok":true,"upstream":"reachable"}':
                     return
@@ -116,14 +127,9 @@ def wait_for_prometheus_up(
     expected: float,
     timeout_seconds: float,
 ) -> float:
-    """Wait for one finite Prometheus ``up`` sample equal to ``expected``.
-
-    The acceptance target is intentionally singular. Duplicate series are an
-    acceptance failure because they make outage/recovery evidence ambiguous.
-    """
+    """Wait for one finite Prometheus ``up`` sample equal to ``expected``."""
     if expected not in (0.0, 1.0):
         raise ValueError("expected Prometheus up value must be 0 or 1")
-
     query = urllib.parse.urlencode({"query": f'up{{job="{job_name}"}}'})
     url = f"{prometheus_url}/api/v1/query?{query}"
     deadline = time.monotonic() + timeout_seconds
@@ -160,19 +166,25 @@ def wait_for_prometheus_up(
 
 
 def fetch_prometheus_up(prometheus_url: str, job_name: str, timeout_seconds: float) -> float:
-    """Backward-compatible success helper used by focused regressions."""
     return wait_for_prometheus_up(prometheus_url, job_name, 1.0, timeout_seconds)
 
 
-def _prometheus_config(bridge_port: int, job_name: str) -> str:
-    return f"""global:
-  scrape_interval: 2s
-  scrape_timeout: 2s
-scrape_configs:
-  - job_name: {job_name!r}
-    static_configs:
-      - targets: ['host.docker.internal:{bridge_port}']
-"""
+def _prometheus_config(bridge_port: int, job_name: str, bearer_token: str | None = None) -> str:
+    auth = ""
+    if bearer_token is not None:
+        # JSON strings are valid YAML scalars and avoid injection through a
+        # generated or externally supplied token.
+        auth = f"    authorization:\n      type: Bearer\n      credentials: {json.dumps(bearer_token)}\n"
+    return (
+        "global:\n"
+        "  scrape_interval: 2s\n"
+        "  scrape_timeout: 2s\n"
+        "scrape_configs:\n"
+        f"  - job_name: {job_name!r}\n"
+        f"{auth}"
+        "    static_configs:\n"
+        f"      - targets: ['host.docker.internal:{bridge_port}']\n"
+    )
 
 
 def _docker_available() -> None:
@@ -219,7 +231,6 @@ def _start_prometheus(config_path: Path, image: str) -> tuple[str, int]:
     container_id = completed.stdout.strip()
     if not container_id:
         raise AcceptanceError("docker did not return a disposable Prometheus container id")
-
     inspect = subprocess.run(
         ["docker", "port", container_id, "9090/tcp"],
         stdout=subprocess.PIPE,
@@ -255,8 +266,16 @@ def _stop_container(container_id: str) -> None:
 def _start_bridge(
     client: CloudRunMetricsClient,
     port: int = 0,
+    *,
+    bearer_token: str | None = None,
 ) -> tuple[ThreadingHTTPServer, threading.Thread]:
-    server = make_server(client, "0.0.0.0", port, allow_network_bind=True)
+    server = make_server(
+        client,
+        "0.0.0.0",
+        port,
+        allow_network_bind=True,
+        bearer_token=bearer_token,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
@@ -282,69 +301,62 @@ def run_acceptance(
     job_name: str = DEFAULT_JOB_NAME,
     client_factory: Callable[..., CloudRunMetricsClient] = CloudRunMetricsClient,
 ) -> AcceptanceResult:
-    """Execute the complete non-destructive private metrics acceptance flow."""
     metrics_url, target_origin = normalize_target(target)
     unauthorized_status = verify_unauthorized_upstream(metrics_url, timeout_seconds)
-
-    # This first authenticated fetch proves ADC token acquisition, Cloud Run
-    # invoker authorization, /metrics reachability, and StageGuard payload
-    # identity before exposing the bridge to the disposable Prometheus process.
     client = client_factory(target, audience=audience, timeout_seconds=timeout_seconds)
     client.fetch()
 
     _docker_available()
+    # This credential protects only the local bridge. It is never used as the
+    # Cloud Run audience credential and never leaves the temporary acceptance
+    # boundary except in the read-only Prometheus config.
+    bridge_bearer_token = secrets.token_urlsafe(32)
     server: ThreadingHTTPServer | None = None
     thread: threading.Thread | None = None
     container_id = ""
     try:
-        server, thread = _start_bridge(client)
+        server, thread = _start_bridge(client, bearer_token=bridge_bearer_token)
         bridge_port = int(server.server_address[1])
-        wait_for_bridge_ready(f"http://127.0.0.1:{bridge_port}", timeout_seconds)
+        wait_for_bridge_ready(
+            f"http://127.0.0.1:{bridge_port}",
+            timeout_seconds,
+            bridge_bearer_token,
+        )
 
         with tempfile.TemporaryDirectory(prefix="stageguard-prometheus-") as temp_dir:
             config_path = Path(temp_dir) / "prometheus.yml"
-            config_path.write_text(_prometheus_config(bridge_port, job_name), encoding="utf-8")
+            config_path.write_text(
+                _prometheus_config(bridge_port, job_name, bridge_bearer_token),
+                encoding="utf-8",
+            )
             container_id, prometheus_port = _start_prometheus(config_path, prometheus_image)
             prometheus_url = f"http://127.0.0.1:{prometheus_port}"
-
-            # The query loop also serves as bounded Prometheus startup waiting;
-            # no separate health endpoint is required for acceptance.
             effective_timeout = max(prometheus_start_timeout_seconds, scrape_timeout_seconds)
             prometheus_up = wait_for_prometheus_up(
-                prometheus_url,
-                job_name,
-                1.0,
-                effective_timeout,
+                prometheus_url, job_name, 1.0, effective_timeout
             )
 
-            # Failure/recovery is deliberately isolated to the local bridge.
-            # Cloud Run and IAM remain untouched. Prometheus must observe the
-            # transport loss as up=0 before any restart occurs.
             _stop_bridge(server, thread)
             server = None
             thread = None
             outage_up = wait_for_prometheus_up(
-                prometheus_url,
-                job_name,
-                0.0,
-                scrape_timeout_seconds,
+                prometheus_url, job_name, 0.0, scrape_timeout_seconds
             )
 
-            # While the bridge is down, prove the authoritative private Cloud
-            # Run endpoint is still reachable through the same authenticated
-            # production client. This guards against an acceptance test that
-            # accidentally changed upstream service/IAM state.
             client.fetch()
 
-            # Prometheus keeps scraping the original fixed target, so recovery
-            # must occur on the exact same bridge port.
-            server, thread = _start_bridge(client, bridge_port)
-            wait_for_bridge_ready(f"http://127.0.0.1:{bridge_port}", timeout_seconds)
+            server, thread = _start_bridge(
+                client,
+                bridge_port,
+                bearer_token=bridge_bearer_token,
+            )
+            wait_for_bridge_ready(
+                f"http://127.0.0.1:{bridge_port}",
+                timeout_seconds,
+                bridge_bearer_token,
+            )
             recovered_up = wait_for_prometheus_up(
-                prometheus_url,
-                job_name,
-                1.0,
-                scrape_timeout_seconds,
+                prometheus_url, job_name, 1.0, scrape_timeout_seconds
             )
 
         return AcceptanceResult(
@@ -394,7 +406,6 @@ def main() -> int:
     args = parser.parse_args()
     if not args.target:
         parser.error("--target or STAGEGUARD_METRICS_TARGET is required")
-
     try:
         result = run_acceptance(
             args.target,
@@ -408,8 +419,6 @@ def main() -> int:
         print(f"FAIL: {exc}")
         return 1
     except Exception as exc:
-        # Preserve the failure class for debugging without echoing exception text,
-        # which may contain provider URLs, credential metadata, or response bodies.
         print(f"FAIL: acceptance aborted ({exc.__class__.__name__})")
         return 1
 
@@ -417,6 +426,7 @@ def main() -> int:
     print(f"  target: {result.target_origin}")
     print(f"  unauthenticated /metrics: rejected ({result.unauthorized_status})")
     print("  ADC-authenticated /metrics: valid StageGuard sentinel")
+    print("  local bridge: ephemeral bearer protection enabled")
     print("  bridge /readyz: healthy")
     print("  bridge /metrics: validated")
     print(f"  Prometheus {DEFAULT_JOB_NAME} initial up: {result.prometheus_up:g}")
