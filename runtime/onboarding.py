@@ -8,6 +8,7 @@ a read-only MetricQueryClient before a profile can be considered active.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Protocol
@@ -114,9 +115,13 @@ def preflight_telemetry(client: MetricQueryClient, profile: TelemetryProfile) ->
     is deliberately not copied into the result because provider messages may
     contain URLs, credentials, or other sensitive integration details.
 
-    Programming and policy errors are not swallowed here: unexpected exceptions
-    propagate so broken onboarding code cannot be mistaken for ordinary telemetry
-    unavailability.
+    Missing or non-finite Prometheus samples are also non-ready evidence. NaN
+    and infinities are representable Prometheus values but are not usable as
+    activation proof, so they are retained only as a generic invalid status and
+    are never serialized as JSON numeric values. Programming and policy errors,
+    including adapters that violate the ``float | None`` contract, are not
+    swallowed here: unexpected exceptions propagate so broken onboarding code
+    cannot be mistaken for ordinary telemetry unavailability.
     """
     checks: list[tuple[str, str, str]] = []
     checks.extend(
@@ -157,16 +162,31 @@ def preflight_telemetry(client: MetricQueryClient, profile: TelemetryProfile) ->
                     detail="query returned no sample",
                 )
             )
-        else:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("telemetry query client must return a numeric sample or None")
+        numeric_value = float(value)
+        if not math.isfinite(numeric_value):
             slots.append(
                 PreflightSlot(
                     phase=phase,
                     name=name,
                     promql=promql,
-                    status="ok",
-                    value=float(value),
+                    status="invalid",
+                    value=None,
+                    detail="query returned a non-finite sample",
                 )
             )
+            continue
+        slots.append(
+            PreflightSlot(
+                phase=phase,
+                name=name,
+                promql=promql,
+                status="ok",
+                value=numeric_value,
+            )
+        )
 
     frozen_slots = tuple(slots)
     return PreflightResult(
