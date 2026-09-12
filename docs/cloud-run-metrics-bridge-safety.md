@@ -6,7 +6,7 @@ StageGuard keeps its production Cloud Run service authenticated. Prometheus shou
 
 The bridge is an observability adapter, not a general proxy. It accepts one configured HTTPS StageGuard service origin, obtains a short-lived Google-signed ID token through Application Default Credentials, and performs only `GET /metrics`. Caller headers are never forwarded and the bridge owns the upstream `Authorization` header.
 
-The default listener is loopback-only. A non-loopback listener still requires explicit `--allow-network-bind`; when that is necessary, operators should additionally configure `--bearer-token` or `STAGEGUARD_BRIDGE_BEARER_TOKEN` so `/readyz` and `/metrics` are not anonymously readable on the bound network. `/healthz` remains process-only liveness and does not contact Cloud Run.
+The default listener is loopback-only. A non-loopback listener requires **both** explicit `--allow-network-bind` opt-in and a configured `--bearer-token` or `STAGEGUARD_BRIDGE_BEARER_TOKEN`; StageGuard refuses to start an anonymously readable non-loopback bridge. `/healthz` remains process-only liveness and does not contact Cloud Run.
 
 Inbound bridge authentication and upstream Cloud Run authentication are intentionally separate credentials. A Prometheus scrape credential is never reused as the Google ID token, and a caller-supplied `Authorization` header is never forwarded upstream.
 
@@ -27,11 +27,13 @@ These controls are complementary:
 
 - audience/target matching prevents silent cross-origin credential delivery before a request starts;
 - redirect rejection prevents replay to a different destination after a request starts;
-- optional bridge bearer authentication protects the local/private scrape surface when loopback-only binding is impossible.
+- mandatory bridge bearer authentication prevents anonymous network access whenever the bridge is intentionally bound beyond loopback.
 
 ## Inbound scrape authentication
 
 When `STAGEGUARD_BRIDGE_BEARER_TOKEN` is configured, `/readyz` and `/metrics` require an exact `Authorization: Bearer ...` match. Comparison uses `hmac.compare_digest`. Missing or incorrect credentials receive sanitized HTTP `401` with a Bearer challenge and, importantly, do **not** mint an upstream Cloud Run token or contact the upstream service.
+
+For loopback-only bindings this credential remains optional so simple local development can work without extra secret plumbing. For any non-loopback bind, `make_server()` requires both explicit network-bind opt-in and a valid inbound bearer credential before opening the listener.
 
 `/healthz` intentionally remains unauthenticated because it is process-only liveness. It neither fetches StageGuard telemetry nor acquires a Google credential.
 
@@ -55,6 +57,7 @@ The bridge deliberately does not implement a general Prometheus parser. The sent
 
 When configuration, bridge authentication, ADC, token minting, IAM, network access, redirects, upstream HTTP access, response-size limits, or payload validation fail:
 
+- an attempted non-loopback bind without an inbound bearer credential is rejected before the listener is created;
 - unauthenticated bridge `/readyz` and `/metrics` return sanitized HTTP `401` when inbound auth is configured;
 - authenticated bridge `/readyz` returns sanitized HTTP `503` when the upstream path fails;
 - authenticated bridge `/metrics` returns sanitized HTTP `502` when the upstream path fails;
@@ -74,7 +77,7 @@ For workloads on Google Cloud, prefer an attached user-managed service account. 
 Focused credential-free tests include:
 
 - `runtime/tests/test_cloud_run_metrics_bridge.py` — target validation, timeout bounds, bridge-owned upstream authorization, liveness/readiness, payload integrity, and sanitized failure responses;
-- `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py` — inbound bearer validation, 401 behavior, zero upstream calls for unauthorized requests, Prometheus auth configuration, and acceptance restart credential continuity;
+- `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py` — inbound bearer validation, fail-closed non-loopback binding, 401 behavior, zero upstream calls for unauthorized requests, Prometheus auth configuration, and acceptance restart credential continuity;
 - `runtime/tests/test_cloud_run_metrics_bridge_sentinel_family.py` — sentinel-family ambiguity and labeled-series rejection;
 - `runtime/tests/test_cloud_run_metrics_bridge_redirects.py` — redirect isolation requiring the redirect destination to receive zero credentials;
 - `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py` — same-origin default and reject-before-token-minting mismatch behavior;
