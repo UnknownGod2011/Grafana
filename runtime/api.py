@@ -32,6 +32,13 @@ _EXECUTION_RECONCILIATION_REASONS = (
 )
 _AUDIT_INTEGRITY_STATES = ("disabled", "unbound_legacy", "verified", "failed")
 _AUDIT_INTEGRITY_POLICIES = ("allow_unbound_legacy", "require_verified")
+_LIFECYCLE_SAFETY_STATES = (
+    "ok",
+    "checkpoint_conflicted",
+    "audit_integrity_failed",
+    "execution_uncertain",
+    "execution_uncertain_audit_failed",
+)
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -116,6 +123,24 @@ def _execution_reconciliation_reason(service: IncidentService) -> str:
     return reason if reason in _EXECUTION_RECONCILIATION_REASONS else "phase_unavailable"
 
 
+def _execution_reconciliation_reference(service: IncidentService) -> str | None:
+    """Return only a bounded StageGuard operation reference, never provider detail."""
+    getter = getattr(service, "execution_reconciliation_reference", None)
+    if not callable(getter):
+        return None
+    try:
+        reference = getter()
+    except Exception:
+        return None
+    if reference is None:
+        return None
+    if not isinstance(reference, str) or len(reference) != 43 or not reference.startswith("sg-"):
+        return None
+    if any(char not in "0123456789abcdef" for char in reference[3:]):
+        return None
+    return reference
+
+
 def _audit_integrity_state(service: IncidentService) -> str:
     """Return the bounded audit-integrity state without exposing audit/provider details."""
     getter = getattr(service, "audit_integrity_state", None)
@@ -142,6 +167,27 @@ def _audit_integrity_policy_satisfied(service: IncidentService, state: str | Non
     if policy == "require_verified":
         return integrity == "verified"
     return True
+
+
+def _lifecycle_safety_state(service: IncidentService) -> str:
+    """Collapse simultaneous lifecycle barriers into one bounded operator state."""
+    integrity = _audit_integrity_state(service)
+    reconciliation = _execution_reconciliation_state(service)
+    try:
+        checkpoint = service.checkpoint_state()
+    except Exception:
+        checkpoint = "conflicted"
+
+    execution_uncertain = reconciliation != "clear" or checkpoint == "execution_uncertain"
+    if execution_uncertain and integrity == "failed":
+        return "execution_uncertain_audit_failed"
+    if execution_uncertain:
+        return "execution_uncertain"
+    if integrity == "failed":
+        return "audit_integrity_failed"
+    if checkpoint == "conflicted":
+        return "checkpoint_conflicted"
+    return "ok"
 
 
 def _remediation_execution_observability(service: IncidentService) -> dict[str, float | bool]:
@@ -228,11 +274,13 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
     return {
         "incident": None if snapshot is None else snapshot.to_dict(),
         "evidence_source": _evidence_source_view(service, snapshot),
+        "safety_state": _lifecycle_safety_state(service),
         "checkpoint_state": service.checkpoint_state(),
         "audit_integrity": _audit_integrity_state(service),
         "audit_integrity_policy": _audit_integrity_policy(service),
         "execution_reconciliation_state": _execution_reconciliation_state(service),
         "execution_reconciliation_reason": _execution_reconciliation_reason(service),
+        "execution_reconciliation_reference": _execution_reconciliation_reference(service),
         "remediation_execution": _remediation_execution_observability(service),
     }
 
@@ -244,14 +292,16 @@ def _service_readiness(service: IncidentService) -> dict[str, object]:
     audit_integrity = _audit_integrity_state(service)
     audit_policy = _audit_integrity_policy(service)
     audit_policy_satisfied = _audit_integrity_policy_satisfied(service, audit_integrity)
+    safety_state = _lifecycle_safety_state(service)
     execution = _remediation_execution_observability(service)
+    readiness["checks"]["lifecycle_safety"] = safety_state
     readiness["checks"]["checkpoint"] = checkpoint_state
     readiness["checks"]["audit_integrity"] = audit_integrity
     readiness["checks"]["audit_integrity_policy"] = audit_policy
     readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
     readiness["checks"]["remediation_execution_deadline"] = "exceeded" if execution["deadline_exceeded"] else "ok"
     readiness["checks"]["remediation_reconciliation_reason"] = _execution_reconciliation_reason(service)
-    if checkpoint_state in {"conflicted", "execution_uncertain"} or not audit_policy_satisfied or execution["deadline_exceeded"]:
+    if safety_state != "ok" or not audit_policy_satisfied or execution["deadline_exceeded"]:
         readiness["ready"] = False
     return readiness
 
@@ -271,6 +321,7 @@ def _service_metrics(service: IncidentService) -> str:
     audit_integrity = _audit_integrity_state(service)
     audit_policy = _audit_integrity_policy(service)
     audit_policy_satisfied = 1 if _audit_integrity_policy_satisfied(service, audit_integrity) else 0
+    lifecycle_safety = _lifecycle_safety_state(service)
     metrics += (
         "# HELP stageguard_checkpoint_conflict_blocked Whether lifecycle mutation is blocked pending explicit checkpoint reload.\n"
         "# TYPE stageguard_checkpoint_conflict_blocked gauge\n"
@@ -320,7 +371,11 @@ def _service_metrics(service: IncidentService) -> str:
         "# HELP stageguard_audit_integrity_policy_satisfied Whether the current audit state satisfies the configured readiness policy.\n"
         "# TYPE stageguard_audit_integrity_policy_satisfied gauge\n"
         f"stageguard_audit_integrity_policy_satisfied {audit_policy_satisfied}\n"
+        "# HELP stageguard_lifecycle_safety_state Fixed-cardinality composite lifecycle safety state.\n"
+        "# TYPE stageguard_lifecycle_safety_state gauge\n"
     )
+    for state in _LIFECYCLE_SAFETY_STATES:
+        metrics += f'stageguard_lifecycle_safety_state{{state="{state}"}} {1 if state == lifecycle_safety else 0}\n'
     return metrics
 
 
@@ -415,6 +470,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "loki_activation": "failed",
                         "prometheus_mcp": "failed",
                         "loki_mcp": "failed",
+                        "lifecycle_safety": "audit_integrity_failed",
                         "checkpoint": "failed",
                         "audit_integrity": "failed",
                         "audit_integrity_policy": "require_verified",
