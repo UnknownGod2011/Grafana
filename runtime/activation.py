@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -62,6 +63,22 @@ def _slot_digest(preflight: PreflightResult) -> str:
     return hashlib.sha256(_canonical_json(slots).encode("utf-8")).hexdigest()
 
 
+def _validate_successful_preflight(preflight: PreflightResult) -> None:
+    if not preflight.ready:
+        raise ValueError("cannot activate telemetry that did not pass preflight")
+    if len(preflight.slots) != 8:
+        raise ValueError("activation requires exactly eight preflight slots")
+    for slot in preflight.slots:
+        if slot.status != "ok":
+            raise ValueError("activation requires all preflight slots to be ok")
+        if isinstance(slot.value, bool) or not isinstance(slot.value, (int, float)):
+            raise ValueError("activation requires every ok preflight slot to contain a numeric sample")
+        if not math.isfinite(float(slot.value)):
+            raise ValueError("activation requires every ok preflight slot to contain a finite sample")
+        if slot.detail is not None:
+            raise ValueError("activation requires ok preflight slots without error detail")
+
+
 def create_activation_record(
     profile: TelemetryProfile,
     datasource_identity: str,
@@ -71,14 +88,9 @@ def create_activation_record(
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
 ) -> ActivationRecord:
     """Create an activation record only from a complete successful eight-slot preflight."""
-    if not preflight.ready:
-        raise ValueError("cannot activate telemetry that did not pass preflight")
+    _validate_successful_preflight(preflight)
     if preflight.production_id != profile.production_id:
         raise ValueError("preflight production does not match telemetry profile")
-    if len(preflight.slots) != 8:
-        raise ValueError("activation requires exactly eight preflight slots")
-    if any(slot.status != "ok" for slot in preflight.slots):
-        raise ValueError("activation requires all preflight slots to be ok")
     if type(ttl_seconds) is not int or ttl_seconds <= 0 or ttl_seconds > 7 * 24 * 60 * 60:
         raise ValueError("ttl_seconds must be an integer between 1 and 604800")
     created = int(time.time()) if now_unix is None else int(now_unix)
