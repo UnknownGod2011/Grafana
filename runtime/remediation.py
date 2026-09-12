@@ -94,6 +94,57 @@ def remediation_operation_id(report: IncidentReport, approval: Approval) -> str:
     return "sg-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:40]
 
 
+def _safe_production_metadata(metadata: object, *, expected_operation_id: str) -> dict:
+    """Return only StageGuard-owned production result metadata.
+
+    Remediation adapters are an extension boundary and may wrap third-party APIs.
+    Their raw response text or metadata must never become API, audit, or checkpoint
+    state. The built-in production adapter emits a deliberately tiny set of fields;
+    retain those fields only when the adapter identity and deterministic operation
+    identity both match StageGuard's policy-owned values.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    if metadata.get("adapter") != "allowlisted_production":
+        return {}
+    if metadata.get("operation_id") != expected_operation_id:
+        return {}
+
+    attempt_count = metadata.get("attempt_count")
+    if not isinstance(attempt_count, int) or isinstance(attempt_count, bool) or not 0 <= attempt_count <= 3:
+        return {}
+
+    transport_status = metadata.get("transport_status")
+    if transport_status is not None and (
+        not isinstance(transport_status, int)
+        or isinstance(transport_status, bool)
+        or not 100 <= transport_status <= 599
+    ):
+        return {}
+
+    return {
+        "adapter": "allowlisted_production",
+        "operation_id": expected_operation_id,
+        "attempt_count": attempt_count,
+        "transport_status": transport_status,
+    }
+
+
+def sanitize_action_result(action: ActionResult, *, expected_operation_id: str) -> ActionResult:
+    """Discard provider-controlled detail before it can become lifecycle state.
+
+    ``ActionResult`` is returned by deployment-specific adapters, so both ``detail``
+    and arbitrary metadata are untrusted. Preserve only the acceptance bit and the
+    narrowly validated metadata emitted by StageGuard's built-in production adapter.
+    Operator-visible detail is derived locally and therefore cannot contain provider
+    URLs, credentials, response bodies, or other secret-bearing diagnostics.
+    """
+    accepted = bool(action.accepted)
+    detail = "remediation action accepted" if accepted else "remediation action rejected or failed"
+    metadata = _safe_production_metadata(action.metadata, expected_operation_id=expected_operation_id)
+    return ActionResult(accepted, detail, metadata)
+
+
 def _execute_remediation(
     remediation: RemediationClient,
     report: IncidentReport,
@@ -103,8 +154,10 @@ def _execute_remediation(
     operation_id = remediation_operation_id(report, approval)
     idempotent_method = getattr(remediation, "recover_uplink_idempotent", None)
     if callable(idempotent_method):
-        return idempotent_method(report.production_id, profile.affected_uplink, operation_id)
-    return remediation.recover_uplink(report.production_id, profile.affected_uplink)
+        action = idempotent_method(report.production_id, profile.affected_uplink, operation_id)
+    else:
+        action = remediation.recover_uplink(report.production_id, profile.affected_uplink)
+    return sanitize_action_result(action, expected_operation_id=operation_id)
 
 
 def remediate_and_verify(
