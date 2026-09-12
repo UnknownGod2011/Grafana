@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from onboarding import PreflightResult
-from telemetry import TelemetryProfile
+from telemetry import TelemetryProfile, investigation_queries, recovery_queries
 
-ACTIVATION_VERSION = 1
+ACTIVATION_VERSION = 2
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 _MAX_ACTIVATION_BYTES = 128 * 1024
 
@@ -50,24 +50,45 @@ class ActivationRecord:
         return asdict(self)
 
 
+def _expected_preflight_contract(profile: TelemetryProfile) -> tuple[tuple[str, str, str], ...]:
+    expected: list[tuple[str, str, str]] = []
+    expected.extend(
+        ("investigation", name, query)
+        for name, (query, _expectation) in investigation_queries(profile).items()
+    )
+    expected.extend(
+        ("recovery", name, query)
+        for name, (query, _threshold) in recovery_queries(profile).items()
+    )
+    if len(expected) != 8:
+        raise RuntimeError("telemetry activation contract must contain exactly eight checks")
+    return tuple(expected)
+
+
 def _slot_digest(preflight: PreflightResult) -> str:
+    """Pin the exact successful evidence contract and normalized sample values."""
     slots = [
         {
             "phase": slot.phase,
             "name": slot.name,
             "promql": slot.promql,
             "status": slot.status,
+            "value": float(slot.value),
         }
         for slot in preflight.slots
     ]
     return hashlib.sha256(_canonical_json(slots).encode("utf-8")).hexdigest()
 
 
-def _validate_successful_preflight(preflight: PreflightResult) -> None:
+def _validate_successful_preflight(profile: TelemetryProfile, preflight: PreflightResult) -> None:
     if not preflight.ready:
         raise ValueError("cannot activate telemetry that did not pass preflight")
-    if len(preflight.slots) != 8:
+    expected_contract = _expected_preflight_contract(profile)
+    if len(preflight.slots) != len(expected_contract):
         raise ValueError("activation requires exactly eight preflight slots")
+    actual_contract = tuple((slot.phase, slot.name, slot.promql) for slot in preflight.slots)
+    if actual_contract != expected_contract:
+        raise ValueError("preflight contract does not match telemetry profile")
     for slot in preflight.slots:
         if slot.status != "ok":
             raise ValueError("activation requires all preflight slots to be ok")
@@ -87,10 +108,10 @@ def create_activation_record(
     now_unix: int | None = None,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
 ) -> ActivationRecord:
-    """Create an activation record only from a complete successful eight-slot preflight."""
-    _validate_successful_preflight(preflight)
+    """Create an activation record only from the profile's exact successful eight-slot preflight."""
     if preflight.production_id != profile.production_id:
         raise ValueError("preflight production does not match telemetry profile")
+    _validate_successful_preflight(profile, preflight)
     if type(ttl_seconds) is not int or ttl_seconds <= 0 or ttl_seconds > 7 * 24 * 60 * 60:
         raise ValueError("ttl_seconds must be an integer between 1 and 604800")
     created = int(time.time()) if now_unix is None else int(now_unix)
