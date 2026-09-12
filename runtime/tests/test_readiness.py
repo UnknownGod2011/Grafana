@@ -1,3 +1,4 @@
+import math
 import threading
 import unittest
 from unittest.mock import patch
@@ -237,6 +238,57 @@ class ReadinessProbeTests(unittest.TestCase):
                 object(), object(), object(), metric, metric,
                 external_probe_ttl_seconds=15, stale_grace_seconds=10,
             )
+
+    def test_non_finite_boolean_and_unbounded_cache_policy_is_rejected(self):
+        metric = FakeClient()
+        invalid = (True, False, math.nan, math.inf, -math.inf, "15", None)
+        for value in invalid:
+            with self.subTest(field="external_probe_ttl_seconds", value=value):
+                with self.assertRaises(ValueError):
+                    EvidencePlaneReadinessProbe(
+                        object(), object(), object(), metric, metric,
+                        external_probe_ttl_seconds=value,
+                    )
+            with self.subTest(field="failure_backoff_seconds", value=value):
+                with self.assertRaises(ValueError):
+                    EvidencePlaneReadinessProbe(
+                        object(), object(), object(), metric, metric,
+                        failure_backoff_seconds=value,
+                    )
+            with self.subTest(field="stale_grace_seconds", value=value):
+                with self.assertRaises(ValueError):
+                    EvidencePlaneReadinessProbe(
+                        object(), object(), object(), metric, metric,
+                        stale_grace_seconds=value,
+                    )
+
+        with self.assertRaises(ValueError):
+            EvidencePlaneReadinessProbe(
+                object(), object(), object(), metric, metric,
+                external_probe_ttl_seconds=300.01,
+            )
+        with self.assertRaises(ValueError):
+            EvidencePlaneReadinessProbe(
+                object(), object(), object(), metric, metric,
+                failure_backoff_seconds=300.01,
+            )
+        with self.assertRaises(ValueError):
+            EvidencePlaneReadinessProbe(
+                object(), object(), object(), metric, metric,
+                stale_grace_seconds=900.01,
+            )
+
+    def test_cache_policy_accepts_safety_envelope_boundaries(self):
+        metric = FakeClient()
+        probe = EvidencePlaneReadinessProbe(
+            object(), object(), object(), metric, metric,
+            external_probe_ttl_seconds=300,
+            failure_backoff_seconds=300,
+            stale_grace_seconds=900,
+        )
+        self.assertEqual(300.0, probe._ttl)
+        self.assertEqual(300.0, probe._failure_backoff)
+        self.assertEqual(900.0, probe._stale_grace)
 
 
 if __name__ == "__main__":
