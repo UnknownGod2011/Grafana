@@ -209,10 +209,13 @@ class ExecutionSafeIncidentService(IncidentService):
 
     def checkpoint_state(self) -> str:
         with self._lock:
-            if self.audit_integrity_state() == "failed":
-                return "conflicted"
+            # Once provider dispatch may have happened, the no-replay barrier is
+            # the most safety-critical checkpoint state. Audit integrity remains
+            # separately visible and the API combines both into one safety state.
             if self._execution_uncertain:
                 return "execution_uncertain"
+            if self.audit_integrity_state() == "failed":
+                return "conflicted"
             return super().checkpoint_state()
 
     def _require_checkpoint_consistency(self) -> None:
