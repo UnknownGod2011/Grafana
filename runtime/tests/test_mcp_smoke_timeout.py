@@ -5,7 +5,13 @@ import sys
 import time
 import unittest
 
-from runtime.mcp_smoke import MAX_STDIO_LINE_CHARS, McpError, StdioClient, _request_timeout_seconds
+from runtime.mcp_smoke import (
+    MAX_STDIO_LINE_CHARS,
+    MAX_STDOUT_QUEUE_FRAMES,
+    McpError,
+    StdioClient,
+    _request_timeout_seconds,
+)
 
 
 _RESPONDER = r'''
@@ -73,6 +79,20 @@ for _line in sys.stdin:
 '''
 
 
+def _pre_request_notification_flood_script() -> str:
+    return f'''
+import json
+import sys
+for index in range({MAX_STDOUT_QUEUE_FRAMES + 1}):
+    print(json.dumps({{"jsonrpc": "2.0", "method": "notifications/progress", "params": {{"progress": index}}}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": {{"ok": True}}}}), flush=True)
+'''
+
+
 class McpSmokeTimeoutTests(unittest.TestCase):
     def test_default_and_explicit_timeout_parsing(self) -> None:
         self.assertEqual(_request_timeout_seconds(None), 15.0)
@@ -127,6 +147,22 @@ class McpSmokeTimeoutTests(unittest.TestCase):
             with self.assertRaisesRegex(McpError, "exceeded the maximum allowed JSON-RPC frame size"):
                 client.request("ping")
             self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            client.close()
+
+    def test_pending_stdout_queue_overflow_fails_closed(self) -> None:
+        client = StdioClient(
+            [sys.executable, "-u", "-c", _pre_request_notification_flood_script()],
+            request_timeout_seconds=1.0,
+        )
+        try:
+            deadline = time.monotonic() + 1.0
+            while not client._stdout_overflow.is_set() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(client._stdout_overflow.is_set())
+            self.assertLessEqual(client._stdout_queue.qsize(), MAX_STDOUT_QUEUE_FRAMES)
+            with self.assertRaisesRegex(McpError, "bounded pending-frame queue capacity"):
+                client.request("ping")
         finally:
             client.close()
 
