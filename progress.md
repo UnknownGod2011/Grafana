@@ -17,6 +17,7 @@ Core invariants retained:
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - Runtime metric readiness requires an unambiguous StageGuard safety sentinel, not merely HTTP 200.
 - A metrics bridge bound beyond loopback requires explicit network-bind opt-in, inbound bearer authentication, strict bearer-token syntax, and a minimum 32-character credential.
+- The reference Grafana MCP dependency is version-pinned and its server-side write/proxy restrictions are regression-locked alongside the pin.
 
 ## Retained validation baseline
 
@@ -24,7 +25,7 @@ Core invariants retained:
 - Focused core/API/UI suite from the last executable run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest checkpoint/acceptance hardening.
-- Official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0` before the latest evidence-availability changes.
+- Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; the newly pinned `1.4.1` still requires an executable smoke before a production-ready claim.
 - Baseline incident flow: investigate -> diagnose `uplink-b packet loss` -> exact revision approval -> bounded remediation -> telemetry-verified recovered.
 
 ## Recent retained hardening
@@ -36,104 +37,118 @@ Core invariants retained:
 - Cloud Run metrics audience, redirect, sentinel-family, authenticated bridge, and disposable `up: 1 -> 0 -> 1` acceptance scaffolding.
 - Separate inbound scrape credentials from upstream Google ID tokens.
 - Non-loopback bridge listeners fail closed without explicit network binding plus inbound authentication.
+- Official Grafana MCP upgraded to reviewed `v1.4.1` with exact image pin and least-privilege command regression coverage.
 
-## Run log — 2026-09-12 — strong non-loopback bridge bearer credentials
+## Run log — 2026-09-12 — official Grafana MCP 1.4.1 compatibility upgrade
 
 ### Inspected at start
 
 Read `progress.md` completely before deciding what to change. Inspected:
+- repository tree and current head (`5a3507b9c8ad0652df0ba85fbac7284a9547c2a9` at run start);
 - `runtime/cloud_run_metrics_bridge.py`;
 - `runtime/cloud_run_metrics_acceptance.py`;
 - `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py`;
-- `docs/cloud-run-metrics-bridge-safety.md`;
-- recent repository commit diffs after each write.
+- `runtime/tests/test_cloud_run_metrics_bridge_audience_boundary.py`;
+- `docker-compose.yml`;
+- `runtime/tests/test_observability_image_pins.py`;
+- `docs/grafana-mcp-evidence-safety.md`;
+- `README.md`;
+- official `grafana/mcp-grafana` GitHub release metadata for `v1.4.0` and `v1.4.1`.
 
 Direct authenticated GitHub repository access was available and every write was limited to `UnknownGod2011/Grafana`. No unrelated repository or external infrastructure was touched.
 
 ### Finding
 
-The previous run correctly made authentication mandatory for non-loopback bridge listeners, but the credential boundary still accepted values such as a one-character token or header-ambiguous strings. That left two avoidable production risks:
+The StageGuard reference stack still pinned the official Grafana MCP server at `1.3.0`, while the official upstream published `v1.4.1` on 2026-09-11.
 
-1. an operator could expose a network-reachable bridge with an obviously weak shared secret while satisfying the nominal authentication requirement;
-2. internal whitespace, Unicode, separators, or other malformed values could survive configuration and fail later at HTTP-header handling rather than being rejected before listener construction.
+Upstream compatibility review found:
+- `v1.4.1` has a breaking input change for Sift tools (`find_error_pattern_logs` and `find_slow_requests` now use `labelSelector` instead of the previous `labels` map);
+- StageGuard does not enable Sift; its MCP service exposes only `datasource,prometheus,loki`;
+- the preceding `v1.4.0` added selective `--enable-write-tools` behavior under `--disable-write`, but StageGuard does not pass `--enable-write-tools`;
+- StageGuard already retains `--disable-write`, `--disable-proxied`, and bounded Loki result configuration.
 
-The disposable acceptance harness already generates a strong `secrets.token_urlsafe(32)` credential, so tightening the production boundary is compatible with the intended private Cloud Run acceptance path.
+Therefore the upstream breaking change is outside StageGuard's configured evidence contract, but the existing tests did not lock the exact MCP version or the least-privilege command flags. A future image bump could therefore silently widen the server-side evidence plane without a focused regression failure.
+
+Official release attribution:
+- https://github.com/grafana/mcp-grafana/releases/tag/v1.4.1
+- https://github.com/grafana/mcp-grafana/releases/tag/v1.4.0
 
 ### Exact changes made
 
-#### 1. Hardened bridge bearer-token normalization
+#### 1. Upgraded the official Grafana MCP image pin
 
-Updated `runtime/cloud_run_metrics_bridge.py`.
+Updated `docker-compose.yml` from `grafana/mcp-grafana:1.3.0` to `grafana/mcp-grafana:1.4.1`.
 
-- Added an explicit ASCII bearer/token68-style character-set validator.
-- Allowed characters are letters, digits, `.`, `_`, `~`, `+`, `/`, `-`, with optional trailing `=` padding.
-- Whitespace, CR/LF, commas, Unicode, and other header-ambiguous values now fail configuration before listener creation.
-- Added `MIN_NETWORK_BEARER_TOKEN_LENGTH = 32`.
-- Non-loopback listeners now require a normalized inbound bearer of at least 32 characters in addition to the existing `--allow-network-bind` opt-in and authentication requirement.
-- Loopback-only development retains optional authentication and may still use shorter valid local credentials.
-- CLI help/module documentation now states the non-loopback minimum explicitly.
+- Preserved opt-in `mcp` profile behavior.
+- Preserved `--disable-write`.
+- Preserved `--enabled-tools datasource,prometheus,loki`.
+- Preserved `--disable-proxied`.
+- Preserved `--max-loki-log-limit 8`.
+- Added an adjacent compatibility rationale documenting the 2026-09-11 release and why the Sift breaking change is outside StageGuard's enabled tool set.
 
-Commit: `3e9b119f6e2db5278e68650507df49be19f9f61b`.
+Commit: `f8731116a57363ab302c529cb5f8504e63d537e3`.
 
-#### 2. Strengthened inbound-auth regression coverage
+#### 2. Regression-locked the MCP version and least-privilege surface
 
-Updated `runtime/tests/test_cloud_run_metrics_bridge_inbound_auth.py`.
+Updated `runtime/tests/test_observability_image_pins.py`.
 
-Coverage now requires:
-- malformed/ambiguous bearer values to fail normalization;
-- a 31-character credential to fail on `0.0.0.0` even with network-bind opt-in;
-- a strong credential to reach server construction;
-- loopback to retain backward-compatible short local credentials;
-- authenticated `/metrics` behavior, zero upstream calls for unauthorized requests, Prometheus credential separation, and same-token acceptance restart behavior to remain covered.
+New coverage requires:
+- exact `grafana/mcp-grafana:1.4.1` pin;
+- `--disable-write` to remain present;
+- `--disable-proxied` to remain present;
+- enabled tool categories to remain `datasource,prometheus,loki`;
+- bounded Loki limit configuration to remain present;
+- `--enable-write-tools` to remain absent;
+- the compatibility rationale to stay next to the image pin.
 
-Commit: `a8b3b42bc9f579021f2462c6dcb5669d3f745248`.
+This converts the read-only MCP server configuration from documentation-only intent into a focused regression contract.
 
-#### 3. Updated bridge safety documentation
+Commit: `0293e834e332fd65237997db3db06c553c7f5885`.
 
-Updated `docs/cloud-run-metrics-bridge-safety.md`.
+#### 3. Updated MCP safety documentation and upstream attribution
 
-- Documented the enforced three-part non-loopback boundary: explicit bind opt-in, inbound authentication, and a minimum 32-character credential.
-- Documented accepted token syntax and rejection of ambiguous values.
-- Clarified that minimum length is only a guardrail and production secrets should still be randomly generated.
-- Documented `secrets.token_urlsafe(32)` as the acceptance harness pattern.
-- Retained the separate inbound-scrape vs upstream Google-ID-token trust model, redirect rejection, audience matching, sentinel validation, and least-privilege guidance.
+Updated `docs/grafana-mcp-evidence-safety.md`.
 
-Commit: `1d7eb1094a875526676e39f4efc05f07c52b82ee`.
+- Changed the documented reference image to `1.4.1`.
+- Added a reviewed dependency baseline with official upstream release/repository links.
+- Recorded the `v1.4.1` Sift breaking change and why it does not affect StageGuard.
+- Recorded the `v1.4.0` selective-write-tool addition and explicitly documented that StageGuard does not enable it.
+- Added exact MCP pin + read-only/proxy/tool-surface preservation to regression expectations.
+- Retained the existing strict metric/log parsing and evidence-unavailable fail-closed contracts.
+
+Commit: `5dbaa671f2c17bccdf6e9931fbcac53c3c45df21`.
 
 ### Checks / results
 
-- Re-read the committed production diff and confirmed token normalization and minimum-length enforcement occur before `ThreadingHTTPServer(...)` construction.
-- Re-read the committed regression diff and confirmed it covers malformed token syntax, the 31-character network failure boundary, strong-token construction, and loopback compatibility.
-- Confirmed the disposable acceptance harness still generates `secrets.token_urlsafe(32)`, which comfortably satisfies the new minimum and accepted character set.
-- Attempted a fresh local checkout and the focused six-module bridge suite:
-  - `tests.test_cloud_run_metrics_bridge_inbound_auth`
-  - `tests.test_cloud_run_metrics_bridge`
-  - `tests.test_cloud_run_metrics_acceptance`
-  - `tests.test_cloud_run_metrics_bridge_audience_boundary`
-  - `tests.test_cloud_run_metrics_bridge_redirects`
-  - `tests.test_cloud_run_metrics_bridge_sentinel_family`
-- The execution environment still failed before checkout with `Could not resolve host: github.com`.
+- Queried the official `grafana/mcp-grafana` release API and confirmed `v1.4.1` was published 2026-09-11 and is the newest release found in the current release list.
+- Reviewed official `v1.4.1` and `v1.4.0` release notes before changing the pin.
+- Confirmed the documented `v1.4.1` breaking change is limited to Sift inputs, which are outside StageGuard's enabled `datasource,prometheus,loki` categories.
+- Compared repository head against the run-start commit after implementation. The implementation diff is intentionally limited to three files: `docker-compose.yml` (+4/-2), `docs/grafana-mcp-evidence-safety.md` (+14/-2), and `runtime/tests/test_observability_image_pins.py` (+27/-0).
+- Attempted local checkout/test execution again, but the execution environment still failed before checkout with `Could not resolve host: github.com`.
 - No GitHub Actions workflow was created, modified, triggered, or rerun as a workaround.
+- No Docker image was pulled and no live MCP smoke was claimed because executable checkout/network access remains blocked in the local runner.
 - No GCP/IAM/Cloud Run, Grafana Cloud, Gemini provider, remediation provider, incident, audit store, or other external runtime resource was changed.
 
-No new green test-suite, Docker, or live Cloud Run acceptance claim is made.
+No new green test-suite, Docker, live MCP, or live Cloud Run acceptance claim is made.
 
 ### Decisions
 
-1. Treat network-reachable scrape authentication as a credential-quality boundary, not merely a non-empty-string check.
-2. Reject malformed bearer/header values at configuration time rather than allowing them to fail later in request handling.
-3. Use 32 characters as a minimum guardrail while explicitly avoiding claims that length alone proves entropy.
-4. Preserve lightweight loopback development behavior because it does not widen network exposure.
-5. Keep inbound scrape credentials and upstream Google ID tokens in separate trust domains.
+1. Upgrade to the current official Grafana MCP patch only after reviewing release compatibility against StageGuard's enabled tool categories.
+2. Treat MCP command-line least privilege as an executable regression contract, not only documentation.
+3. Keep all write tools disabled even though newer MCP versions support selective write re-enablement.
+4. Keep proxied tools disabled and preserve the narrow `datasource,prometheus,loki` evidence surface.
+5. Do not infer compatibility from version numbers alone; explicitly record upstream breaking changes and whether they intersect StageGuard's enabled surface.
 6. Avoid noisy CI solely to work around the transient checkout/DNS failure.
 
 ### Blockers / unknowns
 
-- The strengthened inbound-auth regression and focused six-module Cloud Run bridge suite still need an executable run.
+- `runtime.tests.test_observability_image_pins` still needs an executable run after the MCP pin change.
+- A live read-only smoke against `grafana/mcp-grafana:1.4.1` is still required before calling the new dependency baseline production-ready.
+- The strengthened Cloud Run bridge six-module set still needs an executable run.
 - The execution-reconciliation/operator/Playwright safety set from previous runs still needs a current run.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**As soon as checkout execution works, run the six focused Cloud Run bridge/auth/audience/redirect/sentinel/acceptance modules together. If green, run the pending execution-reconciliation/operator/Playwright safety set and then perform the real private Cloud Run `ADC -> /metrics -> authenticated bridge -> Prometheus up 1 -> 0 -> 1` acceptance without changing IAM or service lifecycle state.**
+**As soon as executable checkout/Docker access works, run `runtime.tests.test_observability_image_pins` and the official read-only MCP smoke against `grafana/mcp-grafana:1.4.1` first. If both pass, run the six focused Cloud Run bridge modules, then the pending operator/Playwright safety set, and finally the private Cloud Run `ADC -> /metrics -> authenticated bridge -> Prometheus up 1 -> 0 -> 1` acceptance without changing IAM or service lifecycle state.**
