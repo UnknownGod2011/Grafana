@@ -35,15 +35,17 @@ The smoke requires:
 
 A missing annotation is treated the same as `readOnlyHint=false`: the smoke fails closed. This is intentional. If an upstream image begins registering a newly write-capable or ambiguously annotated tool despite StageGuard's configured flags, the release acceptance should stop before the server is trusted as the evidence plane.
 
-The stdio protocol path is bounded as well. Every JSON-RPC request has a 15-second timeout by default, configurable with `STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS` to a positive finite value no greater than 120 seconds. A subprocess that starts but never answers `initialize`, `tools/list`, or `tools/call` therefore fails the smoke instead of hanging a release or operator workflow indefinitely. Invalid timeout configuration fails before the MCP subprocess is trusted. The subprocess is terminated and, if necessary, killed during cleanup so timeout failures do not leave a stranded smoke container.
+The stdio protocol path is bounded in three independent dimensions. Every JSON-RPC request has a 15-second timeout by default, configurable with `STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS` to a positive finite value no greater than 120 seconds. A subprocess that starts but never answers `initialize`, `tools/list`, or `tools/call` therefore fails the smoke instead of hanging a release or operator workflow indefinitely. Invalid timeout configuration fails before the MCP subprocess is trusted. The subprocess is terminated and, if necessary, killed during cleanup so timeout failures do not leave a stranded smoke container.
 
-In addition, each newline-delimited stdout frame is capped at `1,048,576` characters before JSON parsing. This closes a separate resource-exhaustion path: a broken or compromised MCP subprocess cannot force the smoke client to buffer an unbounded stdout line while the request timer is still running. Oversized frames fail closed and cleanup terminates the subprocess if it remains blocked on the pipe. This follows the same defensive shape used by current official MCP SDK transports, which expose bounded line/frame options such as `maxLineBytes` / `max_line_bytes`:
+Each newline-delimited stdout frame is capped at `1,048,576` characters before JSON parsing. This closes a separate resource-exhaustion path: a broken or compromised MCP subprocess cannot force the smoke client to buffer an unbounded stdout line while the request timer is still running. Oversized frames fail closed and cleanup terminates the subprocess if it remains blocked on the pipe. This follows the same defensive shape used by current official MCP SDK transports, which expose bounded line/frame options such as `maxLineBytes` / `max_line_bytes`:
 
 - https://php.sdk.modelcontextprotocol.io/run/stdio/
 - https://ruby.sdk.modelcontextprotocol.io/server/transports/
 - https://go.sdk.modelcontextprotocol.io/protocol/ (stdio is newline-delimited JSON over stdin/stdout)
 
-The StageGuard limit is deliberately fixed for the release smoke rather than exposed as a permissive environment override. Normal `initialize`, `tools/list`, and the bounded single-series Prometheus smoke result should remain far below it; if the upstream server genuinely needs larger protocol frames for this acceptance path, that change should be reviewed explicitly rather than silently increasing the trust boundary.
+The StageGuard frame limit is deliberately fixed for the release smoke rather than exposed as a permissive environment override. Normal `initialize`, `tools/list`, and the bounded single-series Prometheus smoke result should remain far below it; if the upstream server genuinely needs larger protocol frames for this acceptance path, that change should be reviewed explicitly rather than silently increasing the trust boundary.
+
+Finally, pending stdout frames are held in a fixed queue of **16 frames**. The reader uses non-blocking queue insertion: if the subprocess can produce protocol messages faster than the single sequential request consumer can safely process them, StageGuard sets an overflow sentinel, stops reading that stream, and fails the active or next request closed. This prevents a flood of individually valid sub-1-MiB notifications from defeating the per-frame cap by accumulating an unbounded in-process queue. A normal MCP server may emit notifications while a request is outstanding; bounded notification traffic remains supported. The limit is intentionally fixed because the release smoke has one outstanding request at a time and does not require a deep asynchronous event backlog.
 
 This runtime assertion is defense in depth. Server-side `--disable-write`, `--disable-proxied`, the narrow enabled categories, and least-privilege Grafana credentials remain required and are not replaced by MCP annotations.
 
@@ -114,6 +116,7 @@ Any change to the MCP adapters or investigator should retain tests for:
 - live smoke rejection of malformed/duplicate tool discovery and any advertised tool lacking `readOnlyHint=true`;
 - bounded MCP request timeouts and cleanup when a subprocess becomes silent;
 - bounded MCP stdout frames and fail-closed rejection before oversized data reaches JSON parsing;
+- bounded pending stdout-frame queues and fail-closed rejection of notification/output floods;
 - datasource/query input validation;
 - Loki result bounds and truncation semantics;
 - structured/sanitized evidence-unavailable abstention;
