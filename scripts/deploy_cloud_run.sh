@@ -108,7 +108,7 @@ else
   STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS="60"
 fi
 if [[ ! "${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
-  echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be a finite positive decimal number" >&2
+  echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be between 1 and 600 seconds" >&2
   exit 2
 fi
 if ! "${PYTHON_BIN}" - "${STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS}" <<'PY'
@@ -118,10 +118,10 @@ try:
     value = float(sys.argv[1])
 except (TypeError, ValueError):
     raise SystemExit(1)
-raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
+raise SystemExit(0 if math.isfinite(value) and 1.0 <= value <= 600.0 else 1)
 PY
 then
-  echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be a finite positive decimal number" >&2
+  echo "STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS must be between 1 and 600 seconds" >&2
   exit 2
 fi
 
