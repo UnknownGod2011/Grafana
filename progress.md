@@ -10,6 +10,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - Incident investigation accepts only `None` or finite non-boolean numeric metric samples from any adapter; malformed samples become bounded evidence-unavailable abstentions before threshold evaluation.
+- Loki corroboration independently validates adapter envelopes, exact requested evidence windows, truncation type, record budget, record shape, string maps, scope, and event identity before evidence can corroborate a diagnosis.
 - Grafana MCP metric samples must be finite numeric evidence; JSON booleans are never accepted as `0`/`1` telemetry.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Gemini context accepts only trusted identifiers, finite normalized numeric evidence, boolean/null hypothesis support, and confidence in [0, 1]; Vertex serialization forbids NaN/Infinity.
@@ -43,7 +44,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit/investigator hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit/investigator/log hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke before a production-ready claim.
 - Recent hardening regressions remain blocked from repository execution because the automation runner cannot resolve `github.com`; commits are not treated as passing tests.
 
@@ -65,7 +66,8 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 
 ### Evidence / Gemini / remediation / runtime safety
 
-- The core investigator independently normalizes metric evidence and refuses booleans, strings, NaN, and infinities from any metric adapter before incident threshold logic; malformed samples produce semantic-slot evidence-unavailable abstention and stop further reads.
+- The core investigator independently normalizes metric evidence and refuses booleans, strings, NaN, and infinities from any metric adapter before incident threshold logic.
+- Core Loki corroboration now independently rejects malformed result envelopes, non-boolean truncation flags, query-window drift, non-tuple/over-budget record sets, and malformed record fields/maps before scope/event evaluation.
 - Grafana MCP metric parsing independently rejects boolean and non-finite samples.
 - Gemini metric evidence rejects boolean/non-numeric/non-finite values; confidence is finite in [0, 1]; Vertex JSON serialization forbids NaN/Infinity.
 - Core and Cloud Run remediation execution watchdog policy is 1-600 seconds.
@@ -77,44 +79,45 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Cloud Logging audit envelope strings are type-checked, UTF-8 byte-bounded, and reject ASCII controls.
 - Audit hash-chain canonicalization rejects NaN/Infinity as non-canonical.
 
-## Run log — 2026-09-13 — investigator metric evidence boundary
+## Run log — 2026-09-13 — Loki corroboration decision boundary
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata/tree, `runtime/investigator.py`, `runtime/tests/test_investigator.py`, `runtime/telemetry.py`, `runtime/log_evidence.py`, and `runtime/evidence_errors.py`. Also attempted a fresh executable checkout before changing code. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected the runtime tree, `runtime/log_evidence.py`, `runtime/tests/test_log_evidence.py`, and `runtime/mcp_log_client.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The reference Grafana MCP metric adapter already rejects malformed samples, but the core investigator trusted every `MetricQueryClient` implementation to honor `float | None`. This was unsafe for a modular production system: Python booleans participate in numeric comparisons, positive infinity can satisfy incident thresholds, and `NaN` makes ordered comparisons false. In particular, a `NaN` symptom sample could fall through `if not value > 1.0` and incorrectly produce `no_incident`, while infinity in causal evidence could become diagnosis authority. Alternate/self-hosted adapters therefore had a path to influence lifecycle decisions with corrupt numeric evidence.
+The official Grafana MCP Loki adapter validates its own payload thoroughly, but the core corroborator trusted every `LogQueryClient` implementation to return a well-formed `LogQueryResult`. Because StageGuard intentionally supports alternate/self-hosted adapters, a custom adapter could return a non-boolean truncation marker, more records than the bounded query requested, malformed record maps, or an evidence window different from the requested `now-5m -> now` window. Some malformed shapes could raise at the decision boundary; window drift could allow out-of-policy data to become corroborating evidence.
 
 ### Exact changes made
 
-1. Added `_normalize_metric_value()` at the investigator boundary. It accepts `None` or finite `int`/`float`, rejects `bool`, non-numeric values, `NaN`, and infinities, and normalizes accepted numbers to `float`.
-2. Invalid adapter samples are converted to `EvidenceUnavailable` inside the bounded collection loop, producing the existing sanitized abstention naming only the semantic slot and stopping additional evidence reads.
-3. Unexpected adapter/programming exceptions remain loud; only evidence unavailability/corruption follows the operational abstention path.
-4. Added regressions covering `True`, `False`, `NaN`, positive/negative infinity, numeric strings, arbitrary objects, invalid later-slot samples, early-stop query budgeting, and finite integer normalization.
+1. Added decision-boundary validation in `runtime/log_evidence.py` for the `LogQueryResult` envelope, strict boolean truncation marker, exact requested start/end window, tuple record contract, and `MAX_CORROBORATION_LINES` budget.
+2. Added validation for every `LogRecord`: non-empty string timestamp, string line, and string-to-string `labels`, `structured_metadata`, and `parsed` maps.
+3. Malformed adapter output or evidence-window drift now returns sanitized `ambiguous` corroboration with `supports_hypothesis=None`; it cannot become affirmative evidence.
+4. Preserved the existing policy-owned LogQL, missing-log semantics, truncation handling, production/uplink scope checks, and exact packet-loss event identity requirement.
+5. Added focused regressions for malformed envelopes, integer truncation flags, start/end drift, non-string windows, list record collections, over-budget results, and malformed timestamp/line/map fields.
 
 Commits:
-- `b14cd240632207b15e447ee409961193078feb23` — Harden investigator metric evidence boundary
-- `5c6a4ef355ad337d5736f8aaa333514466c8e1b4` — Add investigator metric-boundary regressions
+- `e656fbbc8cda3d838d69feec21d00010d3f303d3` — Harden core Loki corroboration boundary
+- `8c3ca8b2be725b4674667a26a498bb8e90b44c41` — Add Loki decision-boundary regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Before modification, attempted `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard`; checkout failed with `Could not resolve host: github.com`.
-- Because the executable runner cannot currently resolve GitHub, `PYTHONPATH=runtime python -m unittest runtime.tests.test_investigator -v` could not be run from a fresh repository checkout in this run.
+- Attempted fresh checkout plus focused execution: `PYTHONPATH=runtime python -m unittest runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client -v`.
+- Checkout failed before tests with `Could not resolve host: github.com`.
 - The new tests are therefore not claimed green, and no GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. Evidence validity must be enforced at the decision boundary as well as in the reference Grafana MCP adapter because StageGuard explicitly supports modular/custom telemetry integrations.
-2. Corrupt/malformed metric samples are operationally equivalent to unavailable evidence and must cause abstention, never a healthy verdict or diagnosis.
-3. Finite Python integers remain accepted and are normalized to floats because custom adapters may decode valid JSON/Prometheus numeric values as integers; booleans are excluded explicitly despite being `int` subclasses in Python.
-4. The existing behavior for unexpected programming errors is preserved so defects are not silently hidden as evidence outages.
+1. Evidence validity must be enforced both in the official Grafana MCP adapter and again at the diagnosis/corroboration decision boundary because custom adapters are an explicit product requirement.
+2. A result for a different window is not equivalent evidence; even structurally valid Loki records must fail closed if the adapter changes the requested bounded interval.
+3. Adapter contract corruption is treated as ambiguous evidence rather than affirmative/negative evidence, preserving safe abstention without exposing provider internals.
+4. Unexpected exceptions raised by the client call itself remain outside this structural normalization path and continue through existing higher-level error handling.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_investigator` and the accumulated recent hardening regressions need a current executable checkout.
+- `runtime.tests.test_log_evidence`, `runtime.tests.test_mcp_log_client`, and the accumulated recent hardening regressions need a current executable checkout.
 - Recent audit, MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -122,4 +125,4 @@ Commits:
 
 ## Single best next step
 
-**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_investigator runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
