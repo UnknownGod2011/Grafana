@@ -10,6 +10,8 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - Incident investigation accepts only `None` or finite non-boolean numeric metric samples from any adapter; malformed samples become bounded evidence-unavailable abstentions before threshold evaluation.
+- Recovery verification independently accepts only `None` or finite non-boolean `int`/`float` metric samples from any adapter; malformed recovery samples become unavailable evidence and can never advance the healthy streak.
+- A remediation adapter authorizes post-action verification only with literal boolean `accepted is True`; truthy strings, integers, containers, or other malformed acceptance flags fail closed as `action_failed`.
 - Loki corroboration independently validates adapter envelopes, exact requested evidence windows, truncation type, record budget, record shape, string maps, scope, and event identity before evidence can corroborate a diagnosis.
 - Grafana MCP metric samples must be finite numeric evidence; JSON booleans are never accepted as `0`/`1` telemetry.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
@@ -44,7 +46,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit/investigator/log hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit/investigator/log/recovery hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke before a production-ready claim.
 - Recent hardening regressions remain blocked from repository execution because the automation runner cannot resolve `github.com`; commits are not treated as passing tests.
 
@@ -67,7 +69,9 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 ### Evidence / Gemini / remediation / runtime safety
 
 - The core investigator independently normalizes metric evidence and refuses booleans, strings, NaN, and infinities from any metric adapter before incident threshold logic.
-- Core Loki corroboration now independently rejects malformed result envelopes, non-boolean truncation flags, query-window drift, non-tuple/over-budget record sets, and malformed record fields/maps before scope/event evaluation.
+- Recovery verification independently normalizes post-action telemetry and refuses booleans, strings/objects, NaN, and infinities before any healthy-threshold comparison; valid finite integer samples are normalized to floats.
+- Remediation result normalization now requires literal boolean `True` for provider acceptance; arbitrary truthy values cannot cause post-action verification to begin.
+- Core Loki corroboration independently rejects malformed result envelopes, non-boolean truncation flags, query-window drift, non-tuple/over-budget record sets, and malformed record fields/maps before scope/event evaluation.
 - Grafana MCP metric parsing independently rejects boolean and non-finite samples.
 - Gemini metric evidence rejects boolean/non-numeric/non-finite values; confidence is finite in [0, 1]; Vertex JSON serialization forbids NaN/Infinity.
 - Core and Cloud Run remediation execution watchdog policy is 1-600 seconds.
@@ -79,50 +83,55 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Cloud Logging audit envelope strings are type-checked, UTF-8 byte-bounded, and reject ASCII controls.
 - Audit hash-chain canonicalization rejects NaN/Infinity as non-canonical.
 
-## Run log — 2026-09-13 — Loki corroboration decision boundary
+## Run log — 2026-09-13 — Recovery verification and remediation acceptance boundary
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the runtime tree, `runtime/log_evidence.py`, `runtime/tests/test_log_evidence.py`, and `runtime/mcp_log_client.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected the repository metadata/tree plus `runtime/incident_service.py`, `runtime/remediation.py`, `runtime/tests/test_remediation.py`, and `runtime/tests/test_remediation_result_boundary.py`. Attempted a fresh executable checkout before and after the changes. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The official Grafana MCP Loki adapter validates its own payload thoroughly, but the core corroborator trusted every `LogQueryClient` implementation to return a well-formed `LogQueryResult`. Because StageGuard intentionally supports alternate/self-hosted adapters, a custom adapter could return a non-boolean truncation marker, more records than the bounded query requested, malformed record maps, or an evidence window different from the requested `now-5m -> now` window. Some malformed shapes could raise at the decision boundary; window drift could allow out-of-policy data to become corroborating evidence.
+The investigation and Grafana MCP paths already rejected boolean/non-finite telemetry, but `remediate_and_verify()` still consumed raw `MetricQueryClient.instant()` values during post-action recovery verification. Because Python booleans are integers, a custom/self-hosted adapter returning `False` for packet loss and dropped frames compared as numeric zero. With the default consecutive-health policy, repeated malformed boolean samples could therefore produce a false `recovered` transition after a real remediation action.
+
+The same extension boundary also normalized `ActionResult.accepted` with `bool(...)`. That meant malformed provider output such as `1`, `"true"`, or another truthy object could be promoted to an accepted remediation result and begin recovery verification even though the adapter had violated its boolean contract.
 
 ### Exact changes made
 
-1. Added decision-boundary validation in `runtime/log_evidence.py` for the `LogQueryResult` envelope, strict boolean truncation marker, exact requested start/end window, tuple record contract, and `MAX_CORROBORATION_LINES` budget.
-2. Added validation for every `LogRecord`: non-empty string timestamp, string line, and string-to-string `labels`, `structured_metadata`, and `parsed` maps.
-3. Malformed adapter output or evidence-window drift now returns sanitized `ambiguous` corroboration with `supports_hypothesis=None`; it cannot become affirmative evidence.
-4. Preserved the existing policy-owned LogQL, missing-log semantics, truncation handling, production/uplink scope checks, and exact packet-loss event identity requirement.
-5. Added focused regressions for malformed envelopes, integer truncation flags, start/end drift, non-string windows, list record collections, over-budget results, and malformed timestamp/line/map fields.
+1. Added `_normalize_recovery_metric()` in `runtime/remediation.py`.
+2. Recovery samples now accept only explicit `None` or finite, non-boolean native `int`/`float` values; valid numbers are normalized to `float`.
+3. Boolean, string, object, NaN, positive infinity, and negative infinity recovery values become unavailable (`None`) and cannot advance the healthy streak.
+4. Preserved bounded polling and the existing rule that action acceptance is never itself proof of recovery.
+5. Changed `sanitize_action_result()` so only literal `action.accepted is True` survives as acceptance; malformed truthy values fail closed as a locally redacted rejection.
+6. Added regressions proving repeated `False` samples cannot false-positive recovery, `True` is not numeric evidence, NaN/infinities and strings/objects cannot prove recovery, one malformed sample resets a health streak, finite integer zero remains valid telemetry, and malformed truthy acceptance flags become `action_failed` before any metric query.
 
 Commits:
-- `e656fbbc8cda3d838d69feec21d00010d3f303d3` — Harden core Loki corroboration boundary
-- `8c3ca8b2be725b4674667a26a498bb8e90b44c41` — Add Loki decision-boundary regressions
+- `3646ecb07c6a5edbfeb17fde75ec08e779a1443d` — Harden recovery telemetry evidence boundary
+- `91282ec6cf9f7a588d8ba61160dabd06982a7015` — Add recovery metric boundary regressions
+- `b89217037030304262d4105d37930d21cc0f4f5a` — Fail closed on malformed remediation acceptance flags
+- `61f6413fff22a67a303dcbd890eaef791c6844fe` — Add malformed remediation acceptance regressions
 
 ### Checks / results
 
-- Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Attempted fresh checkout plus focused execution: `PYTHONPATH=runtime python -m unittest runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client -v`.
-- Checkout failed before tests with `Could not resolve host: github.com`.
+- Authenticated GitHub connector reads/writes succeeded and all implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
+- Attempted fresh checkout and focused execution: `PYTHONPATH=runtime python -m unittest runtime.tests.test_remediation runtime.tests.test_remediation_result_boundary -v`.
+- DNS resolution produced no `github.com` address and checkout failed before tests with `Could not resolve host: github.com`.
 - The new tests are therefore not claimed green, and no GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. Evidence validity must be enforced both in the official Grafana MCP adapter and again at the diagnosis/corroboration decision boundary because custom adapters are an explicit product requirement.
-2. A result for a different window is not equivalent evidence; even structurally valid Loki records must fail closed if the adapter changes the requested bounded interval.
-3. Adapter contract corruption is treated as ambiguous evidence rather than affirmative/negative evidence, preserving safe abstention without exposing provider internals.
-4. Unexpected exceptions raised by the client call itself remain outside this structural normalization path and continue through existing higher-level error handling.
+1. Recovery is a safety-critical state transition and must validate telemetry again at the recovery decision boundary even if the official Grafana MCP adapter already validates samples.
+2. Malformed post-action evidence is treated as unavailable, not healthy; this keeps the incident open as `recovery_unverified` instead of crashing or granting recovery.
+3. Provider acceptance is an authority bit, so permissive Python truthiness is inappropriate. Only literal boolean `True` can authorize the verification phase.
+4. Native finite integers remain supported because legitimate metric adapters may return `0`/`1`; they are normalized to floats, while booleans are explicitly excluded.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_log_evidence`, `runtime.tests.test_mcp_log_client`, and the accumulated recent hardening regressions need a current executable checkout.
-- Recent audit, MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
+- `runtime.tests.test_remediation` and `runtime.tests.test_remediation_result_boundary` need a current executable checkout.
+- Recent audit, MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run/investigator/Loki hardening suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, first run `PYTHONPATH=runtime python -m unittest runtime.tests.test_remediation runtime.tests.test_remediation_result_boundary runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_mcp_metric_client -v` and fix any failure immediately. If clean, run the accumulated audit/Gemini/auth/readiness/watchdog/bridge/activation suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
