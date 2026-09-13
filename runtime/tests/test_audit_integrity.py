@@ -146,6 +146,58 @@ class AuditIntegrityTests(unittest.TestCase):
         self.assertEqual(1, checkpoint.sequence)
         self.assertNotEqual(GENESIS_SHA256, checkpoint.head_sha256)
 
+    def test_envelope_controls_are_not_authenticatable(self):
+        base = event(1)
+        cases = (
+            AuditEvent(base.sequence, base.timestamp_unix_ms, "incident\n1", base.event_type, base.actor, base.payload),
+            AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, "remediation\x00completed", base.actor, base.payload),
+            AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, base.event_type, "operator\x1b@example.com", base.payload),
+            AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, base.event_type, "operator\x7f@example.com", base.payload),
+        )
+        for malformed in cases:
+            with self.subTest(event=malformed):
+                chain = AuditChain()
+                with self.assertRaisesRegex(ValueError, "invalid audit"):
+                    chain.append(malformed)
+                self.assertEqual(AuditChainCheckpoint(0, GENESIS_SHA256), chain.checkpoint())
+
+    def test_envelope_values_are_bounded_in_utf8_bytes(self):
+        base = event(1)
+        cases = (
+            ("incident_id", AuditEvent(base.sequence, base.timestamp_unix_ms, "é" * 129, base.event_type, base.actor, base.payload)),
+            ("event_type", AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, "é" * 65, base.actor, base.payload)),
+            ("actor", AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, base.event_type, "é" * 257, base.payload)),
+        )
+        for field, malformed in cases:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, f"invalid audit {field}"):
+                    extend_audit_chain(GENESIS_SHA256, malformed)
+
+    def test_exact_envelope_utf8_limits_remain_authenticatable(self):
+        valid = AuditEvent(
+            1,
+            1_700_000_000_001,
+            "é" * 128,
+            "é" * 64,
+            "é" * 256,
+            {"result": "unknown"},
+        )
+        checkpoint = AuditChain().append(valid)
+        self.assertEqual(1, checkpoint.sequence)
+        self.assertNotEqual(GENESIS_SHA256, checkpoint.head_sha256)
+
+    def test_non_string_envelope_values_fail_with_stable_value_error(self):
+        base = event(1)
+        cases = (
+            AuditEvent(base.sequence, base.timestamp_unix_ms, 7, base.event_type, base.actor, base.payload),
+            AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, True, base.actor, base.payload),
+            AuditEvent(base.sequence, base.timestamp_unix_ms, base.incident_id, base.event_type, object(), base.payload),
+        )
+        for malformed in cases:
+            with self.subTest(event=malformed):
+                with self.assertRaisesRegex(ValueError, "invalid audit"):
+                    extend_audit_chain(GENESIS_SHA256, malformed)
+
 
 if __name__ == "__main__":
     unittest.main()
