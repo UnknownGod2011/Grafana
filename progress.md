@@ -9,6 +9,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 ## Core invariants
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
+- Incident investigation accepts only `None` or finite non-boolean numeric metric samples from any adapter; malformed samples become bounded evidence-unavailable abstentions before threshold evaluation.
 - Grafana MCP metric samples must be finite numeric evidence; JSON booleans are never accepted as `0`/`1` telemetry.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Gemini context accepts only trusted identifiers, finite normalized numeric evidence, boolean/null hypothesis support, and confidence in [0, 1]; Vertex serialization forbids NaN/Infinity.
@@ -18,7 +19,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Provider-controlled remediation detail/arbitrary metadata is discarded before lifecycle/API/audit state; only narrowly validated StageGuard production-operation metadata may survive.
 - Durable checkpoint/audit failures fail closed; once provider dispatch may have occurred, persistence uncertainty blocks replay.
 - Cloud Logging audit documents accept only finite numeric payload values, true integer sequence/timestamps, bounded UTF-8 envelope strings without ASCII controls, and strict JSON serialization with NaN/Infinity forbidden.
-- Audit hash-chain canonicalization uses strict JSON and refuses NaN/Infinity, so values that cannot become valid durable numeric audit JSON cannot become authenticated chain authority.
+- Audit hash-chain canonicalization uses strict JSON and refuses NaN/Infinity.
 - Production remediation HTTP requests do not follow redirects; authorization/idempotency authority is non-redirectable and detectable final-URL changes fail closed.
 - Browser/API/onboarding/CLI surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Authentication failures expose only bounded StageGuard-owned messages.
@@ -42,7 +43,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit/investigator hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke before a production-ready claim.
 - Recent hardening regressions remain blocked from repository execution because the automation runner cannot resolve `github.com`; commits are not treated as passing tests.
 
@@ -62,8 +63,10 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Static bearer identity rejects short, oversized, whitespace/control/malformed credentials and bounds attacker-controlled candidates before comparison.
 - Remediation provider detail and arbitrary metadata are normalized away before lifecycle/API/audit state.
 
-### Gemini / remediation / runtime safety
+### Evidence / Gemini / remediation / runtime safety
 
+- The core investigator independently normalizes metric evidence and refuses booleans, strings, NaN, and infinities from any metric adapter before incident threshold logic; malformed samples produce semantic-slot evidence-unavailable abstention and stop further reads.
+- Grafana MCP metric parsing independently rejects boolean and non-finite samples.
 - Gemini metric evidence rejects boolean/non-numeric/non-finite values; confidence is finite in [0, 1]; Vertex JSON serialization forbids NaN/Infinity.
 - Core and Cloud Run remediation execution watchdog policy is 1-600 seconds.
 - Checkpoint HMAC key policy is 32-512 UTF-8 bytes with whitespace/control rejection.
@@ -71,52 +74,52 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image-pin regressions.
 - Production remediation transport disables automatic redirects, marks `Authorization` and `Idempotency-Key` non-redirectable, and fails closed on detectable final-URL changes.
 - Cloud Logging audit payloads reject NaN/Infinity, audit sequence/timestamps reject bool/float confusion, and audit JSON serialization is strict.
-- Cloud Logging audit envelope strings are now explicitly type-checked, UTF-8 byte-bounded, and reject ASCII controls so malformed custom events fail through a stable `ValueError` boundary instead of accidental attribute errors.
-- Audit hash-chain canonicalization rejects NaN/Infinity as non-canonical rather than hashing Python-specific non-standard JSON tokens.
+- Cloud Logging audit envelope strings are type-checked, UTF-8 byte-bounded, and reject ASCII controls.
+- Audit hash-chain canonicalization rejects NaN/Infinity as non-canonical.
 
-## Run log — 2026-09-13 — durable audit envelope boundary
+## Run log — 2026-09-13 — investigator metric evidence boundary
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata, runtime tree, `runtime/cloud_audit.py`, `runtime/tests/test_cloud_audit.py`, `runtime/audit_integrity.py`, and the `AuditEvent`/local audit definitions in `runtime/incident_service.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected repository metadata/tree, `runtime/investigator.py`, `runtime/tests/test_investigator.py`, `runtime/telemetry.py`, `runtime/log_evidence.py`, and `runtime/evidence_errors.py`. Also attempted a fresh executable checkout before changing code. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The Cloud Logging sink already bounded envelope lengths, but it called `.encode()` directly on `incident_id`, `event_type`, and `actor`. A malformed/custom `AuditEvent` with a non-string envelope field could therefore escape the sink's documented validation behavior as `AttributeError` instead of a stable `ValueError`. The same fields also accepted ASCII control characters, creating avoidable ambiguity in durable structured audit identifiers even though the authenticated operator identity boundary already rejects them.
+The reference Grafana MCP metric adapter already rejects malformed samples, but the core investigator trusted every `MetricQueryClient` implementation to honor `float | None`. This was unsafe for a modular production system: Python booleans participate in numeric comparisons, positive infinity can satisfy incident thresholds, and `NaN` makes ordered comparisons false. In particular, a `NaN` symptom sample could fall through `if not value > 1.0` and incorrectly produce `no_incident`, while infinity in causal evidence could become diagnosis authority. Alternate/self-hosted adapters therefore had a path to influence lifecycle decisions with corrupt numeric evidence.
 
 ### Exact changes made
 
-1. Added a shared envelope-string validator requiring a non-empty string, rejecting ASCII controls (`0x00-0x1f` and `0x7f`), and enforcing the existing limits by UTF-8 bytes: incident ID 256, event type 128, actor 512.
-2. Added explicit `AuditEvent` and payload-mapping validation so malformed direct/custom sink callers fail through a stable audit validation boundary.
-3. Preserved the existing payload field/key/nesting restrictions, strict finite-number policy, 16 KiB entry cap, and `allow_nan=False` serialization.
-4. Added regressions for non-string envelope fields, CR/LF/NUL/ESC-style controls, exact UTF-8 byte boundaries including multibyte characters, and non-mapping payloads.
+1. Added `_normalize_metric_value()` at the investigator boundary. It accepts `None` or finite `int`/`float`, rejects `bool`, non-numeric values, `NaN`, and infinities, and normalizes accepted numbers to `float`.
+2. Invalid adapter samples are converted to `EvidenceUnavailable` inside the bounded collection loop, producing the existing sanitized abstention naming only the semantic slot and stopping additional evidence reads.
+3. Unexpected adapter/programming exceptions remain loud; only evidence unavailability/corruption follows the operational abstention path.
+4. Added regressions covering `True`, `False`, `NaN`, positive/negative infinity, numeric strings, arbitrary objects, invalid later-slot samples, early-stop query budgeting, and finite integer normalization.
 
 Commits:
-- `890a3c722588ca4b222a91f350cb9b7e30d9e0fd` — Harden Cloud audit envelope string validation
-- `58fbd3b3af1716b2de69af840cfe7bbf86227e64` — Add Cloud audit envelope validation regressions
+- `b14cd240632207b15e447ee409961193078feb23` — Harden investigator metric evidence boundary
+- `5c6a4ef355ad337d5736f8aaa333514466c8e1b4` — Add investigator metric-boundary regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Before modifying code, attempted a fresh checkout and the pending focused suite: `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v`.
-- Checkout again failed before tests with `Could not resolve host: github.com`.
-- Therefore neither the pending regressions nor the new audit-envelope regressions executed from the repository in this run; no new green-suite claim is made.
-- No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
+- Before modification, attempted `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard`; checkout failed with `Could not resolve host: github.com`.
+- Because the executable runner cannot currently resolve GitHub, `PYTHONPATH=runtime python -m unittest runtime.tests.test_investigator -v` could not be run from a fresh repository checkout in this run.
+- The new tests are therefore not claimed green, and no GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. Durable audit sinks should reject malformed custom/direct callers deterministically rather than leaking incidental Python exceptions.
-2. Envelope size policy is measured in UTF-8 bytes because transport/storage cost is byte-based; multibyte identifiers must not bypass configured limits.
-3. ASCII controls are not valid StageGuard durable audit identifiers even inside structured logging fields; this aligns the sink with the existing operator identity boundary.
+1. Evidence validity must be enforced at the decision boundary as well as in the reference Grafana MCP adapter because StageGuard explicitly supports modular/custom telemetry integrations.
+2. Corrupt/malformed metric samples are operationally equivalent to unavailable evidence and must cause abstention, never a healthy verdict or diagnosis.
+3. Finite Python integers remain accepted and are normalized to floats because custom adapters may decode valid JSON/Prometheus numeric values as integers; booleans are excluded explicitly despite being `int` subclasses in Python.
+4. The existing behavior for unexpected programming errors is preserved so defects are not silently hidden as evidence outages.
 
 ### Blockers / unknowns
 
-- The new `test_cloud_audit` regressions and the recent `test_audit_integrity` regressions need a current executable checkout.
-- Recent MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
+- `runtime.tests.test_investigator` and the accumulated recent hardening regressions need a current executable checkout.
+- Recent audit, MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_investigator runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
