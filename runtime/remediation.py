@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import urllib.parse
 import urllib.request
@@ -160,6 +161,23 @@ def _execute_remediation(
     return sanitize_action_result(action, expected_operation_id=operation_id)
 
 
+def _normalize_recovery_metric(value: object) -> float | None:
+    """Normalize adapter evidence before it can authorize a recovery transition.
+
+    Metric adapters are pluggable. Python booleans are subclasses of integers, so
+    accepting arbitrary numeric-looking values would make ``False`` compare as zero
+    and could falsely satisfy healthy thresholds. Only finite real int/float samples
+    or explicit ``None`` are valid recovery evidence; malformed samples are treated
+    as unavailable and therefore cannot contribute to a healthy streak.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    return normalized if math.isfinite(normalized) else None
+
+
 def remediate_and_verify(
     report: IncidentReport,
     approval: Approval,
@@ -190,8 +208,8 @@ def remediate_and_verify(
     samples: list[RecoverySample] = []
     healthy_streak = 0
     for attempt in range(1, max_attempts + 1):
-        packet_loss = metrics.instant(queries["packet_loss"][0])
-        dropped_frames = metrics.instant(queries["dropped_frames"][0])
+        packet_loss = _normalize_recovery_metric(metrics.instant(queries["packet_loss"][0]))
+        dropped_frames = _normalize_recovery_metric(metrics.instant(queries["dropped_frames"][0]))
         healthy = (
             packet_loss is not None and dropped_frames is not None
             and packet_loss < queries["packet_loss"][1]
