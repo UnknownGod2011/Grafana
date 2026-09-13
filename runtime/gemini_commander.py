@@ -14,6 +14,7 @@ credential-free tests can inject CommanderModel fixtures.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass
@@ -53,9 +54,29 @@ class IncidentBriefing:
 
 
 def _trusted_identifier(value: str, field: str) -> str:
-    if not _IDENTIFIER.fullmatch(value):
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise ValueError(f"unsafe {field} identifier for model context")
     return value
+
+
+def _finite_number(
+    value: Any,
+    field: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """Normalize numeric model context while rejecting bool/NaN/infinity."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"model context field {field} must be a finite number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise ValueError(f"model context field {field} must be a finite number")
+    if minimum is not None and normalized < minimum:
+        raise ValueError(f"model context field {field} is below its allowed range")
+    if maximum is not None and normalized > maximum:
+        raise ValueError(f"model context field {field} exceeds its allowed range")
+    return normalized
 
 
 def build_commander_context(report: IncidentReport) -> dict[str, Any]:
@@ -63,8 +84,8 @@ def build_commander_context(report: IncidentReport) -> dict[str, Any]:
 
     Raw PromQL, raw LogQL, log bodies, remediation targets/actions, credentials,
     endpoints, and free-form report summaries/hypotheses are intentionally omitted.
-    Only deterministic evidence-class labels, numeric values, booleans, status,
-    confidence, and trusted identifiers cross the model boundary.
+    Only deterministic evidence-class labels, finite numeric values, booleans,
+    status, confidence, and trusted identifiers cross the model boundary.
     """
     if report.status not in _ALLOWED_NEXT_STEPS:
         raise ValueError("unsupported deterministic incident status")
@@ -73,10 +94,16 @@ def build_commander_context(report: IncidentReport) -> dict[str, Any]:
     for item in report.evidence:
         if len(metric_evidence) >= 6:
             raise ValueError("incident report exceeds bounded metric evidence slots")
+        if item.value is None:
+            normalized_value = None
+        else:
+            normalized_value = _finite_number(item.value, "metric_evidence.value")
+        if item.supports_hypothesis is not None and not isinstance(item.supports_hypothesis, bool):
+            raise ValueError("model context field supports_hypothesis must be a boolean or null")
         metric_evidence.append(
             {
                 "class": _trusted_identifier(item.evidence_class, "evidence_class"),
-                "value": item.value,
+                "value": normalized_value,
                 "supports_hypothesis": item.supports_hypothesis,
             }
         )
@@ -90,7 +117,7 @@ def build_commander_context(report: IncidentReport) -> dict[str, Any]:
         "incident_status": report.status,
         "production_id": _trusted_identifier(report.production_id, "production_id"),
         "affected_feed": _trusted_identifier(report.affected_feed, "affected_feed"),
-        "confidence": float(report.confidence),
+        "confidence": _finite_number(report.confidence, "confidence", minimum=0.0, maximum=1.0),
         "missing_evidence": [
             _trusted_identifier(name, "missing_evidence") for name in report.missing_evidence[:4]
         ],
@@ -201,9 +228,19 @@ class GoogleGenAICommanderModel:
         except ImportError as exc:  # pragma: no cover - exercised only with optional dependency
             raise RuntimeError("install google-genai to enable Vertex AI Gemini briefing") from exc
 
+        try:
+            serialized_context = json.dumps(
+                context,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Gemini context is not strict JSON") from exc
+
         response = self._client.models.generate_content(
             model=self._model,
-            contents=json.dumps(context, sort_keys=True, separators=(",", ":")),
+            contents=serialized_context,
             config=types.GenerateContentConfig(
                 system_instruction=self.SYSTEM_INSTRUCTION,
                 temperature=0,
