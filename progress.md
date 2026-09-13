@@ -16,7 +16,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Approval is exact-revision-bound and single-use; remediation acceptance requires literal boolean `True`.
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
 - Durable checkpoint/audit failures fail closed; once provider dispatch may have occurred, persistence uncertainty blocks replay.
-- Cloud Logging and audit-chain JSON reject non-finite numeric state and malformed envelope values.
+- Cloud Logging and audit-chain canonicalization reject non-finite numeric state and malformed/bounded envelope identifiers.
 - Production remediation HTTP requests never follow redirects and do not redirect bearer/idempotency authority.
 - Authentication/identity inputs are bounded and attacker-controlled credentials are bounded before comparison.
 - Metric activation v2 pins the exact ordered eight-query profile contract; Loki activation v2 pins policy-owned LogQL/limit and bounded preflight evidence.
@@ -38,55 +38,54 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 
 - Metric/Loki activation, onboarding, API and CLI evidence failures are bounded/redacted and fail closed.
 - `OperatorIdentity`, static bearer authentication, readiness policy, metrics bridge configuration, Cloud Run metrics acceptance, Grafana MCP smoke framing, remediation transport, Gemini evidence, audit documents/hash chains, investigator metrics, Loki corroboration, recovery verification, remediation acceptance, and execution watchdog clock handling have explicit defensive boundaries with focused regressions committed.
-- Local audit locking now refuses symlink/directory substitution for the sidecar used by anchored JSONL writes and retention coordination.
+- Local audit locking refuses symlink/directory substitution for the sidecar used by anchored JSONL writes and retention coordination.
+- Audit-chain canonicalization now enforces the same incident/event/actor envelope byte limits and ASCII-control rejection as durable Cloud Logging so an event cannot become authenticated chain state solely to be rejected at the durable sink boundary.
 
-## Run log — 2026-09-13 — Local audit lock sidecar integrity
+## Run log — 2026-09-13 — Audit-chain envelope contract alignment
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata and the current runtime tree, then reviewed `runtime/incident_service.py`, `runtime/anchored_incident_service.py`, `runtime/audit_integrity.py`, `runtime/audit_anchor.py`, `runtime/audit_file_lock.py`, `runtime/cloud_audit.py`, `runtime/tests/test_audit_file_lock.py`, and `runtime/tests/test_anchored_transition_failure_authority.py`. Also attempted a fresh executable checkout before implementation. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected repository metadata, the runtime tree, `runtime/audit_integrity.py`, `runtime/cloud_audit.py`, `runtime/incident_service.py`, `runtime/audit_anchor.py`, and `runtime/tests/test_audit_integrity.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-`audit_file_lock()` derived a sidecar path from the local audit path and opened it with ordinary `os.open(..., O_CREAT)` semantics. A pre-created symbolic link at that sidecar path could therefore redirect StageGuard's permission change and cross-process lock operations onto an unrelated file. A non-regular filesystem object was also not explicitly rejected. This affects the local anchored JSONL/retention coordination path rather than Cloud Logging, but it is still part of the operator-safe audit integrity boundary.
+`GoogleCloudLoggingAuditSink` already rejected non-string/empty envelope identifiers, ASCII control characters, and identifiers exceeding 256/128/512 UTF-8 bytes for `incident_id`/`event_type`/`actor`. `canonical_audit_event()` only required non-empty strings. Therefore the chain could authenticate lifecycle state that the durable Cloud Logging boundary would refuse, creating avoidable divergence between integrity authority and persistence authority.
 
 ### Exact changes made
 
-1. Added `_open_lock_sidecar()` in `runtime/audit_file_lock.py`.
-2. Reject a sidecar already identifiable as a symbolic link before opening it.
-3. Add `O_NOFOLLOW` when the host Python/platform exposes it, closing the open-time symlink race on supporting POSIX systems.
-4. Validate the opened descriptor with `fstat()` and require a regular file before any lock operation.
-5. Preserve the owner-only `0600` mode enforcement and Windows compatibility behavior.
-6. Ensure the descriptor is closed on every validation failure.
-7. Added `runtime/tests/test_audit_file_lock_security.py` covering directory substitution, symlink redirection without touching the symlink target, and ordinary owner-only regular-sidecar creation.
+1. Hardened `runtime/audit_integrity.py` with explicit `AuditEvent` type validation.
+2. Added the durable envelope limits: incident ID 256 UTF-8 bytes, event type 128 bytes, actor 512 bytes.
+3. Added ASCII control rejection for `0x00-0x1f` and `0x7f` before canonical hashing.
+4. Kept the existing strict positive sequence, non-negative timestamp, dictionary payload, deterministic JSON, and `allow_nan=False` behavior.
+5. Added regressions covering newline/NUL/ESC/DEL controls, non-string envelope values, multibyte UTF-8 over-limit values, exact accepted UTF-8 boundaries, and proof that rejected events do not advance the chain from genesis.
 
 Commits:
-- `a388f3a1e6294ee7db7b4e56363d2b681d8c1b35` — Harden local audit lock sidecar handling
-- `6b8f425dc9757533306a0f0d755f4ee11049e817` — Add audit lock sidecar security regressions
+- `de864657cd1e05c4089d4d7c1d60d150f22a6c15` — Align audit-chain envelope validation with durable audit contract
+- `7dd7f45dd7a3e66a1be7149dd35857bd8031ea17` — Add audit-chain envelope contract regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Fresh repository checkout still failed before tests with `Could not resolve host: github.com`; no GitHub Actions workflow was triggered merely to bypass that transient runner failure.
-- Independently compiled the hardened lock module successfully with `py_compile` in the execution environment.
-- Independently exercised the critical behavior on Linux: a symlink sidecar was rejected with `audit lock sidecar must not be a symbolic link`, its target content remained unchanged, and a normal sidecar was created as a regular file with mode `0600`.
-- The repository-level new pytest file is therefore not yet claimed green against the real checkout/dependency set.
+- Attempted a fresh checkout and focused execution with `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit -v`.
+- The checkout failed before test execution with `Could not resolve host: github.com`.
+- No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
+- The new regressions are therefore not claimed green against the repository checkout/dependency set.
 
 ### Decisions
 
-1. The local audit sidecar is security-sensitive because both anchored append/read and retention coordination trust the lock to serialize lifecycle/audit mutation.
-2. `O_NOFOLLOW` is used where available, but descriptor-type validation remains mandatory because platform capability varies.
-3. Unsafe sidecar state fails closed with a StageGuard-owned `RuntimeError` rather than attempting replacement/deletion of an operator filesystem object.
-4. No automatic cleanup of a suspicious sidecar is performed; destructive filesystem repair must remain an explicit operator action.
+1. Hash-chain authority and durable audit persistence should agree on envelope identity validity; accepting a wider envelope at the integrity boundary creates unnecessary split-brain failure modes.
+2. UTF-8 byte limits intentionally match Cloud Logging rather than Python character counts so multibyte identities behave identically across both boundaries.
+3. Payload-policy parity was not broadened in this change: the chain authenticates the full lifecycle event, while the Cloud sink intentionally applies additional secret/key/size restrictions before export.
+4. Existing hashes for already-valid production events are unchanged because canonical JSON serialization was not altered.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_audit_file_lock_security` and the existing lock/anchored-retention suites still need a current executable repository checkout.
-- Recent remediation, audit, MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/activation/onboarding/Cloud Run/investigator/Loki hardening suites still need a current executable checkout.
+- `runtime.tests.test_audit_integrity` and `runtime.tests.test_cloud_audit` still need a current executable repository checkout.
+- Recent audit-lock, remediation, watchdog, Loki, investigator, MCP, Gemini, metrics-bridge, identity/auth/readiness/activation/onboarding/Cloud Run hardening suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**As soon as executable checkout works, first run `PYTHONPATH=runtime python -m pytest runtime/tests/test_audit_file_lock.py runtime/tests/test_audit_file_lock_security.py runtime/tests/test_anchored_transition_failure_authority.py -q` and fix any failure immediately. If clean, run the accumulated watchdog/remediation/Loki/investigator/MCP/audit/Gemini/auth/readiness/bridge/activation suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, first run `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit -v` and fix any failure immediately. If clean, run the audit-lock/anchored-transition regressions, then the accumulated watchdog/remediation/Loki/investigator/MCP/Gemini/auth/readiness/bridge/activation suites before the pinned Grafana MCP 1.4.1 smoke and private Cloud Run metrics acceptance.**
