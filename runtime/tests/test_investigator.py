@@ -1,3 +1,4 @@
+import math
 import pathlib
 import sys
 import unittest
@@ -114,6 +115,43 @@ class InvestigatorTests(unittest.TestCase):
         client = FailingClient(fault_values(), "causal", TypeError("adapter bug"))
         with self.assertRaisesRegex(TypeError, "adapter bug"):
             investigate(client)
+
+    def test_invalid_metric_samples_fail_closed_as_unavailable_evidence(self):
+        invalid_samples = (True, False, math.nan, math.inf, -math.inf, "18.0", object())
+        for sample in invalid_samples:
+            with self.subTest(sample=repr(sample)):
+                values = fault_values()
+                values["symptom"] = sample
+                client = FakeClient(values)
+                report = investigate(client)
+                self.assertEqual("abstain", report.status)
+                self.assertIsNone(report.hypothesis)
+                self.assertEqual(0.0, report.confidence)
+                self.assertEqual(("symptom",), report.unavailable_evidence)
+                self.assertEqual((), report.missing_evidence)
+                self.assertEqual(1, len(client.calls))
+
+    def test_invalid_later_metric_sample_stops_collection_at_failed_slot(self):
+        values = fault_values()
+        values["causal"] = math.nan
+        client = FakeClient(values)
+        report = investigate(client)
+        self.assertEqual("abstain", report.status)
+        self.assertEqual(("causal",), report.unavailable_evidence)
+        self.assertEqual(2, len(client.calls))
+        self.assertEqual(8.0, report.evidence[0].value)
+        self.assertIsNone(report.evidence[1].value)
+
+    def test_finite_integer_metric_samples_are_normalized_to_float(self):
+        values = fault_values()
+        values["symptom"] = 8
+        values["causal"] = 18
+        report = investigate(FakeClient(values))
+        self.assertEqual("diagnosed", report.status)
+        self.assertEqual(8.0, report.evidence[0].value)
+        self.assertIsInstance(report.evidence[0].value, float)
+        self.assertEqual(18.0, report.evidence[1].value)
+        self.assertIsInstance(report.evidence[1].value, float)
 
 
 if __name__ == "__main__":
