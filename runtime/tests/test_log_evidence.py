@@ -12,7 +12,7 @@ from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
 
 class FakeLogs:
-    def __init__(self, result: LogQueryResult):
+    def __init__(self, result):
         self.result = result
         self.calls = []
 
@@ -64,6 +64,72 @@ class LogEvidenceTests(unittest.TestCase):
     def test_event_drift_fails_closed(self):
         client = FakeLogs(LogQueryResult((record(event="link_restored"),), False, "now-5m", "now"))
         self.assertEqual("ambiguous", corroborate_uplink_loss(client, DEFAULT_TELEMETRY_PROFILE).status)
+
+    def test_non_result_envelope_fails_closed(self):
+        evidence = corroborate_uplink_loss(FakeLogs({"records": []}), DEFAULT_TELEMETRY_PROFILE)
+        self.assertEqual("ambiguous", evidence.status)
+        self.assertIn("malformed result envelope", evidence.reason)
+
+    def test_non_boolean_truncation_marker_fails_closed(self):
+        evidence = corroborate_uplink_loss(
+            FakeLogs(LogQueryResult((record(),), 1, "now-5m", "now")),
+            DEFAULT_TELEMETRY_PROFILE,
+        )
+        self.assertEqual("ambiguous", evidence.status)
+        self.assertIn("truncation marker", evidence.reason)
+
+    def test_query_window_drift_fails_closed(self):
+        for result in (
+            LogQueryResult((record(),), False, "now-10m", "now"),
+            LogQueryResult((record(),), False, "now-5m", "now-1m"),
+        ):
+            with self.subTest(start=result.start, end=result.end):
+                evidence = corroborate_uplink_loss(FakeLogs(result), DEFAULT_TELEMETRY_PROFILE)
+                self.assertEqual("ambiguous", evidence.status)
+                self.assertIn("window disagreed", evidence.reason)
+
+    def test_non_string_window_fails_closed(self):
+        evidence = corroborate_uplink_loss(
+            FakeLogs(LogQueryResult((record(),), False, None, "now")),  # type: ignore[arg-type]
+            DEFAULT_TELEMETRY_PROFILE,
+        )
+        self.assertEqual("ambiguous", evidence.status)
+        self.assertIn("invalid evidence window", evidence.reason)
+
+    def test_non_tuple_records_fail_closed(self):
+        evidence = corroborate_uplink_loss(
+            FakeLogs(LogQueryResult([record()], False, "now-5m", "now")),  # type: ignore[arg-type]
+            DEFAULT_TELEMETRY_PROFILE,
+        )
+        self.assertEqual("ambiguous", evidence.status)
+        self.assertIn("record collection", evidence.reason)
+
+    def test_over_budget_records_fail_closed(self):
+        result = LogQueryResult(
+            tuple(record() for _ in range(MAX_CORROBORATION_LINES + 1)),
+            False,
+            "now-5m",
+            "now",
+        )
+        evidence = corroborate_uplink_loss(FakeLogs(result), DEFAULT_TELEMETRY_PROFILE)
+        self.assertEqual("ambiguous", evidence.status)
+        self.assertIn("record collection", evidence.reason)
+
+    def test_malformed_record_fields_fail_closed(self):
+        malformed = (
+            LogRecord("", '{"event":"packet_loss_alarm"}', {"production_id": "broadcast-alpha", "uplink": "uplink-b"}, {}, {"event": "packet_loss_alarm"}),
+            LogRecord("1760000000000000000", '{"event":"packet_loss_alarm"}', {"production_id": 7, "uplink": "uplink-b"}, {}, {"event": "packet_loss_alarm"}),  # type: ignore[dict-item]
+            LogRecord("1760000000000000000", '{"event":"packet_loss_alarm"}', {"production_id": "broadcast-alpha", "uplink": "uplink-b"}, [], {"event": "packet_loss_alarm"}),  # type: ignore[arg-type]
+            LogRecord("1760000000000000000", None, {"production_id": "broadcast-alpha", "uplink": "uplink-b"}, {}, {"event": "packet_loss_alarm"}),  # type: ignore[arg-type]
+        )
+        for bad_record in malformed:
+            with self.subTest(record=bad_record):
+                evidence = corroborate_uplink_loss(
+                    FakeLogs(LogQueryResult((bad_record,), False, "now-5m", "now")),
+                    DEFAULT_TELEMETRY_PROFILE,
+                )
+                self.assertEqual("ambiguous", evidence.status)
+                self.assertIn("malformed log record", evidence.reason)
 
 
 if __name__ == "__main__":
