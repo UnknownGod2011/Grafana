@@ -3,11 +3,14 @@ from email.message import Message
 from types import SimpleNamespace
 
 from identity import (
+    MAX_IDENTITY_PROVIDER_BYTES,
+    MAX_IDENTITY_SUBJECT_BYTES,
     MAX_STATIC_BEARER_TOKEN_BYTES,
     MIN_STATIC_BEARER_TOKEN_BYTES,
     AuthenticationError,
     GoogleIapIdentityProvider,
     LocalDevelopmentIdentityProvider,
+    OperatorIdentity,
     StaticBearerIdentityProvider,
 )
 
@@ -22,6 +25,36 @@ class IdentityProviderTests(unittest.TestCase):
         for name, value in headers_to_add.items():
             headers[name.replace("_", "-")] = value
         return SimpleNamespace(headers=headers)
+
+    def test_operator_identity_normalizes_and_bounds_fields(self):
+        identity = OperatorIdentity("  operator@example.com  ", "  custom-provider  ")
+        self.assertEqual("operator@example.com", identity.subject)
+        self.assertEqual("custom-provider", identity.provider)
+
+        invalid_identities = (
+            ("", "provider"),
+            ("operator", ""),
+            ("x" * (MAX_IDENTITY_SUBJECT_BYTES + 1), "provider"),
+            ("operator", "x" * (MAX_IDENTITY_PROVIDER_BYTES + 1)),
+            ("operator\nforged", "provider"),
+            ("operator\x00forged", "provider"),
+            ("operator", "provider\rforged"),
+            ("operator", "provider\x1bforged"),
+            (None, "provider"),
+            ("operator", None),
+        )
+        for subject, provider in invalid_identities:
+            with self.subTest(subject=subject, provider=provider):
+                with self.assertRaises(ValueError):
+                    OperatorIdentity(subject, provider)
+
+    def test_operator_identity_accepts_exact_byte_limits(self):
+        identity = OperatorIdentity(
+            "s" * MAX_IDENTITY_SUBJECT_BYTES,
+            "p" * MAX_IDENTITY_PROVIDER_BYTES,
+        )
+        self.assertEqual(MAX_IDENTITY_SUBJECT_BYTES, len(identity.subject.encode("utf-8")))
+        self.assertEqual(MAX_IDENTITY_PROVIDER_BYTES, len(identity.provider.encode("utf-8")))
 
     def test_local_identity_is_process_configured_and_ignores_headers(self):
         provider = LocalDevelopmentIdentityProvider("trusted-local")
@@ -127,6 +160,7 @@ class IdentityProviderTests(unittest.TestCase):
             {"iss": "attacker", "aud": audience, "sub": "user"},
             {"iss": "https://cloud.google.com/iap", "aud": "wrong", "sub": "user"},
             {"iss": "https://cloud.google.com/iap", "aud": audience, "sub": ""},
+            {"iss": "https://cloud.google.com/iap", "aud": audience, "sub": "user\nforged"},
         )
         for claims in bad_claims:
             with self.subTest(claims=claims):
