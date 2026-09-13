@@ -93,6 +93,29 @@ class McpMetricResultTests(unittest.TestCase):
         with self.assertRaisesRegex(McpMetricError, "not numeric"):
             extract_instant_value(result)
 
+    def test_boolean_samples_fail_closed_instead_of_becoming_zero_or_one(self):
+        cases = (
+            {"data": [1788700000.0, True]},
+            {"data": [1788700000.0, False]},
+            {"data": [{"metric": {}, "value": [1788700000.0, True]}]},
+            {"data": [{"metric": {}, "value": [1788700000.0, False]}]},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(McpMetricError, "not numeric"):
+                    extract_instant_value(tool_result(payload))
+
+    def test_structured_boolean_samples_fail_closed(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                result = {
+                    "structuredContent": {
+                        "data": [{"metric": {}, "value": [1788700000.0, value]}]
+                    }
+                }
+                with self.assertRaisesRegex(McpMetricError, "not numeric"):
+                    extract_instant_value(result)
+
     def test_non_finite_vector_values_fail_closed(self):
         for value in ("NaN", "Inf", "+Inf", "-Inf"):
             with self.subTest(value=value):
