@@ -96,6 +96,44 @@ def _event_from_record(record: LogRecord) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _string_map(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    )
+
+
+def _valid_record(record: object) -> bool:
+    return (
+        isinstance(record, LogRecord)
+        and isinstance(record.timestamp, str)
+        and bool(record.timestamp)
+        and isinstance(record.line, str)
+        and _string_map(record.labels)
+        and _string_map(record.structured_metadata)
+        and _string_map(record.parsed)
+    )
+
+
+def _ambiguous_result(
+    query: str,
+    *,
+    start: str,
+    end: str,
+    line_count: int,
+    reason: str,
+) -> LogCorroboration:
+    return LogCorroboration(
+        "ambiguous",
+        "causal_log",
+        query,
+        start,
+        end,
+        line_count,
+        None,
+        reason,
+    )
+
+
 def corroborate_uplink_loss(
     client: LogQueryClient,
     profile: TelemetryProfile,
@@ -106,8 +144,9 @@ def corroborate_uplink_loss(
     """Require complete, scope-consistent packet-loss alarm logs.
 
     Missing logs are treated as missing corroboration rather than evidence that
-    the hypothesis is false. Truncation or scope/event disagreement is
-    ambiguous and must fail closed at the orchestration layer.
+    the hypothesis is false. Truncation, malformed adapter output, query-window
+    drift, or scope/event disagreement is ambiguous and must fail closed at the
+    orchestration layer.
     """
     query = uplink_loss_logql(profile)
     result = client.range(
@@ -116,6 +155,58 @@ def corroborate_uplink_loss(
         end=end,
         limit=MAX_CORROBORATION_LINES,
     )
+
+    # Enforce the evidence contract again at the decision boundary. StageGuard
+    # intentionally supports alternate/self-hosted adapters; a custom adapter
+    # must not be able to make malformed or out-of-window Loki data authoritative.
+    if not isinstance(result, LogQueryResult):
+        return _ambiguous_result(
+            query,
+            start=start,
+            end=end,
+            line_count=0,
+            reason="The log adapter returned a malformed result envelope.",
+        )
+    if type(result.truncated) is not bool:
+        return _ambiguous_result(
+            query,
+            start=start,
+            end=end,
+            line_count=0,
+            reason="The log adapter returned an invalid truncation marker.",
+        )
+    if not isinstance(result.start, str) or not isinstance(result.end, str):
+        return _ambiguous_result(
+            query,
+            start=start,
+            end=end,
+            line_count=0,
+            reason="The log adapter returned an invalid evidence window.",
+        )
+    if result.start != start or result.end != end:
+        return _ambiguous_result(
+            query,
+            start=result.start,
+            end=result.end,
+            line_count=0,
+            reason="The returned Loki evidence window disagreed with the requested bounded window.",
+        )
+    if not isinstance(result.records, tuple) or len(result.records) > MAX_CORROBORATION_LINES:
+        return _ambiguous_result(
+            query,
+            start=result.start,
+            end=result.end,
+            line_count=0,
+            reason="The log adapter returned an invalid or over-budget record collection.",
+        )
+    if any(not _valid_record(record) for record in result.records):
+        return _ambiguous_result(
+            query,
+            start=result.start,
+            end=result.end,
+            line_count=len(result.records),
+            reason="The log adapter returned a malformed log record.",
+        )
 
     if result.truncated:
         return LogCorroboration(
