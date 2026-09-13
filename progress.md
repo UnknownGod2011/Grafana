@@ -24,6 +24,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; read-only/tool-surface restrictions are regression-locked.
 - Core remediation watchdog clocks are finite native numbers; invalid/backward active clocks fail readiness closed.
 - Local cooperative audit-lock sidecars must be owner-only regular files, may not be symbolic links, and the opened descriptor must match the exact file identity still visible at the sidecar path.
+- The anchored local JSONL audit data file now uses the same no-follow, regular-file, descriptor/path-identity discipline before create/read/append and forbids truncating opens at the secure primitive.
 
 ## Retained validation baseline
 
@@ -39,47 +40,51 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Metric/Loki activation, onboarding, API and CLI evidence failures are bounded/redacted and fail closed.
 - `OperatorIdentity`, static bearer authentication, readiness policy, metrics bridge configuration, Cloud Run metrics acceptance, Grafana MCP smoke framing, remediation transport, Gemini evidence, audit documents/hash chains, investigator metrics, Loki corroboration, recovery verification, remediation acceptance, and execution watchdog clock handling have explicit defensive boundaries with focused regressions committed.
 - Audit-chain canonicalization enforces the same incident/event/actor envelope byte limits and ASCII-control rejection as durable Cloud Logging.
-- Local audit locking rejects obvious symlink/directory substitution and now also verifies post-open descriptor/path identity to detect check/open replacement on platforms without `O_NOFOLLOW`.
+- Local audit locking rejects symlink/directory substitution and verifies post-open descriptor/path identity.
+- Anchored local JSONL audit creation, reads, candidate reads, and appends now use a shared secure descriptor opener rather than ordinary pathname opens.
 
-## Run log — 2026-09-13 — Audit-lock post-open identity hardening
+## Run log — 2026-09-13 — Audit JSONL data-file path hardening
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata, `runtime/audit_file_lock.py`, `runtime/tests/test_audit_file_lock.py`, local audit integration points, and the current retained validation/blocker state. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected repository metadata/tree, `runtime/audit_file_lock.py`, `runtime/incident_service.py`, `runtime/anchored_incident_service.py`, `runtime/retention_executor.py`, and the existing audit lock regressions. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The lock sidecar already rejected a pre-existing symbolic link and used `O_NOFOLLOW` when available, but on platforms where `O_NOFOLLOW` is absent there remained a check/open substitution gap: a path could change between the pre-open `is_symlink()` check and `os.open()`. A regular target reached through that race would pass the existing descriptor regular-file check.
+The cooperative lock sidecar already rejected symlinks and post-open path identity substitution, but the actual local audit JSONL path did not share that protection. `JsonlAuditLog` and the anchored reader still used ordinary `os.open()`/`Path.open()` calls. A path replaced by a symlink could therefore redirect audit reads or appends even though the sidecar lock itself was safe. Retention code also still contains ordinary pathname opens and remains a follow-up surface.
 
 ### Exact changes made
 
-1. Added `_same_file_identity()` to compare the opened descriptor's `(st_dev, st_ino)` with the post-open `lstat()` identity of the visible sidecar path.
-2. `_open_lock_sidecar()` now performs a post-open `lstat()`, rejects a symlink/non-regular visible path, and rejects descriptor/path identity mismatch before applying permissions or entering lock coordination.
-3. Failure paths still close the descriptor before propagating the error.
-4. Added regressions that simulate a post-open identity substitution and verify rejection, plus a positive test proving a normal sidecar descriptor matches the visible regular file.
+1. Added `open_regular_audit_file()` in `runtime/audit_file_lock.py` as a shared secure local audit-data opener.
+2. The helper rejects a visible symlink, adds `O_NOFOLLOW` when supported, validates the opened descriptor as a regular file, post-validates the visible path with `lstat()`, and requires descriptor/path `(st_dev, st_ino)` identity before returning the descriptor.
+3. The helper explicitly rejects `O_TRUNC`; on platforms without `O_NOFOLLOW`, truncating a substituted target could otherwise occur before post-open validation.
+4. The helper maintains owner-only `0600` intent where `fchmod` is available and closes descriptors on every validation failure.
+5. `AnchoredJsonlAuditLog` now overrides initialization, append, read, and anchored candidate read so create/read/append operations use validated descriptors while remaining under the existing cooperative lock.
+6. Added `runtime/tests/test_audit_data_file_security.py` covering symlink rejection without target mutation, simulated post-open identity substitution, `O_TRUNC` refusal, constructor/append/read path replacement, normal round-trip behavior, and regular owner-only file creation.
 
 Commits:
-- `b1901bf7580ba7138641f9328a2cb936eb0d5b21` — Harden audit lock sidecar identity validation
-- `be791fbf5106ebabd258c603e049990771ec94b4` — Add audit lock identity substitution regressions
+- `189bf738b4d2a8a4995569e02b352b7895caadbf` — Harden local audit data file opens
+- `538d017ce5c187d5441cdbf6380ea3ea527d36bd` — Use secure audit data file descriptors
+- `fa50b3a8def6e3e4917625cb65dbdffe092cb324` — Add audit data file security regressions
 
 ### Checks / results
 
-- Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- A fresh local clone was attempted before implementation and still failed with `Could not resolve host: github.com`.
-- Because executable checkout remains unavailable, `runtime.tests.test_audit_file_lock` is not claimed green in this run.
-- A minimal local Python syntax sanity check for the new identity-comparison expression passed.
-- No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
+- Authenticated GitHub connector reads/writes succeeded and all implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
+- A fresh clone/remote probe was attempted before and after implementation; the execution environment still fails with `Could not resolve host: github.com`.
+- Because executable checkout remains unavailable, `runtime/tests/test_audit_data_file_security.py` and related audit suites are not claimed green in this run.
+- No GitHub Actions workflow was triggered merely to bypass the transient DNS failure.
 
 ### Decisions
 
-1. Sidecar safety should bind to file identity, not only pathname type checks; otherwise the cooperative lock can be redirected during the open window on platforms without `O_NOFOLLOW`.
-2. Device+inode equality is intentionally used after open because it validates the descriptor against the current directory entry without following a symlink.
-3. This change remains scoped to the cooperative lock sidecar; hardening the audit JSONL data path itself against equivalent substitution is a separate follow-up and should be implemented with the same no-follow/regular-file identity discipline.
+1. Data-file safety must bind the opened descriptor to the exact visible regular file, not merely trust the cooperative sidecar lock.
+2. `O_TRUNC` is forbidden in the shared primitive because post-open identity checks cannot undo truncation if a platform followed a substituted path before validation.
+3. This run integrates the primitive into the anchored local audit implementation, which is the anchor-aware path used by the current StageGuard local integrity design. The older base `JsonlAuditLog` and retention scan/execution pathname opens remain explicit follow-up surfaces rather than being silently treated as hardened.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_audit_file_lock` still needs a current executable repository checkout.
-- The audit JSONL data file itself still uses ordinary path opens and should receive equivalent symlink/identity hardening.
+- The new audit data-file regressions still need a current executable repository checkout.
+- Base `JsonlAuditLog` in `incident_service.py` still uses ordinary pathname opens and should be migrated to the secure primitive to remove the legacy/local-demo gap.
+- `retention_executor.py` and retention planning still perform ordinary audit-path opens/stat calls; those should be migrated to the same descriptor-identity discipline so compaction cannot reopen a substituted path.
 - Recent audit-chain, remediation, watchdog, Loki, investigator, MCP, Gemini, metrics-bridge, identity/auth/readiness/activation/onboarding/Cloud Run hardening suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -87,4 +92,4 @@ Commits:
 
 ## Single best next step
 
-**Harden the local audit JSONL data-file open/read/append boundary itself against symlink and path-identity substitution, then run `PYTHONPATH=runtime python -m pytest runtime/tests/test_audit_file_lock.py -q` plus the relevant anchored-audit tests as soon as executable checkout works.**
+**Migrate the base `JsonlAuditLog` plus retention planner/executor audit-file reads to `open_regular_audit_file()` (or an equivalent descriptor-bound wrapper), add substitution regressions around retention prepare/execute, then run the focused audit/retention suites as soon as executable checkout works.**
