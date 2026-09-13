@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from cloud_audit import GoogleCloudLoggingAuditSink, audit_event_document
@@ -92,6 +93,31 @@ class CloudAuditTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
                     audit_event_document(self.event(payload))
+
+    def test_rejects_non_finite_payload_numbers_at_any_supported_depth(self):
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    audit_event_document(self.event({"confidence": value}))
+                with self.assertRaises(ValueError):
+                    audit_event_document(self.event({"action_metadata": {"duration_seconds": value}}))
+
+    def test_rejects_boolean_or_non_integer_sequence_and_timestamp(self):
+        invalid_envelopes = (
+            AuditEvent(True, 1_700_000_000_000, "incident", "event", "actor", {}),
+            AuditEvent(7.0, 1_700_000_000_000, "incident", "event", "actor", {}),
+            AuditEvent(7, False, "incident", "event", "actor", {}),
+            AuditEvent(7, 1_700_000_000_000.0, "incident", "event", "actor", {}),
+        )
+        for event in invalid_envelopes:
+            with self.subTest(event=event):
+                with self.assertRaises(ValueError):
+                    audit_event_document(event)
+
+    def test_accepts_finite_payload_numbers_and_integer_envelope(self):
+        document = audit_event_document(self.event({"confidence": 0.0, "attempt_count": 1}))
+        self.assertEqual(0.0, document["payload"]["confidence"])
+        self.assertEqual(1, document["payload"]["attempt_count"])
 
     def test_rejects_invalid_event_envelope(self):
         bad = AuditEvent(0, 1, "incident", "event", "actor", {})
