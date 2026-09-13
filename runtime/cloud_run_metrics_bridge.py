@@ -35,8 +35,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 MAX_METRICS_BYTES = 2 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 10.0
+MAX_TIMEOUT_SECONDS = 60.0
 SAFETY_SENTINEL_METRIC = b"stageguard_remediation_execution_deadline_exceeded"
 MIN_NETWORK_BEARER_TOKEN_LENGTH = 32
+MAX_BRIDGE_BEARER_TOKEN_LENGTH = 4096
 _BEARER_TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/-]+=*\Z")
 
 
@@ -101,6 +103,10 @@ def normalize_bridge_bearer_token(value: str | None) -> str | None:
         return None
     if not isinstance(value, str) or not value or value != value.strip():
         raise BridgeConfigurationError("bridge bearer token must be a non-empty trimmed string")
+    if len(value) > MAX_BRIDGE_BEARER_TOKEN_LENGTH:
+        raise BridgeConfigurationError(
+            f"bridge bearer token must be at most {MAX_BRIDGE_BEARER_TOKEN_LENGTH} characters"
+        )
     if _BEARER_TOKEN_RE.fullmatch(value) is None:
         raise BridgeConfigurationError("bridge bearer token must use the HTTP bearer token character set")
     return value
@@ -171,13 +177,15 @@ class CloudRunMetricsClient:
                 "metrics audience differs from target origin; explicit cross-origin audience opt-in is required"
             )
         if isinstance(timeout_seconds, bool):
-            raise BridgeConfigurationError("timeout must be finite and positive")
+            raise BridgeConfigurationError("timeout must be finite, positive, and bounded")
         try:
             timeout_value = float(timeout_seconds)
         except (TypeError, ValueError) as exc:
-            raise BridgeConfigurationError("timeout must be finite and positive") from exc
-        if not math.isfinite(timeout_value) or timeout_value <= 0:
-            raise BridgeConfigurationError("timeout must be finite and positive")
+            raise BridgeConfigurationError("timeout must be finite, positive, and bounded") from exc
+        if not math.isfinite(timeout_value) or timeout_value <= 0 or timeout_value > MAX_TIMEOUT_SECONDS:
+            raise BridgeConfigurationError(
+                f"timeout must be finite, positive, and at most {MAX_TIMEOUT_SECONDS:g} seconds"
+            )
         self.timeout_seconds = timeout_value
         self._token_supplier = token_supplier
         self._opener = opener
@@ -226,6 +234,8 @@ class MetricsBridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(presented, str) or not presented.startswith("Bearer "):
             return False
         candidate = presented[len("Bearer ") :]
+        if len(candidate) > MAX_BRIDGE_BEARER_TOKEN_LENGTH:
+            return False
         return hmac.compare_digest(candidate, expected)
 
     def _require_authorization(self) -> bool:
@@ -315,7 +325,7 @@ def main() -> int:
         default=os.environ.get("STAGEGUARD_BRIDGE_BEARER_TOKEN"),
         help=(
             "inbound bearer token protecting /readyz and /metrics; required for non-loopback binds "
-            f"and must be at least {MIN_NETWORK_BEARER_TOKEN_LENGTH} token characters there"
+            f"and must be {MIN_NETWORK_BEARER_TOKEN_LENGTH}-{MAX_BRIDGE_BEARER_TOKEN_LENGTH} token characters there"
         ),
     )
     parser.add_argument(
