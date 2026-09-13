@@ -19,9 +19,22 @@ IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"
 IAP_ISSUER = "https://cloud.google.com/iap"
 MAX_IAP_ASSERTION_BYTES = 16 * 1024
 MAX_IDENTITY_SUBJECT_BYTES = 512
+MAX_IDENTITY_PROVIDER_BYTES = 128
 MIN_STATIC_BEARER_TOKEN_BYTES = 32
 MAX_STATIC_BEARER_TOKEN_BYTES = 4096
 _STATIC_BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/\-]+={0,2}$")
+
+
+def _contains_control_characters(value: str) -> bool:
+    """Return True when text contains ASCII control bytes or DEL.
+
+    Identity fields cross API, audit, metrics, and logging boundaries. Keeping
+    CR/LF, NUL, TAB, ESC, and other controls out at construction time prevents
+    log/header injection and ambiguous operator attribution regardless of the
+    identity provider implementation.
+    """
+
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
 
 @dataclass(frozen=True)
@@ -30,6 +43,10 @@ class OperatorIdentity:
     provider: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.subject, str):
+            raise ValueError("identity subject must be a string")
+        if not isinstance(self.provider, str):
+            raise ValueError("identity provider must be a string")
         subject = self.subject.strip()
         provider = self.provider.strip()
         if not subject:
@@ -38,6 +55,12 @@ class OperatorIdentity:
             raise ValueError("identity provider is required")
         if len(subject.encode("utf-8")) > MAX_IDENTITY_SUBJECT_BYTES:
             raise ValueError("identity subject is too large")
+        if len(provider.encode("utf-8")) > MAX_IDENTITY_PROVIDER_BYTES:
+            raise ValueError("identity provider is too large")
+        if _contains_control_characters(subject):
+            raise ValueError("identity subject contains control characters")
+        if _contains_control_characters(provider):
+            raise ValueError("identity provider contains control characters")
         object.__setattr__(self, "subject", subject)
         object.__setattr__(self, "provider", provider)
 
