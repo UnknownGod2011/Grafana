@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+import stat
 import threading
 from types import SimpleNamespace
 
+import audit_file_lock as audit_lock_module
 import retention_coordinator
 from anchored_incident_service import AnchoredJsonlAuditLog
 from audit_file_lock import audit_file_lock, lock_path_for
@@ -159,3 +162,35 @@ def test_coordinated_prepare_holds_lock_around_full_plan_preparation(tmp_path, m
     assert holder == [document]
     assert append_finished.wait(1)
     append_thread.join(timeout=1)
+
+
+def test_open_lock_sidecar_rejects_post_open_path_identity_change(tmp_path, monkeypatch):
+    sidecar = tmp_path / ".audit.jsonl.stageguard.lock"
+    sidecar.write_bytes(b"")
+    actual = os.lstat(sidecar)
+    forged = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=actual.st_dev,
+        st_ino=actual.st_ino + 1,
+    )
+    monkeypatch.setattr(audit_lock_module.os, "lstat", lambda path: forged)
+
+    try:
+        audit_lock_module._open_lock_sidecar(sidecar)
+    except RuntimeError as exc:
+        assert str(exc) == "audit lock sidecar path changed while opening"
+    else:
+        raise AssertionError("substituted lock sidecar identity must be rejected")
+
+
+def test_open_lock_sidecar_accepts_matching_regular_file_identity(tmp_path):
+    sidecar = tmp_path / ".audit.jsonl.stageguard.lock"
+    fd = audit_lock_module._open_lock_sidecar(sidecar)
+    try:
+        descriptor = os.fstat(fd)
+        visible = os.lstat(sidecar)
+        assert stat.S_ISREG(descriptor.st_mode)
+        assert stat.S_ISREG(visible.st_mode)
+        assert (descriptor.st_dev, descriptor.st_ino) == (visible.st_dev, visible.st_ino)
+    finally:
+        os.close(fd)
