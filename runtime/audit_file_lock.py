@@ -107,7 +107,7 @@ def open_regular_audit_file(path: str | Path, flags: int, mode: int = 0o600) -> 
 
 
 def _open_lock_sidecar(sidecar: Path) -> int:
-    """Open one owner-only regular lock file without accepting path substitution."""
+    """Open one owner-only, single-link regular lock file without path substitution."""
     try:
         if sidecar.is_symlink():
             raise RuntimeError("audit lock sidecar must not be a symbolic link")
@@ -127,13 +127,19 @@ def _open_lock_sidecar(sidecar: Path) -> int:
         fd_stat = os.fstat(fd)
         if not stat.S_ISREG(fd_stat.st_mode):
             raise RuntimeError("audit lock sidecar must be a regular file")
+        if fd_stat.st_nlink != 1:
+            raise RuntimeError("audit lock sidecar must not have multiple hard links")
         try:
             path_stat = os.lstat(sidecar)
         except OSError as exc:
             raise RuntimeError("audit lock sidecar path changed while opening") from exc
         if stat.S_ISLNK(path_stat.st_mode):
             raise RuntimeError("audit lock sidecar must not be a symbolic link")
-        if not stat.S_ISREG(path_stat.st_mode) or not _same_file_identity(fd_stat, path_stat):
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or path_stat.st_nlink != 1
+            or not _same_file_identity(fd_stat, path_stat)
+        ):
             raise RuntimeError("audit lock sidecar path changed while opening")
         try:
             os.fchmod(fd, 0o600)
