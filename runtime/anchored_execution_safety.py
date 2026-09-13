@@ -70,10 +70,33 @@ class AnchoredExecutionSafeIncidentService(
         self._execution_monotonic = monotonic or time.monotonic
         super().__init__(*args, **kwargs)
 
+    def _read_execution_monotonic(self) -> float:
+        """Read the watchdog clock without allowing malformed values to fail open."""
+        try:
+            raw_value = self._execution_monotonic()
+        except Exception as exc:
+            raise RuntimeError("remediation execution watchdog clock unavailable") from exc
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise RuntimeError("remediation execution watchdog clock unavailable")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise RuntimeError("remediation execution watchdog clock unavailable")
+        return value
+
     def _execution_age_unlocked(self) -> float:
         if not self._execution_in_flight or self._execution_started_monotonic is None:
             return 0.0
-        return max(0.0, float(self._execution_monotonic()) - self._execution_started_monotonic)
+        try:
+            current = self._read_execution_monotonic()
+        except RuntimeError:
+            return self._execution_max_seconds + 1.0
+        started = self._execution_started_monotonic
+        if not math.isfinite(started) or current < started:
+            return self._execution_max_seconds + 1.0
+        age = current - started
+        if not math.isfinite(age):
+            return self._execution_max_seconds + 1.0
+        return age
 
     def _execution_deadline_exceeded_unlocked(self) -> bool:
         return self._execution_in_flight and self._execution_age_unlocked() > self._execution_max_seconds
@@ -142,8 +165,12 @@ class AnchoredExecutionSafeIncidentService(
                 raise RuntimeError("this approval has already been consumed")
 
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
+            # Validate the watchdog before persisting the dispatch barrier. A broken
+            # local clock must prevent provider contact without leaving durable state
+            # that falsely implies dispatch may already have happened.
+            started_monotonic = self._read_execution_monotonic()
             dispatch_barrier = self._persist_dispatching_barrier(snapshot)
-            self._execution_started_monotonic = float(self._execution_monotonic())
+            self._execution_started_monotonic = started_monotonic
             self._execution_in_flight = True
 
         try:
