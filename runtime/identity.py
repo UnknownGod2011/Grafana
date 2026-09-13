@@ -9,6 +9,7 @@ never trusts the spoofable convenience identity headers as authentication.
 from __future__ import annotations
 
 import hmac
+import re
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from typing import Callable, Mapping, Protocol
@@ -18,6 +19,9 @@ IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"
 IAP_ISSUER = "https://cloud.google.com/iap"
 MAX_IAP_ASSERTION_BYTES = 16 * 1024
 MAX_IDENTITY_SUBJECT_BYTES = 512
+MIN_STATIC_BEARER_TOKEN_BYTES = 32
+MAX_STATIC_BEARER_TOKEN_BYTES = 4096
+_STATIC_BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/\-]+={0,2}$")
 
 
 @dataclass(frozen=True)
@@ -94,8 +98,12 @@ class StaticBearerIdentityProvider:
     """Minimal explicit bearer-token provider with constant-time token checks.
 
     Tokens are supplied by the host process and retained only in memory. They
-    are never emitted into StageGuard API responses or audit payloads. For an
-    internet-facing deployment, terminate TLS before requests reach this API.
+    are never emitted into StageGuard API responses or audit payloads. Because
+    this provider is permitted on non-loopback interfaces, configured tokens
+    must be cryptographically meaningful bearer credentials rather than short
+    passwords: 32-4096 UTF-8 bytes using the RFC 6750 ``b64token`` character
+    vocabulary. For an internet-facing deployment, terminate TLS before
+    requests reach this API.
     """
 
     is_development_only = False
@@ -103,8 +111,15 @@ class StaticBearerIdentityProvider:
     def __init__(self, tokens_to_subjects: Mapping[str, str]) -> None:
         configured: list[tuple[str, OperatorIdentity]] = []
         for token, subject in tokens_to_subjects.items():
-            if not isinstance(token, str) or not token:
-                raise ValueError("bearer tokens must be non-empty strings")
+            if not isinstance(token, str):
+                raise ValueError("bearer tokens must be strings")
+            token_bytes = len(token.encode("utf-8"))
+            if not MIN_STATIC_BEARER_TOKEN_BYTES <= token_bytes <= MAX_STATIC_BEARER_TOKEN_BYTES:
+                raise ValueError(
+                    f"bearer tokens must be {MIN_STATIC_BEARER_TOKEN_BYTES}-{MAX_STATIC_BEARER_TOKEN_BYTES} UTF-8 bytes"
+                )
+            if _STATIC_BEARER_TOKEN_RE.fullmatch(token) is None:
+                raise ValueError("bearer tokens must use the RFC 6750 b64token character set")
             configured.append((token, OperatorIdentity(subject, "static-bearer")))
         if not configured:
             raise ValueError("at least one bearer token is required")
@@ -115,6 +130,8 @@ class StaticBearerIdentityProvider:
         scheme, separator, candidate = authorization.partition(" ")
         if not separator or scheme.lower() != "bearer" or not candidate:
             raise AuthenticationError("bearer authentication required")
+        if len(candidate.encode("utf-8")) > MAX_STATIC_BEARER_TOKEN_BYTES:
+            raise AuthenticationError("invalid bearer credential")
         for expected, identity in self._configured:
             if hmac.compare_digest(candidate, expected):
                 return identity
