@@ -22,6 +22,13 @@ _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 _RECONCILIATION_STATES = {"accepted", "not_found"}
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Fail closed instead of replaying or forwarding credentialed requests."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
 def _validated_https_endpoint(value: str, *, name: str) -> str:
     parsed = urllib.parse.urlparse(value)
     if parsed.scheme != "https":
@@ -33,6 +40,25 @@ def _validated_https_endpoint(value: str, *, name: str) -> str:
     return value
 
 
+def _default_urlopen_no_redirect(request: urllib.request.Request, *, timeout: float):
+    """Open one HTTPS request with automatic redirects disabled.
+
+    StageGuard remediation carries a write-capable bearer credential and a stable
+    idempotency key. Generic HTTP redirect behavior is not an acceptable authority
+    transfer for either value, so production networking uses a dedicated opener
+    whose redirect handler always raises ``HTTPError``.
+    """
+
+    opener = urllib.request.build_opener(_RejectRedirects())
+    return opener.open(request, timeout=timeout)
+
+
+def _add_sensitive_header(request: urllib.request.Request, name: str, value: str) -> None:
+    """Keep authority-bearing headers off any redirected request as defense in depth."""
+
+    request.add_unredirected_header(name, value)
+
+
 @dataclass(frozen=True)
 class HttpRemediationTransport:
     """Credential-bound execution plus optional provider idempotency lookup.
@@ -42,11 +68,13 @@ class HttpRemediationTransport:
     existing local/custom deployments keep working; production uncertainty remains
     fail-closed when it is omitted.
 
-    ``urlopen`` is an optional transport seam for deterministic tests and custom
-    runtime networking policy. Production callers normally leave it unset, in which
-    case Python's standard HTTPS opener is resolved at call time. Keeping the seam
-    at the opener boundary lets tests use a real loopback TLS server without
-    weakening endpoint validation or adding a production insecure-TLS switch.
+    ``urlopen`` is an optional trusted transport seam for deterministic tests and
+    custom runtime networking policy. Production callers normally leave it unset,
+    in which case StageGuard uses a standard-library HTTPS opener with automatic
+    redirects disabled. Callers supplying a custom opener are responsible for its
+    network policy; StageGuard still marks bearer/idempotency headers as
+    non-redirectable and rejects a response whose reported final URL differs from
+    the configured request URL.
 
     The reconciliation request contains only the deterministic operation id. It
     does not contain an action, target, production id, or body that could be
@@ -73,8 +101,20 @@ class HttpRemediationTransport:
             raise ValueError("production remediation urlopen override must be callable")
 
     def _open(self, request: urllib.request.Request, *, timeout_seconds: float):
-        opener = self.urlopen or urllib.request.urlopen
+        opener = self.urlopen or _default_urlopen_no_redirect
         return opener(request, timeout=timeout_seconds)
+
+    @staticmethod
+    def _response_matches_request(response: Any, request: urllib.request.Request) -> bool:
+        """Reject custom-openers that silently followed a redirect when detectable."""
+
+        geturl = getattr(response, "geturl", None)
+        if not callable(geturl):
+            return True
+        try:
+            return str(geturl()) == request.full_url
+        except Exception:
+            return False
 
     def execute(self, request: RemediationRequest, *, timeout_seconds: float) -> TransportResult:
         payload = json.dumps(
@@ -92,17 +132,19 @@ class HttpRemediationTransport:
             data=payload,
             method="POST",
             headers={
-                "Authorization": f"Bearer {self.bearer_token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "Idempotency-Key": request.operation_id,
                 "User-Agent": "stageguard-remediation/1",
             },
         )
+        _add_sensitive_header(http_request, "Authorization", f"Bearer {self.bearer_token}")
+        _add_sensitive_header(http_request, "Idempotency-Key", request.operation_id)
 
         try:
             with self._open(http_request, timeout_seconds=timeout_seconds) as response:
                 status = int(response.status)
+                if not self._response_matches_request(response, http_request):
+                    return TransportResult(False, status, retryable=False)
                 body = self._read_bounded(response)
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
@@ -131,9 +173,9 @@ class HttpRemediationTransport:
         - request: ``GET <reconciliation_endpoint>/<url-encoded-operation-id>``;
         - response: exactly ``{"operation_id": "...", "state": "accepted|not_found"}``;
         - 404 maps to ``not_found`` only when the endpoint itself was configured;
-        - every timeout, transport failure, auth failure, unexpected status, oversized
-          body, malformed document, wrong operation echo, or unknown state maps to
-          ``unknown``.
+        - every redirect, timeout, transport failure, auth failure, unexpected
+          status, oversized body, malformed document, wrong operation echo, or
+          unknown state maps to ``unknown``.
 
         No provider response body or transport detail escapes this method.
         """
@@ -148,14 +190,16 @@ class HttpRemediationTransport:
             lookup_url,
             method="GET",
             headers={
-                "Authorization": f"Bearer {self.bearer_token}",
                 "Accept": "application/json",
                 "User-Agent": "stageguard-remediation/1",
             },
         )
+        _add_sensitive_header(request, "Authorization", f"Bearer {self.bearer_token}")
         try:
             with self._open(request, timeout_seconds=timeout_seconds) as response:
                 status = int(response.status)
+                if not self._response_matches_request(response, request):
+                    return "unknown"
                 body = self._read_bounded(response)
         except urllib.error.HTTPError as exc:
             return "not_found" if int(exc.code) == 404 else "unknown"
