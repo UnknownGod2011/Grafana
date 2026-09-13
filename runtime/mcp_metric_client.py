@@ -53,6 +53,11 @@ def _tool_payload(result: dict[str, Any]) -> Any:
 
 
 def _coerce_number(value: Any) -> float:
+    # ``bool`` is a subclass of ``int`` in Python, so float(True) == 1.0.
+    # A malformed/custom MCP implementation can therefore turn a JSON boolean
+    # into apparently valid telemetry unless it is rejected before coercion.
+    if isinstance(value, bool):
+        raise McpMetricError("Prometheus sample value is not numeric")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
