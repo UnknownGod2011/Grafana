@@ -9,6 +9,7 @@ queries, or credentials.
 from __future__ import annotations
 
 import json
+import math
 from typing import Mapping, Protocol
 
 from incident_service import AuditEvent
@@ -48,6 +49,8 @@ def _validate_key(key: object) -> str:
 def _validate_scalar(key: str, value: object) -> object:
     if value is not None and not isinstance(value, (str, int, float, bool)):
         raise ValueError(f"unsupported audit payload value: {key}")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"audit payload numeric value must be finite: {key}")
     if isinstance(value, str) and len(value.encode("utf-8")) > 2048:
         raise ValueError(f"audit payload value is too large: {key}")
     return value
@@ -80,7 +83,14 @@ def _validate_payload(payload: Mapping[str, object]) -> dict[str, object]:
 
 def audit_event_document(event: AuditEvent) -> dict[str, object]:
     """Return the bounded structured document written to Cloud Logging."""
-    if event.sequence < 1 or event.timestamp_unix_ms < 0:
+    if (
+        not isinstance(event.sequence, int)
+        or isinstance(event.sequence, bool)
+        or event.sequence < 1
+        or not isinstance(event.timestamp_unix_ms, int)
+        or isinstance(event.timestamp_unix_ms, bool)
+        or event.timestamp_unix_ms < 0
+    ):
         raise ValueError("invalid audit sequence or timestamp")
     if not event.incident_id or len(event.incident_id.encode("utf-8")) > 256:
         raise ValueError("invalid audit incident_id")
@@ -98,7 +108,13 @@ def audit_event_document(event: AuditEvent) -> dict[str, object]:
         "actor": event.actor,
         "payload": _validate_payload(event.payload),
     }
-    encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    encoded = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
     if len(encoded) > MAX_AUDIT_ENTRY_BYTES:
         raise ValueError("audit entry is too large")
     return document
