@@ -10,6 +10,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
+- Gemini context accepts only trusted identifiers, finite normalized numeric evidence, boolean/null hypothesis support, and confidence in the closed probability range [0, 1]; the Vertex adapter serializes context as strict JSON with NaN/Infinity forbidden.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use.
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
@@ -37,7 +38,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini-boundary hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke before a production-ready claim.
 - Recent hardening regressions have repeatedly been blocked from local execution because the automation runner cannot resolve `github.com`; do not infer green status from commits alone.
 
@@ -59,6 +60,14 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Remediation adapter result detail and arbitrary provider metadata are normalized away immediately after dispatch.
 - Built-in production remediation retains only validated adapter identity, deterministic operation ID, bounded attempt count, and valid HTTP transport status.
 
+### Gemini advisory boundary
+
+- `build_commander_context()` now rejects boolean/non-numeric/non-finite metric values before any model call while preserving unavailable metric values as explicit JSON null.
+- Incident confidence must be a real finite number in [0, 1]; booleans, NaN, infinity, and out-of-range values fail closed before Gemini is invoked.
+- Evidence `supports_hypothesis` must be boolean or null rather than arbitrary provider-shaped data.
+- The Vertex AI adapter uses `json.dumps(..., allow_nan=False)` and converts serialization failures into a stable StageGuard-owned `Gemini context is not strict JSON` error.
+- Focused regressions cover non-finite confidence/evidence, out-of-range confidence, boolean numeric confusion, non-boolean support flags, and explicit null preservation.
+
 ### Cloud Run / MCP safety
 
 - Core and Cloud Run remediation execution watchdog policy: 1-600 seconds.
@@ -68,48 +77,49 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Private metrics bridge upstream timeout is capped at 60 seconds; inbound bearer tokens are capped at 4096 characters and oversized presented candidates are rejected before comparison.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image pin regressions.
 
-## Run log — 2026-09-13 — private metrics bridge resource bounds
+## Run log — 2026-09-13 — Gemini strict numeric evidence boundary
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata, the runtime tree, `runtime/cloud_run_metrics_bridge.py`, and the existing `runtime/tests/test_cloud_run_metrics_bridge.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or manually triggered.
+Read this `progress.md` completely before selecting work. Inspected repository metadata/tree, `runtime/gemini_commander.py`, `runtime/investigator.py`, and `runtime/tests/test_gemini_commander.py`. Confirmed the deterministic investigator intentionally emits confidence values in the probability range and `Evidence.value` is modeled as `float | None`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or manually triggered.
 
 ### Finding
 
-The authenticated private metrics bridge correctly rejected non-finite and non-positive upstream timeouts, but it had no upper bound. Any alternate deployment or operator could configure an hours- or days-long timeout. Since `/readyz` and `/metrics` synchronously fetch the authenticated Cloud Run evidence endpoint, an excessive timeout could pin bridge request threads and make evidence-plane failure detection operationally useless during a real incident.
-
-The bridge also validated inbound bearer-token syntax and required at least 32 characters for non-loopback binds, but there was no maximum configured secret size and no explicit oversized presented-candidate rejection before `hmac.compare_digest`.
+The Gemini advisory boundary claimed to expose a bounded structured projection, but `build_commander_context()` copied metric `Evidence.value` directly and converted `report.confidence` with plain `float(...)`. A manually constructed/corrupted report could therefore put NaN or positive/negative infinity into model context. Python `json.dumps()` permits those values by default and emits non-standard `NaN`/`Infinity` tokens, undermining the strict-JSON contract sent to Vertex AI. The same boundary also did not independently require `supports_hypothesis` to be boolean/null or confidence to remain within [0, 1].
 
 ### Exact changes made
 
-1. Added `MAX_TIMEOUT_SECONDS = 60.0` in `runtime/cloud_run_metrics_bridge.py` and made `CloudRunMetricsClient` reject any upstream timeout above 60 seconds in addition to existing boolean/non-numeric/non-finite/non-positive rejection.
-2. Added `MAX_BRIDGE_BEARER_TOKEN_LENGTH = 4096`; configured inbound bridge credentials above this limit now fail configuration before the server starts.
-3. Oversized presented bearer candidates are now rejected before constant-time comparison.
-4. Updated CLI help so the documented network-bind credential range is 32-4096 characters.
-5. Added `runtime/tests/test_cloud_run_metrics_bridge_bounds.py` covering exact timeout/token upper-bound acceptance, excessive timeout/token rejection, and HTTP-level oversized presented-bearer refusal without any upstream evidence fetch.
+1. Added `_finite_number()` in `runtime/gemini_commander.py`; it rejects booleans, non-numeric values, NaN, infinity, and optional range violations while normalizing accepted numbers to `float`.
+2. Metric evidence values now pass through that finite-number boundary; `None` remains explicit unavailable evidence rather than being coerced.
+3. `supports_hypothesis` is now independently required to be `bool | None` before crossing the model boundary.
+4. Incident confidence is now independently constrained to a finite value in the closed interval [0, 1].
+5. `_trusted_identifier()` now explicitly checks string type before applying the identifier regex, preserving a StageGuard-owned validation error for malformed custom reports.
+6. `GoogleGenAICommanderModel.generate()` now pre-serializes context with `allow_nan=False` and raises the stable `Gemini context is not strict JSON` error if a future caller bypasses the normal context builder with non-JSON-safe content.
+7. Extended `runtime/tests/test_gemini_commander.py` with regressions for NaN/+inf/-inf confidence, confidence outside [0, 1], booleans used as numbers, non-finite metric evidence, non-boolean support flags, and null missing-evidence preservation.
 
 Commits:
-- `ca81dffbbf2c6e3a716d8066306c76cf01ea9d88` — Bound private metrics bridge resources
-- `37ad809b68b81d5f4947656423167d8bbd324ab6` — Add private metrics bridge resource-bound regressions
+- `0b36609a6bd326d77d3dfd43ea616ce97f1c4722` — Harden Gemini numeric evidence boundary
+- `079152f906ec8683ff460e459581a18fc882e94a` — Add Gemini numeric-boundary regressions
 
 ### Checks / results
 
-- Authenticated GitHub connector reads/writes succeeded; implementation and regression commits landed on `UnknownGod2011/Grafana` `main`.
-- Re-read both commit diffs through the GitHub connector and verified the intended changes are narrowly scoped to the bridge resource policy and its tests.
-- Attempted a fresh executable checkout with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the runner failed before checkout with `Could not resolve host: github.com`.
-- Therefore `runtime.tests.test_cloud_run_metrics_bridge_bounds` and existing bridge tests did not execute locally in this run, and no new green-test claim is made.
+- Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
+- Re-read the committed `runtime/gemini_commander.py` through the GitHub connector and confirmed the finite-number checks and strict JSON serialization are present.
+- Attempted a fresh executable checkout followed by `PYTHONPATH=runtime python -m unittest runtime.tests.test_gemini_commander runtime.tests.test_gemini_acceptance_smoke -v`; the runner failed before checkout with `Could not resolve host: github.com`.
+- Therefore the new Gemini regressions did not execute locally in this run and no new green-test claim is made.
 - No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. Use a 60-second absolute upstream bound: the bridge default remains 10 seconds, but even an operator override cannot make scrape/readiness calls effectively unbounded.
-2. Use the same 4096-character upper bound already used for StageGuard's non-development static bearer authentication policy, avoiding a second arbitrary credential-size regime.
-3. Reject oversized untrusted bearer candidates before `hmac.compare_digest`; the bridge never needs to compare a candidate that could not equal a valid configured credential.
-4. Preserve loopback development behavior and the existing 32-character minimum specifically for non-loopback binds.
+1. Treat confidence as a probability at the model boundary and enforce [0, 1], matching the deterministic investigator's 0.0/0.95/0.97 semantics rather than allowing arbitrary floating-point magnitudes.
+2. Preserve `None` for unavailable metric evidence, because absence is meaningful and should remain explicit JSON null rather than becoming 0 or another synthetic value.
+3. Reject Python `bool` explicitly even though `bool` is an `int` subclass; `True` must never silently become metric value/confidence 1.0.
+4. Keep strict serialization in the Vertex adapter even after builder validation as defense in depth for direct/custom callers.
 
 ### Blockers / unknowns
 
-- The new metrics-bridge bounds regression and existing bridge suite need a current executable checkout.
+- The new Gemini commander regressions and existing Gemini acceptance smoke need a current executable checkout.
+- The metrics-bridge bounds regression and existing bridge suite need a current executable checkout.
 - The core watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run focused suites still need a current executable checkout.
 - MCP timeout/surface/image-pin regressions still need a current repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -118,4 +128,4 @@ Commits:
 
 ## Single best next step
 
-**As soon as executable checkout works, first run `python -m unittest runtime.tests.test_cloud_run_metrics_bridge_bounds runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_execution_watchdog_bounds runtime.tests.test_cloudrun_entrypoint -v`; fix any regression immediately. Then run the consolidated identity/auth/readiness/remediation/activation/onboarding/Cloud Run suite. If clean, run MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, first run `PYTHONPATH=runtime python -m unittest runtime.tests.test_gemini_commander runtime.tests.test_gemini_acceptance_smoke runtime.tests.test_cloud_run_metrics_bridge_bounds runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_execution_watchdog_bounds runtime.tests.test_cloudrun_entrypoint -v`; fix any regression immediately. Then run the consolidated identity/auth/readiness/remediation/activation/onboarding/Cloud Run suite. If clean, run MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
