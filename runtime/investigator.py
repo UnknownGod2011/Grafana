@@ -9,6 +9,7 @@ supports the configured diagnosis. Callers never submit raw PromQL or LogQL.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from typing import Protocol
 
 from evidence_errors import EvidenceUnavailable
@@ -55,6 +56,23 @@ class IncidentReport:
         return payload
 
 
+def _normalize_metric_value(value: object) -> float | None:
+    """Normalize one adapter sample or fail closed as unavailable evidence.
+
+    The investigator is a security/safety boundary, not merely a consumer of
+    the reference MCP adapter. Alternate integrations must not be able to turn
+    Python booleans, strings, NaN, or infinities into incident authority.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceUnavailable("invalid metric sample")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise EvidenceUnavailable("invalid metric sample")
+    return normalized
+
+
 def _supports(name: str, value: float | None) -> bool | None:
     if value is None:
         return None
@@ -98,16 +116,17 @@ def _evidence_unavailable_report(
 def investigate(client: MetricQueryClient, profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE) -> IncidentReport:
     """Collect six fixed semantic metric evidence slots and return a diagnosis.
 
-    Expected evidence-source transport/protocol failures become a structured
-    abstention naming only the failed semantic slot. Exception text is never
-    copied into the report. Programming/policy errors are deliberately not
-    caught and continue to fail loudly.
+    Expected evidence-source transport/protocol failures and malformed adapter
+    samples become a structured abstention naming only the failed semantic
+    slot. Exception text is never copied into the report. Unexpected
+    programming/policy errors are deliberately not caught and continue to fail
+    loudly.
     """
     queries = investigation_queries(profile)
     values: dict[str, float | None] = {}
     for name, (query, _) in queries.items():
         try:
-            values[name] = client.instant(query)
+            values[name] = _normalize_metric_value(client.instant(query))
         except EvidenceUnavailable:
             values[name] = None
             return _evidence_unavailable_report(profile, queries, values, name)
