@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 from audit_integrity import (
@@ -110,6 +111,40 @@ class AuditIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sequence is not contiguous"):
             chain.append(event(2))
         self.assertEqual(AuditChainCheckpoint(0, GENESIS_SHA256), chain.checkpoint())
+
+    def test_non_finite_payload_numbers_are_not_canonicalizable(self):
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                chain = AuditChain()
+                with self.assertRaisesRegex(ValueError, "not canonically serializable"):
+                    chain.append(event(1, payload={"value": value}))
+                self.assertEqual(
+                    AuditChainCheckpoint(0, GENESIS_SHA256),
+                    chain.checkpoint(),
+                )
+
+    def test_nested_non_finite_payload_numbers_are_not_canonicalizable(self):
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "not canonically serializable"):
+                    extend_audit_chain(
+                        GENESIS_SHA256,
+                        event(1, payload={"evidence": {"sample": value}}),
+                    )
+
+    def test_finite_numeric_payload_remains_canonicalizable(self):
+        checkpoint = AuditChain().append(
+            event(
+                1,
+                payload={
+                    "confidence": 0.875,
+                    "sample_count": 4,
+                    "nested": {"latency_ms": 12.5},
+                },
+            )
+        )
+        self.assertEqual(1, checkpoint.sequence)
+        self.assertNotEqual(GENESIS_SHA256, checkpoint.head_sha256)
 
 
 if __name__ == "__main__":
