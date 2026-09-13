@@ -134,13 +134,14 @@ def _safe_production_metadata(metadata: object, *, expected_operation_id: str) -
 def sanitize_action_result(action: ActionResult, *, expected_operation_id: str) -> ActionResult:
     """Discard provider-controlled detail before it can become lifecycle state.
 
-    ``ActionResult`` is returned by deployment-specific adapters, so both ``detail``
-    and arbitrary metadata are untrusted. Preserve only the acceptance bit and the
-    narrowly validated metadata emitted by StageGuard's built-in production adapter.
-    Operator-visible detail is derived locally and therefore cannot contain provider
-    URLs, credentials, response bodies, or other secret-bearing diagnostics.
+    ``ActionResult`` is returned by deployment-specific adapters, so its fields are
+    untrusted even when the adapter satisfies the static protocol. Only the literal
+    boolean ``True`` authorizes post-action recovery verification; truthy strings,
+    integers, or other malformed values fail closed as rejection. Provider detail is
+    replaced locally, and only narrowly validated StageGuard production metadata can
+    survive into API, audit, or checkpoint state.
     """
-    accepted = bool(action.accepted)
+    accepted = action.accepted is True
     detail = "remediation action accepted" if accepted else "remediation action rejected or failed"
     metadata = _safe_production_metadata(action.metadata, expected_operation_id=expected_operation_id)
     return ActionResult(accepted, detail, metadata)
