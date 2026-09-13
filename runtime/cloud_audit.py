@@ -37,6 +37,20 @@ class StructuredLogger(Protocol):
     def log_struct(self, info: Mapping[str, object], *, severity: str = "NOTICE") -> None: ...
 
 
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+
+
+def _validate_envelope_string(field: str, value: object, *, max_bytes: int) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"invalid audit {field}")
+    if _contains_ascii_control(value):
+        raise ValueError(f"invalid audit {field}")
+    if len(value.encode("utf-8")) > max_bytes:
+        raise ValueError(f"invalid audit {field}")
+    return value
+
+
 def _validate_key(key: object) -> str:
     if not isinstance(key, str) or not key or len(key) > 128:
         raise ValueError("audit payload keys must be bounded strings")
@@ -83,6 +97,8 @@ def _validate_payload(payload: Mapping[str, object]) -> dict[str, object]:
 
 def audit_event_document(event: AuditEvent) -> dict[str, object]:
     """Return the bounded structured document written to Cloud Logging."""
+    if not isinstance(event, AuditEvent):
+        raise ValueError("invalid audit event")
     if (
         not isinstance(event.sequence, int)
         or isinstance(event.sequence, bool)
@@ -92,20 +108,20 @@ def audit_event_document(event: AuditEvent) -> dict[str, object]:
         or event.timestamp_unix_ms < 0
     ):
         raise ValueError("invalid audit sequence or timestamp")
-    if not event.incident_id or len(event.incident_id.encode("utf-8")) > 256:
-        raise ValueError("invalid audit incident_id")
-    if not event.event_type or len(event.event_type.encode("utf-8")) > 128:
-        raise ValueError("invalid audit event_type")
-    if not event.actor or len(event.actor.encode("utf-8")) > 512:
-        raise ValueError("invalid audit actor")
+
+    incident_id = _validate_envelope_string("incident_id", event.incident_id, max_bytes=256)
+    event_type = _validate_envelope_string("event_type", event.event_type, max_bytes=128)
+    actor = _validate_envelope_string("actor", event.actor, max_bytes=512)
+    if not isinstance(event.payload, Mapping):
+        raise ValueError("invalid audit payload")
 
     document: dict[str, object] = {
         "schema": "stageguard.audit.v1",
         "sequence": event.sequence,
         "timestamp_unix_ms": event.timestamp_unix_ms,
-        "incident_id": event.incident_id,
-        "event_type": event.event_type,
-        "actor": event.actor,
+        "incident_id": incident_id,
+        "event_type": event_type,
+        "actor": actor,
         "payload": _validate_payload(event.payload),
     }
     encoded = json.dumps(
