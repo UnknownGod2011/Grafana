@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Filesystem integrity primitives for StageGuard local checkpoint state.
 
-This module is intentionally separate from checkpoint serialization.  It provides
+This module is intentionally separate from checkpoint serialization. It provides
 small descriptor-bound operations that reject symbolic links, hard-link aliases,
 and post-open pathname substitution before local state is trusted.
 """
@@ -48,6 +48,8 @@ def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -
 
     ``O_TRUNC`` is prohibited because truncation could mutate an attacker-selected
     target before post-open validation on platforms that lack ``O_NOFOLLOW``.
+    A genuinely absent path preserves ``FileNotFoundError`` so callers can retain
+    normal empty-store semantics without a check/open race.
     """
     state_path = Path(path)
     if flags & getattr(os, "O_TRUNC", 0):
@@ -61,6 +63,8 @@ def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -
     effective_flags = flags | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(state_path, effective_flags, mode)
+    except FileNotFoundError:
+        raise
     except OSError as exc:
         raise RuntimeError("checkpoint file could not be opened safely") from exc
     try:
