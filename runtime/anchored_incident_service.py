@@ -8,9 +8,12 @@ bootstrap composition.
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import asdict
+from pathlib import Path
 
 from audit_anchor import AuditAnchor, DEFAULT_ANCHOR_INTERVAL, roll_audit_anchor, select_anchored_committed_lineage
-from audit_file_lock import audit_file_lock
+from audit_file_lock import audit_file_lock, open_regular_audit_file
 from audit_integrity import AuditChain, AuditChainCheckpoint
 from incident_checkpoint import CheckpointConflictError, IncidentCheckpoint
 from incident_service import (
@@ -23,15 +26,46 @@ from incident_service import (
 
 
 class AnchoredJsonlAuditLog(JsonlAuditLog):
-    """Lock-coordinated JSONL sink/reader with anchored candidate bounds."""
+    """Lock-coordinated JSONL sink/reader with secure data-file opens."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open_regular_audit_file(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        os.close(fd)
 
     def append(self, event: AuditEvent) -> None:
+        line = json.dumps(asdict(event), sort_keys=True, separators=(",", ":")) + "\n"
         with audit_file_lock(self.path):
-            super().append(event)
+            fd = open_regular_audit_file(self.path, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.write(fd, line.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
-        with audit_file_lock(self.path):
-            return super().read(incident_id=incident_id, after_sequence=after_sequence, limit=limit)
+        if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
+            raise ValueError("after_sequence must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        events: list[AuditEvent] = []
+        try:
+            with audit_file_lock(self.path):
+                fd = open_regular_audit_file(self.path, os.O_RDONLY)
+                with os.fdopen(fd, "r", encoding="utf-8", closefd=True) as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        raw = json.loads(line)
+                        event = AuditEvent(**raw)
+                        if event.incident_id == incident_id and event.sequence > after_sequence:
+                            events.append(event)
+                            if len(events) >= limit:
+                                break
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            raise RuntimeError("local audit log could not be read safely") from exc
+        return events
 
     def read_candidates(
         self,
@@ -55,7 +89,8 @@ class AnchoredJsonlAuditLog(JsonlAuditLog):
         candidates: list[AuditEvent] = []
         try:
             with audit_file_lock(self.path):
-                with self.path.open("r", encoding="utf-8") as handle:
+                fd = open_regular_audit_file(self.path, os.O_RDONLY)
+                with os.fdopen(fd, "r", encoding="utf-8", closefd=True) as handle:
                     for line in handle:
                         if not line.strip():
                             continue
@@ -69,7 +104,7 @@ class AnchoredJsonlAuditLog(JsonlAuditLog):
                         candidates.append(event)
                         if len(candidates) > limit:
                             raise ValueError("audit candidate read exceeded the safe result bound")
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
             raise RuntimeError("local audit candidates could not be read safely") from exc
         return candidates
 
