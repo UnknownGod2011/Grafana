@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from gemini_commander import GeminiCommander, build_commander_context
@@ -154,6 +155,109 @@ class GeminiCommanderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             GeminiCommander(model).brief(unsafe)
         self.assertEqual([], model.contexts)
+
+    def test_non_finite_confidence_is_rejected_before_model_call(self):
+        for confidence in (math.nan, math.inf, -math.inf):
+            with self.subTest(confidence=confidence):
+                base = report()
+                unsafe = IncidentReport(
+                    base.status,
+                    base.production_id,
+                    base.affected_feed,
+                    base.hypothesis,
+                    confidence,
+                    base.summary,
+                    base.missing_evidence,
+                    base.evidence,
+                    base.log_corroboration,
+                )
+                model = FixtureModel(valid_payload())
+                with self.assertRaises(ValueError):
+                    GeminiCommander(model).brief(unsafe)
+                self.assertEqual([], model.contexts)
+
+    def test_confidence_outside_probability_range_is_rejected(self):
+        for confidence in (-0.01, 1.01, True):
+            with self.subTest(confidence=confidence):
+                base = report()
+                unsafe = IncidentReport(
+                    base.status,
+                    base.production_id,
+                    base.affected_feed,
+                    base.hypothesis,
+                    confidence,
+                    base.summary,
+                    base.missing_evidence,
+                    base.evidence,
+                    base.log_corroboration,
+                )
+                with self.assertRaises(ValueError):
+                    build_commander_context(unsafe)
+
+    def test_non_finite_metric_evidence_is_rejected_before_model_call(self):
+        for value in (math.nan, math.inf, -math.inf, True):
+            with self.subTest(value=value):
+                base = report()
+                unsafe_evidence = (
+                    Evidence("symptom", "query", value, "> 1", True),
+                    *base.evidence[1:],
+                )
+                unsafe = IncidentReport(
+                    base.status,
+                    base.production_id,
+                    base.affected_feed,
+                    base.hypothesis,
+                    base.confidence,
+                    base.summary,
+                    base.missing_evidence,
+                    unsafe_evidence,
+                    base.log_corroboration,
+                )
+                model = FixtureModel(valid_payload())
+                with self.assertRaises(ValueError):
+                    GeminiCommander(model).brief(unsafe)
+                self.assertEqual([], model.contexts)
+
+    def test_non_boolean_support_flag_is_rejected(self):
+        base = report()
+        unsafe_evidence = (
+            Evidence("symptom", "query", 4.0, "> 1", "yes"),
+            *base.evidence[1:],
+        )
+        unsafe = IncidentReport(
+            base.status,
+            base.production_id,
+            base.affected_feed,
+            base.hypothesis,
+            base.confidence,
+            base.summary,
+            base.missing_evidence,
+            unsafe_evidence,
+            base.log_corroboration,
+        )
+        with self.assertRaises(ValueError):
+            build_commander_context(unsafe)
+
+    def test_missing_metric_value_remains_explicit_null(self):
+        base = report("abstain")
+        evidence = (
+            Evidence("symptom", "query", None, "> 1", None),
+            *base.evidence[1:],
+        )
+        bounded = IncidentReport(
+            base.status,
+            base.production_id,
+            base.affected_feed,
+            base.hypothesis,
+            base.confidence,
+            base.summary,
+            base.missing_evidence,
+            evidence,
+            base.log_corroboration,
+        )
+        context = build_commander_context(bounded)
+        self.assertIsNone(context["metric_evidence"][0]["value"])
+        self.assertIsNone(context["metric_evidence"][0]["supports_hypothesis"])
 
 
 if __name__ == "__main__":
