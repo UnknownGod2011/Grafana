@@ -17,6 +17,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
 - Provider-controlled remediation detail/arbitrary metadata is discarded before lifecycle/API/audit state; only narrowly validated StageGuard production-operation metadata may survive.
 - Durable checkpoint/audit failures fail closed; once provider dispatch may have occurred, persistence uncertainty blocks replay.
+- Cloud Logging audit documents accept only finite numeric payload values, require true integer sequence/timestamps, and use strict JSON serialization with NaN/Infinity forbidden.
 - Production remediation HTTP requests do not follow redirects; authorization/idempotency authority is non-redirectable and detectable final-URL changes fail closed.
 - Browser/API/onboarding/CLI surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Authentication failures expose only bounded StageGuard-owned messages.
@@ -40,7 +41,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge/Gemini/remediation/MCP/audit hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke before a production-ready claim.
 - Recent hardening regressions remain blocked from repository execution because the automation runner cannot resolve `github.com`; commits are not treated as passing tests.
 
@@ -68,49 +69,51 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Private metrics bridge timeout is capped at 60 seconds and bearer credentials at 4096 characters.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image-pin regressions.
 - Production remediation transport disables automatic redirects, marks `Authorization` and `Idempotency-Key` non-redirectable, and fails closed on detectable final-URL changes.
+- Cloud Logging audit payloads reject NaN/Infinity, audit sequence/timestamps reject bool/float confusion, and audit JSON serialization is strict.
 
-## Run log — 2026-09-13 — Grafana MCP numeric evidence integrity
+## Run log — 2026-09-13 — Cloud Logging audit numeric integrity
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata/tree, `runtime/mcp_metric_client.py`, its focused regression file, and adjacent MCP transport contracts. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected repository metadata/runtime tree, `runtime/cloud_audit.py`, and `runtime/tests/test_cloud_audit.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-`mcp_metric_client._coerce_number()` called `float(value)` directly. In Python, `bool` is a subclass of `int`, so `float(True) == 1.0` and `float(False) == 0.0`. The text MCP path normally receives Prometheus sample strings, but `structuredContent` and malformed/custom MCP implementations can supply native JSON booleans. Those values could therefore masquerade as valid telemetry and influence incident diagnosis/recovery policy instead of failing closed.
+`cloud_audit._validate_scalar()` accepted every Python `float`, including `NaN`, `Infinity`, and `-Infinity`. Python's default `json.dumps()` allows those values and emits non-standard JSON tokens. The audit envelope also relied only on numeric comparisons for sequence/timestamp, so Python booleans could satisfy integer-shaped checks and floats such as `7.0` could pass some semantics even though lifecycle audit ordering/time fields are intended to be exact integers.
 
 ### Exact changes made
 
-1. Hardened `_coerce_number()` to explicitly reject Python/JSON booleans before numeric coercion.
-2. Preserved valid Prometheus numeric strings and finite numeric values, plus the existing NaN/Infinity rejection.
-3. Added focused regressions for `true`/`false` scalar samples, vector samples, and `structuredContent` samples so neither boolean can become `0.0` or `1.0` evidence.
+1. Added finite-number validation for every top-level and one-level nested audit payload scalar.
+2. Tightened audit envelope validation so `sequence` and `timestamp_unix_ms` must be genuine non-boolean integers with the existing positive/non-negative constraints.
+3. Switched the size-check serialization path to `json.dumps(..., allow_nan=False)` as a second fail-closed defense against future validation regressions.
+4. Added focused regressions for NaN/±Infinity at both supported payload depths, boolean/float sequence and timestamp confusion, and valid finite numeric payloads.
 
 Commits:
-- `9bab9193e96e74d2c395aeb883fd932c4f0081d2` — Reject boolean Grafana MCP metric samples
-- `7153b61644b25bdf5e0bcc92f48cb9cc079fc268` — Add boolean metric sample regressions
+- `dcc821426454f4ad985cdac1ca268eaec51ea61a` — Harden Cloud Logging audit numeric integrity
+- `98bef0070d7f3f0a5e8bd46f6f51fd101ebe5929` — Add Cloud audit numeric boundary regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Attempted a fresh checkout followed by `PYTHONPATH=runtime python -m unittest runtime.tests.test_mcp_metric_client -v`.
+- Attempted a fresh checkout followed by `PYTHONPATH=runtime python -m unittest runtime.tests.test_cloud_audit -v`.
 - Checkout failed before tests with `Could not resolve host: github.com`.
-- Therefore the committed MCP metric regression suite did not execute from the repository in this run and no new green-suite claim is made.
+- Therefore the committed Cloud audit regression suite did not execute from the repository in this run and no new green-suite claim is made.
 - No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. Boolean samples are malformed evidence, not numeric telemetry, regardless of Python's numeric type hierarchy.
-2. Reject at the Grafana MCP adapter boundary so downstream investigator, activation, Gemini, approval, and recovery logic receive a stronger numeric contract.
-3. Continue accepting standard Prometheus string-encoded numeric samples and finite native numbers for compatibility with both text and structured MCP responses.
+1. Audit records are a durable authority boundary; malformed non-finite values must be rejected rather than normalized or logged.
+2. Audit ordering and timestamps are integer contracts, not generic numeric contracts; Python bool/float coercion is rejected explicitly.
+3. Keep strict serialization in addition to field validation so future payload-schema expansion cannot silently reintroduce NaN/Infinity.
 
 ### Blockers / unknowns
 
-- The new `test_mcp_metric_client` regressions and adjacent MCP suites need a current executable checkout.
-- Recent Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
+- The new `test_cloud_audit` regressions need a current executable checkout.
+- Recent MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, run `PYTHONPATH=runtime python -m unittest runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v` and fix any failure immediately. If clean, run the consolidated recent hardening suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
