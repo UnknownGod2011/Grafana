@@ -6,12 +6,12 @@ import hashlib
 import hmac
 import json
 import os
-import shutil
 import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from audit_file_lock import assert_open_regular_file_identity, audit_file_lock, open_regular_audit_file
 from incident_checkpoint import IncidentCheckpoint, checkpoint_document, parse_checkpoint_document
 from incident_service import AuditEvent
 from retention_planner import MAX_SCAN_BYTES, MAX_SCAN_RECORDS, plan_jsonl_retention
@@ -105,11 +105,10 @@ def parse_signed_plan_document(document: dict, *, signing_key: bytes) -> LocalRe
 
 
 def _hash_file(path: Path, *, max_bytes: int = MAX_SCAN_BYTES) -> tuple[str, int]:
-    if path.is_symlink():
-        raise ValueError("audit path must not be a symlink")
     digest = hashlib.sha256()
     total = 0
-    with path.open("rb") as handle:
+    fd = open_regular_audit_file(path, os.O_RDONLY)
+    with os.fdopen(fd, "rb", closefd=True) as handle:
         while True:
             chunk = handle.read(1024 * 1024)
             if not chunk:
@@ -177,9 +176,6 @@ def prepare_local_retention_plan(
 
 
 def _fsync_directory(path: Path) -> None:
-    # Directory descriptors are not openable with the required semantics on
-    # Windows. File fsyncs and atomic os.replace still provide the portable
-    # durability boundary available to the local demo.
     if os.name == "nt":
         return
     fd = os.open(path, os.O_RDONLY)
@@ -199,8 +195,6 @@ def execute_local_retention(
     """Execute one exact signed plan after fresh checkpoint and file revalidation."""
     plan = parse_signed_plan_document(plan_document, signing_key=signing_key)
     path = Path(plan.audit_path)
-    if path.is_symlink():
-        raise ValueError("audit path must not be a symlink")
     if _checkpoint_state_sha256(checkpoint) != plan.checkpoint_state_sha256:
         raise RuntimeError("checkpoint changed after retention plan was prepared")
     if checkpoint.incident_id != plan.incident_id:
@@ -209,10 +203,6 @@ def execute_local_retention(
         raise RuntimeError("authenticated retention boundary changed")
     if checkpoint.audit_anchor_head_sha256 != plan.anchor_head_sha256:
         raise RuntimeError("authenticated retention anchor changed")
-
-    current_sha256, current_bytes = _hash_file(path)
-    if current_sha256 != plan.audit_file_sha256 or current_bytes != plan.audit_file_bytes:
-        raise RuntimeError("audit file changed after retention plan was prepared")
 
     parent = path.parent
     if backup_path is None:
@@ -223,81 +213,97 @@ def execute_local_retention(
         raise ValueError("backup path must differ from audit path")
     if backup.parent.resolve() != parent.resolve():
         raise ValueError("backup must be created beside the audit file")
-    if backup.exists():
+    if backup.exists() or backup.is_symlink():
         raise FileExistsError("retention backup path already exists")
-    if backup.is_symlink():
-        raise ValueError("retention backup path must not be a symlink")
 
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.retention-", dir=parent)
-    removed_records = 0
-    removed_bytes = 0
-    retained_records = 0
-    retained_bytes = 0
-    try:
-        # os.fchmod is POSIX-only. Do not leave the temporary descriptor open
-        # on Windows when applying the same owner-only intent.
-        if hasattr(os, "fchmod"):
-            os.fchmod(fd, 0o600)
-        source_digest = hashlib.sha256()
-        source_bytes = 0
-        with path.open("rb") as source, os.fdopen(fd, "wb", closefd=True) as output:
-            for raw_line in source:
-                source_digest.update(raw_line)
-                source_bytes += len(raw_line)
-                if not raw_line.strip():
-                    output.write(raw_line)
-                    retained_bytes += len(raw_line)
-                    continue
+    with audit_file_lock(path):
+        current_sha256, current_bytes = _hash_file(path)
+        if current_sha256 != plan.audit_file_sha256 or current_bytes != plan.audit_file_bytes:
+            raise RuntimeError("audit file changed after retention plan was prepared")
+
+        source_fd = open_regular_audit_file(path, os.O_RDONLY)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.retention-", dir=parent)
+        removed_records = 0
+        removed_bytes = 0
+        retained_records = 0
+        retained_bytes = 0
+        backup_created = False
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            source_digest = hashlib.sha256()
+            source_bytes = 0
+            with os.fdopen(source_fd, "rb", closefd=True) as source, os.fdopen(fd, "wb", closefd=True) as output:
+                for raw_line in source:
+                    source_digest.update(raw_line)
+                    source_bytes += len(raw_line)
+                    if not raw_line.strip():
+                        output.write(raw_line)
+                        retained_bytes += len(raw_line)
+                        continue
+                    try:
+                        event = AuditEvent(**json.loads(raw_line.decode("utf-8")))
+                    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                        raise RuntimeError("audit file became invalid during retention execution") from exc
+                    should_remove = (
+                        event.incident_id == plan.incident_id
+                        and 1 <= event.sequence <= plan.eligible_through_sequence
+                    )
+                    if should_remove:
+                        removed_records += 1
+                        removed_bytes += len(raw_line)
+                    else:
+                        output.write(raw_line)
+                        retained_records += 1
+                        retained_bytes += len(raw_line)
+                output.flush()
+                os.fsync(output.fileno())
+
+                if source_bytes != plan.audit_file_bytes or source_digest.hexdigest() != plan.audit_file_sha256:
+                    raise RuntimeError("audit file changed during retention execution")
+                if removed_records != plan.eligible_records or removed_bytes != plan.eligible_bytes:
+                    raise RuntimeError("retention candidate set drifted from signed plan")
+
+                assert_open_regular_file_identity(source.fileno(), path)
+                source.seek(0)
+                backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                backup_created = True
                 try:
-                    event = AuditEvent(**json.loads(raw_line.decode("utf-8")))
-                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-                    raise RuntimeError("audit file became invalid during retention execution") from exc
-                should_remove = (
-                    event.incident_id == plan.incident_id
-                    and 1 <= event.sequence <= plan.eligible_through_sequence
-                )
-                if should_remove:
-                    removed_records += 1
-                    removed_bytes += len(raw_line)
-                else:
-                    output.write(raw_line)
-                    retained_records += 1
-                    retained_bytes += len(raw_line)
-            output.flush()
-            os.fsync(output.fileno())
+                    with os.fdopen(backup_fd, "wb", closefd=True) as backup_handle:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            backup_handle.write(chunk)
+                        backup_handle.flush()
+                        os.fsync(backup_handle.fileno())
+                except Exception:
+                    if backup_created and backup.exists():
+                        backup.unlink()
+                    raise
 
-        if not hasattr(os, "fchmod"):
-            os.chmod(tmp_name, 0o600)
+                _fsync_directory(parent)
+                assert_open_regular_file_identity(source.fileno(), path)
+                os.replace(tmp_name, path)
 
-        if source_bytes != plan.audit_file_bytes or source_digest.hexdigest() != plan.audit_file_sha256:
-            raise RuntimeError("audit file changed during retention execution")
-        if removed_records != plan.eligible_records or removed_bytes != plan.eligible_bytes:
-            raise RuntimeError("retention candidate set drifted from signed plan")
-
-        shutil.copyfile(path, backup)
-        os.chmod(backup, 0o600)
-        # Windows rejects fsync on a read-only descriptor; reopening read/write
-        # preserves the durability barrier without changing the backup bytes.
-        with backup.open("r+b") as backup_handle:
-            os.fsync(backup_handle.fileno())
-        _fsync_directory(parent)
-
-        os.replace(tmp_name, path)
-        os.chmod(path, 0o600)
-        _fsync_directory(parent)
-        output_sha256, _ = _hash_file(path)
-        return RetentionExecutionResult(
-            removed_records=removed_records,
-            removed_bytes=removed_bytes,
-            retained_records=retained_records,
-            retained_bytes=retained_bytes,
-            backup_path=str(backup),
-            output_sha256=output_sha256,
-        )
-    except Exception:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-        raise
+            if not hasattr(os, "fchmod"):
+                os.chmod(path, 0o600)
+            else:
+                os.chmod(path, 0o600)
+            _fsync_directory(parent)
+            output_sha256, _ = _hash_file(path)
+            return RetentionExecutionResult(
+                removed_records=removed_records,
+                removed_bytes=removed_bytes,
+                retained_records=retained_records,
+                retained_bytes=retained_bytes,
+                backup_path=str(backup),
+                output_sha256=output_sha256,
+            )
+        except Exception:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+            raise
 
 
 def _load_signed_checkpoint_file(path: Path, signing_key: bytes) -> IncidentCheckpoint:
@@ -313,9 +319,7 @@ def _load_signed_checkpoint_file(path: Path, signing_key: bytes) -> IncidentChec
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Prepare or execute explicit local StageGuard audit retention."
-    )
+    parser = argparse.ArgumentParser(description="Prepare or execute explicit local StageGuard audit retention.")
     parser.add_argument("--signing-key-env", default="STAGEGUARD_CHECKPOINT_HMAC_KEY")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -323,12 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--checkpoint", required=True, type=Path)
     prepare.add_argument("--audit-jsonl", required=True, type=Path)
     prepare.add_argument("--plan-out", required=True, type=Path)
-    prepare.add_argument(
-        "--audit-integrity-state",
-        required=True,
-        choices=("verified",),
-        help="must be copied from a freshly verified StageGuard runtime status",
-    )
+    prepare.add_argument("--audit-integrity-state", required=True, choices=("verified",))
 
     execute = subparsers.add_parser("execute", help="execute one exact signed retention plan")
     execute.add_argument("--checkpoint", required=True, type=Path)
@@ -361,12 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     document = json.loads(args.plan.read_text(encoding="utf-8"))
-    result = execute_local_retention(
-        document,
-        checkpoint,
-        signing_key=signing_key,
-        backup_path=args.backup,
-    )
+    result = execute_local_retention(document, checkpoint, signing_key=signing_key, backup_path=args.backup)
     print(json.dumps({"status": "executed", **asdict(result)}, sort_keys=True))
     return 0
 
