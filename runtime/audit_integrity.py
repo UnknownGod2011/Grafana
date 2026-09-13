@@ -20,6 +20,9 @@ from incident_service import AuditEvent
 GENESIS_SHA256 = "0" * 64
 _MAX_LINEAGE_CANDIDATES_PER_SEQUENCE = 32
 _MAX_LINEAGE_STATES = 128
+_MAX_INCIDENT_ID_BYTES = 256
+_MAX_EVENT_TYPE_BYTES = 128
+_MAX_ACTOR_BYTES = 512
 
 
 class AuditSink(Protocol):
@@ -36,18 +39,38 @@ def _valid_digest(value: object) -> bool:
     return value == value.lower()
 
 
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+
+
+def _validate_envelope_string(field: str, value: object, *, max_bytes: int) -> str:
+    """Apply the same identifier contract used by the durable Cloud audit sink.
+
+    The hash chain must never authenticate an event that the durable sink would
+    reject merely because of malformed lifecycle envelope identifiers. Limits are
+    measured in UTF-8 bytes so the integrity and persistence boundaries agree for
+    multibyte operator identities and incident identifiers.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"invalid audit {field}")
+    if _contains_ascii_control(value):
+        raise ValueError(f"invalid audit {field}")
+    if len(value.encode("utf-8")) > max_bytes:
+        raise ValueError(f"invalid audit {field}")
+    return value
+
+
 def canonical_audit_event(event: AuditEvent) -> bytes:
     """Return a stable UTF-8 representation suitable for integrity hashing."""
+    if not isinstance(event, AuditEvent):
+        raise ValueError("invalid audit event")
     if not isinstance(event.sequence, int) or isinstance(event.sequence, bool) or event.sequence < 1:
         raise ValueError("audit sequence must be a positive integer")
     if not isinstance(event.timestamp_unix_ms, int) or isinstance(event.timestamp_unix_ms, bool) or event.timestamp_unix_ms < 0:
         raise ValueError("audit timestamp must be a non-negative integer")
-    if not isinstance(event.incident_id, str) or not event.incident_id:
-        raise ValueError("audit incident_id must be a non-empty string")
-    if not isinstance(event.event_type, str) or not event.event_type:
-        raise ValueError("audit event_type must be a non-empty string")
-    if not isinstance(event.actor, str) or not event.actor:
-        raise ValueError("audit actor must be a non-empty string")
+    _validate_envelope_string("incident_id", event.incident_id, max_bytes=_MAX_INCIDENT_ID_BYTES)
+    _validate_envelope_string("event_type", event.event_type, max_bytes=_MAX_EVENT_TYPE_BYTES)
+    _validate_envelope_string("actor", event.actor, max_bytes=_MAX_ACTOR_BYTES)
     if not isinstance(event.payload, dict):
         raise ValueError("audit payload must be a dictionary")
     try:
