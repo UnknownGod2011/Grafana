@@ -34,10 +34,33 @@ def lock_path_for(audit_path: str | Path) -> Path:
 
 def _same_file_identity(fd_stat: os.stat_result, path_stat: os.stat_result) -> bool:
     """Return whether an opened descriptor still names the visible filesystem object."""
-    # CPython exposes stable device/inode identifiers on the supported POSIX and
-    # Windows filesystems used by StageGuard. Comparing both closes the common
-    # check/open path-substitution gap when O_NOFOLLOW is unavailable.
     return (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+
+
+def assert_open_regular_file_identity(fd: int, path: str | Path) -> os.stat_result:
+    """Fail closed unless ``fd`` is the same regular file still visible at ``path``.
+
+    Retention keeps an audit descriptor open across inventory, backup, and rewrite.
+    Rechecking immediately before pathname mutation prevents a substituted path from
+    becoming the target of the final ``os.replace`` even if the original descriptor
+    itself remains valid.
+    """
+    audit_path = Path(path)
+    try:
+        fd_stat = os.fstat(fd)
+    except OSError as exc:
+        raise RuntimeError("audit data file descriptor could not be inspected safely") from exc
+    if not stat.S_ISREG(fd_stat.st_mode):
+        raise RuntimeError("audit data file must be a regular file")
+    try:
+        path_stat = os.lstat(audit_path)
+    except OSError as exc:
+        raise RuntimeError("audit data file path changed while in use") from exc
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise RuntimeError("audit data file must not be a symbolic link")
+    if not stat.S_ISREG(path_stat.st_mode) or not _same_file_identity(fd_stat, path_stat):
+        raise RuntimeError("audit data file path changed while in use")
+    return fd_stat
 
 
 def open_regular_audit_file(path: str | Path, flags: int, mode: int = 0o600) -> int:
@@ -68,17 +91,7 @@ def open_regular_audit_file(path: str | Path, flags: int, mode: int = 0o600) -> 
         raise RuntimeError("audit data file could not be opened safely") from exc
 
     try:
-        fd_stat = os.fstat(fd)
-        if not stat.S_ISREG(fd_stat.st_mode):
-            raise RuntimeError("audit data file must be a regular file")
-        try:
-            path_stat = os.lstat(audit_path)
-        except OSError as exc:
-            raise RuntimeError("audit data file path changed while opening") from exc
-        if stat.S_ISLNK(path_stat.st_mode):
-            raise RuntimeError("audit data file must not be a symbolic link")
-        if not stat.S_ISREG(path_stat.st_mode) or not _same_file_identity(fd_stat, path_stat):
-            raise RuntimeError("audit data file path changed while opening")
+        assert_open_regular_file_identity(fd, audit_path)
         try:
             os.fchmod(fd, 0o600)
         except AttributeError:
@@ -90,15 +103,7 @@ def open_regular_audit_file(path: str | Path, flags: int, mode: int = 0o600) -> 
 
 
 def _open_lock_sidecar(sidecar: Path) -> int:
-    """Open one owner-only regular lock file without accepting path substitution.
-
-    The lock filename is derived from an operator-provided local audit path. A
-    pre-created symlink must therefore never redirect StageGuard's chmod/write or
-    locking operations onto an unrelated file. POSIX ``O_NOFOLLOW`` closes the
-    open-time symlink race where available. The post-open ``lstat`` identity check
-    additionally verifies that the descriptor is the same regular file still
-    visible at the sidecar path, including on platforms without ``O_NOFOLLOW``.
-    """
+    """Open one owner-only regular lock file without accepting path substitution."""
     try:
         if sidecar.is_symlink():
             raise RuntimeError("audit lock sidecar must not be a symbolic link")
@@ -129,8 +134,6 @@ def _open_lock_sidecar(sidecar: Path) -> int:
         try:
             os.fchmod(fd, 0o600)
         except AttributeError:
-            # os.fchmod is unavailable on some Windows Python builds; the file is
-            # still created with the restrictive mode above where supported.
             pass
         return fd
     except Exception:
@@ -141,9 +144,6 @@ def _open_lock_sidecar(sidecar: Path) -> int:
 def _lock_fd(fd: int) -> None:
     if os.name == "nt":
         import msvcrt
-
-        # msvcrt.locking locks bytes from the current file position. Ensure the
-        # lock file always contains one byte and lock that byte exclusively.
         if os.fstat(fd).st_size == 0:
             os.write(fd, b"0")
             os.fsync(fd)
@@ -152,31 +152,23 @@ def _lock_fd(fd: int) -> None:
         return
 
     import fcntl
-
     fcntl.flock(fd, fcntl.LOCK_EX)
 
 
 def _unlock_fd(fd: int) -> None:
     if os.name == "nt":
         import msvcrt
-
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         return
 
     import fcntl
-
     fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 @contextmanager
 def audit_file_lock(audit_path: str | Path) -> Iterator[None]:
-    """Hold an exclusive cooperative lock for one local audit file.
-
-    All StageGuard local writers/readers that participate in retention use this
-    same sidecar lock. The in-process RLock also serializes threads because POSIX
-    flock semantics alone are not a substitute for thread coordination.
-    """
+    """Hold an exclusive cooperative lock for one local audit file."""
     path = Path(audit_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     sidecar = lock_path_for(path)
