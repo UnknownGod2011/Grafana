@@ -17,6 +17,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Durable checkpoint/audit failures fail closed; once provider dispatch may have occurred, persistence uncertainty blocks replay.
 - Browser/API/onboarding/CLI surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Authentication failures expose only bounded StageGuard-owned messages.
+- Every `OperatorIdentity` now enforces bounded string subject/provider fields and rejects ASCII control characters before identity data can cross API, audit, metrics, or logging boundaries.
 - Non-development static bearer credentials must be 32-4096 UTF-8 bytes and use the RFC 6750 b64token character vocabulary; oversized request credentials are rejected before secret comparison.
 - Expected evidence transport/protocol/datasource failures cross runtime boundaries as `EvidenceUnavailable`; unexpected programming/policy failures fail loudly internally and are redacted at process boundaries.
 - Metric activation v2 pins the exact profile-derived ordered eight-query contract and normalized observed samples.
@@ -52,7 +53,8 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 
 - Preflight CLI failures return stable redacted failure envelopes.
 - Unknown/custom identity-provider authentication detail collapses to `authentication required`.
-- Static bearer identity now refuses short, oversized, whitespace/control/malformed credentials at configuration time and bounds oversized untrusted bearer candidates before comparison.
+- `OperatorIdentity` trims configured values, requires real strings, caps subject/provider sizes, and rejects CR/LF/NUL/TAB/ESC/DEL and other ASCII controls.
+- Static bearer identity refuses short, oversized, whitespace/control/malformed credentials at configuration time and bounds oversized untrusted bearer candidates before comparison.
 - Remediation adapter result detail and arbitrary provider metadata are normalized away immediately after dispatch.
 - Built-in production remediation retains only validated adapter identity, deterministic operation ID, bounded attempt count, and valid HTTP transport status.
 
@@ -64,49 +66,48 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Private metrics acceptance job identity is selector-safe and bounded before any Cloud Run/Docker action.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image pin regressions.
 
-## Run log — 2026-09-13 — static bearer credential policy
+## Run log — 2026-09-13 — operator identity field integrity
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected `ARCHITECTURE.md`, the runtime tree, `runtime/api.py`, `runtime/identity.py`, `runtime/bootstrap.py`, `runtime/tests/test_identity.py`, and the current `runtime/README.md`. A fresh local checkout was attempted before implementation but the runner again failed DNS resolution for `github.com`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or manually triggered.
+Read this `progress.md` completely before selecting work. Inspected the runtime tree, `runtime/bootstrap.py`, `runtime/identity.py`, and `runtime/tests/test_identity.py`. Also attempted a fresh executable checkout before implementation. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or manually triggered.
 
 ### Finding
 
-`StaticBearerIdentityProvider` is explicitly non-development and can protect StageGuard on a non-loopback interface, but its configuration accepted any non-empty token, including one-character passwords, boundary whitespace/control characters, and arbitrarily large values. It also accepted arbitrarily large untrusted bearer candidates before entering the comparison loop. That credential policy was weaker than the already-hardened private metrics bridge and inappropriate for a production-capable API authentication boundary.
+The static bearer token itself had already been hardened, but the common `OperatorIdentity` object only trimmed and byte-bounded the subject. It still allowed embedded ASCII control characters such as CR/LF, NUL, TAB, or ESC in authenticated subject strings, and its provider field had no size bound. Since identity data is reused for operator attribution across API, audit, metrics, and logging surfaces, a custom provider or malformed verified claim could create ambiguous/log-injection-shaped attribution even though authentication itself succeeded.
 
 ### Exact changes made
 
-1. Added explicit static bearer token bounds: minimum 32 UTF-8 bytes, maximum 4096 UTF-8 bytes.
-2. Restricted configured tokens to the RFC 6750 b64token character vocabulary, rejecting whitespace, control characters, query-like punctuation, and malformed padding placement.
-3. Preserved constant-time `hmac.compare_digest` matching for valid-size candidates.
-4. Reject oversized untrusted bearer candidates before iterating configured credentials.
-5. Kept loopback `LocalDevelopmentIdentityProvider` unchanged so local/free development does not require a production token.
-6. Expanded `runtime/tests/test_identity.py` with minimum-boundary acceptance and regressions for short, oversized, whitespace/control-containing, malformed, and oversized-request credentials.
-7. Updated the pre-existing static bearer success/rejection tests to use a production-valid test credential.
+1. Added `MAX_IDENTITY_PROVIDER_BYTES = 128` alongside the existing 512-byte subject cap.
+2. Added common identity-field validation rejecting ASCII control characters (`0x00-0x1f` and `0x7f`) after normalization.
+3. Required both `OperatorIdentity.subject` and `.provider` to actually be strings instead of relying on `.strip()` failure behavior.
+4. Preserved benign outer-whitespace normalization while rejecting embedded control characters.
+5. Because all built-in providers construct `OperatorIdentity`, the boundary now protects local, static bearer, Google IAP, and custom-provider identities uniformly.
+6. Expanded `runtime/tests/test_identity.py` with regressions for blank/non-string fields, oversize subject/provider values, CR/LF/NUL/ESC controls, exact limit acceptance, and a Google IAP `sub` containing a newline.
 
 Commits:
-- `1789e27d5f3908c9224711531bc04d0e42421fbb` — Harden static bearer credential policy
-- `ea8b1baf89a802ea7a35d7005d5be24ffeda50f6` — Add static bearer credential policy regressions
+- `cb5202449beb5f732d4215d5d998b6ce01b9b7ba` — Harden operator identity field boundaries
+- `ecc0402b2e3443258a51982c11257ed67dae83e8` — Add operator identity field boundary regressions
 
 ### Checks / results
 
-- Authenticated GitHub connector reads and writes succeeded; implementation and regression commits landed on `UnknownGod2011/Grafana` `main`.
-- Before implementation, attempted `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the execution runner failed with `Could not resolve host: github.com`.
-- Re-read the committed `runtime/identity.py` through the GitHub connector to verify the new constants, validator, and candidate-size guard are present.
+- Authenticated GitHub connector reads and writes succeeded; both commits landed on `UnknownGod2011/Grafana` `main`.
+- Re-read the committed `runtime/identity.py` through the GitHub connector and verified the new provider cap, type checks, control-character validator, and normalized storage are present.
+- Attempted `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git /tmp/stageguard-grafana`; the execution runner again failed with `Could not resolve host: github.com` before tests could run.
 - No GitHub Actions workflow was triggered merely to bypass the transient environment failure.
-- Therefore `runtime.tests.test_identity` and the broader focused suite are **not yet claimed green**.
+- Therefore the updated `runtime.tests.test_identity` and broader focused suite are **not yet claimed green**.
 
 ### Decisions
 
-1. Treat static bearer mode as production-capable authentication, not a convenience password mode; require at least 256 bits worth of token storage capacity when generated randomly.
-2. Keep local development frictionless through the existing loopback-only identity provider rather than weakening external bearer requirements.
-3. Bound request-side bearer candidate size before secret comparison to keep authentication work predictable under malformed traffic.
-4. Do not add third-party authentication dependencies for this path; IAP remains the preferred Google-managed production identity option where available.
+1. Put the invariant on `OperatorIdentity`, not separately on each provider, so future identity adapters cannot accidentally bypass it.
+2. Reject ASCII controls rather than over-restricting valid identity syntax; IAP subjects and organization-defined static subjects can retain ordinary Unicode/punctuation while remaining safe for structured attribution.
+3. Bound provider identifiers independently because custom provider implementations are process extensions and should not be able to inject unbounded attribution metadata.
+4. Keep outer-whitespace normalization for backward compatibility with process-configured subjects.
 
 ### Blockers / unknowns
 
 - `runtime.tests.test_identity` needs a current executable checkout.
-- The readiness/remediation/auth/activation/onboarding/Cloud Run focused suites still need a current executable checkout.
+- The identity/auth/readiness/remediation/activation/onboarding/Cloud Run focused suites still need a current executable checkout.
 - MCP timeout/surface/image-pin regressions still need a current repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
