@@ -35,6 +35,14 @@ class SecretBearingRemediation:
         )
 
 
+class MalformedAcceptanceRemediation:
+    def __init__(self, accepted):
+        self.accepted = accepted
+
+    def recover_uplink(self, _production_id, _uplink):
+        return ActionResult(self.accepted, "provider-controlled detail")
+
+
 class ProductionMetadataRemediation:
     def recover_uplink_idempotent(self, _production_id, _uplink, operation_id):
         return ActionResult(
@@ -108,6 +116,22 @@ class RemediationResultBoundaryTests(unittest.TestCase):
         self.assertEqual("remediation action rejected or failed", outcome.action_result.detail)
         self.assertEqual({}, outcome.action_result.metadata)
         self.assertNotIn(SECRET, json.dumps(outcome.to_dict(), sort_keys=True))
+
+    def test_truthy_non_boolean_acceptance_flags_fail_closed(self):
+        for malformed in (1, "true", "accepted", [True], {"accepted": True}):
+            with self.subTest(value=repr(malformed)):
+                outcome = remediate_and_verify(
+                    diagnosed_report(),
+                    approval(),
+                    MalformedAcceptanceRemediation(malformed),
+                    SequenceMetrics([]),
+                    sleep=lambda _: None,
+                )
+                self.assertEqual("action_failed", outcome.status)
+                self.assertIsNotNone(outcome.action_result)
+                self.assertIs(outcome.action_result.accepted, False)
+                self.assertEqual("remediation action rejected or failed", outcome.action_result.detail)
+                self.assertEqual((), outcome.samples)
 
     def test_stageguard_production_operation_metadata_survives_without_extra_provider_fields(self):
         outcome = remediate_and_verify(
