@@ -23,7 +23,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Private Cloud Run metric requests reject redirects; the metrics bridge requires explicit non-loopback opt-in/authentication and bounded upstream waits.
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; read-only/tool-surface restrictions are regression-locked.
 - Core remediation watchdog clocks are finite native numbers; invalid/backward active clocks fail readiness closed.
-- Local cooperative audit-lock sidecars must be owner-only regular files, may not be symbolic links, and the opened descriptor must match the exact file identity still visible at the sidecar path.
+- Local cooperative audit-lock sidecars must be owner-only, single-link regular files, may not be symbolic links, and the opened descriptor must match the exact file identity still visible at the sidecar path.
 - Secure local audit data descriptors must name a single-link regular file that still matches the visible pathname; symbolic links, hard-link aliases, and path substitution fail closed.
 - Anchored local JSONL audit reads/appends and local retention planning/execution use the shared secure descriptor primitive.
 - Retention revalidates descriptor/path identity immediately before destructive pathname replacement and builds its recovery backup from the already-open authenticated source descriptor.
@@ -35,55 +35,53 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
-- Recent hardening regressions remain blocked from repository execution because this automation runner cannot resolve `github.com`; connector reads/writes work, but commits are not treated as passing tests.
+- Recent hardening regressions remain blocked from full repository execution because this automation runner cannot resolve `github.com`; connector reads/writes work, but commits are not treated as passing repository tests.
 
-## Run log — 2026-09-14 — Audit hard-link alias hardening
+## Run log — 2026-09-14 — Audit lock sidecar hard-link hardening
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected `runtime/incident_service.py`, `runtime/audit_file_lock.py`, `runtime/anchored_incident_service.py`, the runtime tree, and current audit security tests. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected `runtime/incident_service.py`, `runtime/audit_file_lock.py`, `runtime/bootstrap.py`, the runtime test tree, and the current Git tree. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The shared secure audit opener rejected symbolic links, non-regular files, and descriptor/path identity changes, but it still accepted an existing regular file with more than one hard link. A malicious or accidental hard-link alias can expose the same inode through another pathname, so StageGuard could append audit bytes or apply `0600` permissions to a file reachable outside the intended audit path while `(st_dev, st_ino)` identity validation still succeeds. Retention would inherit the same aliasing risk because it deliberately operates on the authenticated inode.
+The shared secure audit data-file primitive already rejected multiple hard links, but the cooperative lock sidecar did not. A pre-existing hard-linked sidecar could therefore point at another regular file. `_open_lock_sidecar()` would accept the inode and then apply owner-only permissions with `fchmod`, mutating the peer file even though it was outside StageGuard's intended lock namespace. Because every anchored/retention/local audit operation acquires this sidecar, the gap belonged in the shared primitive rather than in one caller.
 
-The planned legacy `JsonlAuditLog` migration remains valid, but closing this shared primitive gap first protects every already-migrated anchored/retention caller and prevents propagating the weakness into the legacy migration.
+The planned base `JsonlAuditLog` migration remains the main local-demo gap. Closing the shared sidecar invariant first ensures every current and future caller inherits the same single-link ownership boundary.
 
 ### Exact changes made
 
-1. Hardened `assert_open_regular_file_identity()` in `runtime/audit_file_lock.py` to require `st_nlink == 1` on the opened descriptor.
-2. Added the same single-link requirement to the visible path recheck, so a second hard link created after open invalidates a long-lived descriptor before later mutation.
-3. Kept symlink, regular-file, exact `(st_dev, st_ino)` identity, owner-only mode, `O_NOFOLLOW`, and no-`O_TRUNC` protections intact.
-4. Documented why hard-link aliases are incompatible with StageGuard's local audit ownership boundary.
-5. Added `runtime/tests/test_audit_file_hardlink_security.py` with regressions for:
-   - rejecting a hard-linked audit pathname without modifying the peer pathname's bytes;
-   - rejecting an already-open descriptor after a second hard link appears;
-   - preserving normal single-link create/write behavior.
-6. Tests skip cleanly only where the host filesystem cannot create hard links.
+1. Hardened `_open_lock_sidecar()` in `runtime/audit_file_lock.py` to require `st_nlink == 1` on the opened descriptor before any `fchmod` call.
+2. Added the same single-link requirement to the visible-path `lstat()` recheck, alongside the existing regular-file, anti-symlink, and exact `(st_dev, st_ino)` identity checks.
+3. Updated the sidecar function contract to explicitly describe it as owner-only and single-link.
+4. Added `runtime/tests/test_audit_lock_hardlink_security.py` with regressions proving:
+   - a hard-linked sidecar is rejected before lock acquisition;
+   - the peer file bytes and permissions remain unchanged after rejection;
+   - a normal sidecar remains a single-link regular file and is owner-only on POSIX.
 
 Commits:
-- `4a0d930946e615759181e0e93fd7a74a4c45ea47` — Reject hard-linked local audit files
-- `3ab67c2cd9d37229e01c5011651250049625e5f1` — Add audit hard-link security regressions
+- `4551b5d93910928065b63d6b16b12018e5a300a0` — Reject hard-linked audit lock sidecars
+- `3da57ee1d446158bcb21770e0c8cc2a8ed45e5ba` — Add audit lock hard-link security regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector inspection and writes succeeded on `UnknownGod2011/Grafana` `main`.
-- A fresh executable checkout was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/grafana.git`; the runner again failed before checkout with `Could not resolve host: github.com`.
-- Intended focused command: `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_file_hardlink_security runtime.tests.test_audit_data_file_security runtime.tests.test_retention_path_security -v`.
-- Because the runner cannot obtain a current checkout, the new regression suite is not claimed green.
+- Normal network checkout remains unavailable: `raw.githubusercontent.com` failed with `Could not resolve host`, consistent with the existing runner DNS blocker.
+- I independently exercised the hardened lock logic locally without network dependencies. The hard-linked sidecar was rejected with the expected `multiple hard links` failure, the peer file content and `0644` permissions were unchanged, and a normal sidecar was created as a single-link regular file with `0600` permissions. Result: `focused audit lock hard-link checks: PASS`.
+- The committed unittest file itself is not claimed green in a fresh repository checkout because the runner still cannot obtain the repository through normal Git/DNS.
 - No GitHub Actions workflow was triggered merely to bypass the transient DNS failure.
 
 ### Decisions
 
-1. A StageGuard-owned local audit file must have exactly one directory entry. Inode identity alone is insufficient when another hard-link pathname can mutate the same bytes.
-2. The single-link invariant belongs in the shared secure descriptor primitive so anchored audit and retention inherit it automatically and the upcoming legacy audit migration cannot omit it.
-3. Rechecking link count on long-lived descriptors matters because a second hard link can appear after the initial secure open.
-4. This is intentionally stricter than a generic file opener: local audit integrity takes precedence over supporting hard-link-based snapshot schemes.
+1. StageGuard-owned lock sidecars must have exactly one directory entry, matching the existing audit data-file invariant.
+2. Link-count validation must happen before `fchmod`; otherwise rejecting the sidecar afterward could still mutate an unrelated hard-linked peer.
+3. The invariant belongs in the shared locking primitive so anchored audit, retention, and the upcoming base audit migration inherit it automatically.
+4. This remains intentionally stricter than a generic file lock because local audit ownership and integrity are security boundaries.
 
 ### Blockers / unknowns
 
 - Base `JsonlAuditLog` in `runtime/incident_service.py` still uses ordinary pathname opens and remains the main local-demo gap.
-- Recent hard-link, retention, audit-chain, remediation, watchdog, Loki, investigator, MCP, Gemini, metrics-bridge, identity/auth/readiness/activation/onboarding/Cloud Run hardening suites still require a current executable checkout.
+- Recent hard-link, retention, audit-chain, remediation, watchdog, Loki, investigator, MCP, Gemini, metrics-bridge, identity/auth/readiness/activation/onboarding/Cloud Run hardening suites still require a current executable checkout for consolidated regression execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
