@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
+from audit_file_lock import audit_file_lock, open_regular_audit_file
 from incident_checkpoint import IncidentCheckpoint, parse_checkpoint_document
 from incident_service import AuditEvent
 
@@ -54,12 +55,7 @@ def plan_authenticated_boundary(
     checkpoint_conflicted: bool = False,
     backend: str = "unknown",
 ) -> AuditRetentionPlan:
-    """Return the only deletion boundary StageGuard may consider.
-
-    The function is intentionally conservative. A plan is emitted only when the
-    runtime has verified the authenticated audit lineage and the durable checkpoint
-    has a non-genesis schema-v4 anchor. It never mutates audit storage.
-    """
+    """Return the only deletion boundary StageGuard may consider."""
     if not isinstance(checkpoint, IncidentCheckpoint):
         raise TypeError("checkpoint must be an IncidentCheckpoint")
     if audit_integrity_state != "verified":
@@ -119,24 +115,26 @@ def plan_jsonl_retention(
     assert boundary is not None
 
     try:
-        with audit_path.open("rb") as handle:
-            for raw_line in handle:
-                scanned_bytes += len(raw_line)
-                if scanned_bytes > max_scan_bytes:
-                    return _refusal(checkpoint, "jsonl", "audit scan exceeded byte safety bound")
-                if not raw_line.strip():
-                    continue
-                scanned_records += 1
-                if scanned_records > max_scan_records:
-                    return _refusal(checkpoint, "jsonl", "audit scan exceeded record safety bound")
-                raw = json.loads(raw_line.decode("utf-8"))
-                event = AuditEvent(**raw)
-                if event.sequence < 1:
-                    return _refusal(checkpoint, "jsonl", "audit log contains an invalid sequence")
-                if event.incident_id == checkpoint.incident_id and event.sequence <= boundary:
-                    eligible_records += 1
-                    eligible_bytes += len(raw_line)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        with audit_file_lock(audit_path):
+            fd = open_regular_audit_file(audit_path, os.O_RDONLY)
+            with os.fdopen(fd, "rb", closefd=True) as handle:
+                for raw_line in handle:
+                    scanned_bytes += len(raw_line)
+                    if scanned_bytes > max_scan_bytes:
+                        return _refusal(checkpoint, "jsonl", "audit scan exceeded byte safety bound")
+                    if not raw_line.strip():
+                        continue
+                    scanned_records += 1
+                    if scanned_records > max_scan_records:
+                        return _refusal(checkpoint, "jsonl", "audit scan exceeded record safety bound")
+                    raw = json.loads(raw_line.decode("utf-8"))
+                    event = AuditEvent(**raw)
+                    if event.sequence < 1:
+                        return _refusal(checkpoint, "jsonl", "audit log contains an invalid sequence")
+                    if event.incident_id == checkpoint.incident_id and event.sequence <= boundary:
+                        eligible_records += 1
+                        eligible_bytes += len(raw_line)
+    except (OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         return _refusal(checkpoint, "jsonl", f"audit log could not be inventoried safely: {type(exc).__name__}")
 
     return AuditRetentionPlan(
@@ -198,11 +196,7 @@ def plan_cloud_logging_retention(
     checkpoint_conflicted: bool = False,
     limit: int = 4096,
 ) -> AuditRetentionPlan:
-    """Read only candidates at/before the anchor; Cloud Logging inventory is advisory.
-
-    Cloud Logging lookback/retention can make enumeration incomplete, so the plan
-    intentionally leaves ``enumeration_complete`` false and never reports bytes.
-    """
+    """Read only candidates at/before the anchor; Cloud Logging inventory is advisory."""
     base = plan_authenticated_boundary(
         checkpoint,
         audit_integrity_state=audit_integrity_state,
