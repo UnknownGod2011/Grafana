@@ -33,11 +33,60 @@ def lock_path_for(audit_path: str | Path) -> Path:
 
 
 def _same_file_identity(fd_stat: os.stat_result, path_stat: os.stat_result) -> bool:
-    """Return whether an opened descriptor still names the visible sidecar inode."""
+    """Return whether an opened descriptor still names the visible filesystem object."""
     # CPython exposes stable device/inode identifiers on the supported POSIX and
     # Windows filesystems used by StageGuard. Comparing both closes the common
     # check/open path-substitution gap when O_NOFOLLOW is unavailable.
     return (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+
+
+def open_regular_audit_file(path: str | Path, flags: int, mode: int = 0o600) -> int:
+    """Open the local audit data file without accepting symlink/path substitution.
+
+    The caller receives a validated descriptor and owns closing it. ``O_TRUNC`` is
+    deliberately forbidden because on platforms without ``O_NOFOLLOW`` truncation
+    could mutate a substituted target before the post-open identity check runs.
+    Creation and append/read opens are safe because no audit bytes are written until
+    after descriptor/path identity has been verified.
+    """
+    audit_path = Path(path)
+    if flags & getattr(os, "O_TRUNC", 0):
+        raise ValueError("secure audit file open does not permit O_TRUNC")
+    try:
+        if audit_path.is_symlink():
+            raise RuntimeError("audit data file must not be a symbolic link")
+    except OSError as exc:
+        raise RuntimeError("audit data file could not be inspected safely") from exc
+
+    effective_flags = flags
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        effective_flags |= nofollow
+    try:
+        fd = os.open(audit_path, effective_flags, mode)
+    except OSError as exc:
+        raise RuntimeError("audit data file could not be opened safely") from exc
+
+    try:
+        fd_stat = os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode):
+            raise RuntimeError("audit data file must be a regular file")
+        try:
+            path_stat = os.lstat(audit_path)
+        except OSError as exc:
+            raise RuntimeError("audit data file path changed while opening") from exc
+        if stat.S_ISLNK(path_stat.st_mode):
+            raise RuntimeError("audit data file must not be a symbolic link")
+        if not stat.S_ISREG(path_stat.st_mode) or not _same_file_identity(fd_stat, path_stat):
+            raise RuntimeError("audit data file path changed while opening")
+        try:
+            os.fchmod(fd, 0o600)
+        except AttributeError:
+            pass
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def _open_lock_sidecar(sidecar: Path) -> int:
