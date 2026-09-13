@@ -17,8 +17,8 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
 - Provider-controlled remediation detail/arbitrary metadata is discarded before lifecycle/API/audit state; only narrowly validated StageGuard production-operation metadata may survive.
 - Durable checkpoint/audit failures fail closed; once provider dispatch may have occurred, persistence uncertainty blocks replay.
-- Cloud Logging audit documents accept only finite numeric payload values, require true integer sequence/timestamps, and use strict JSON serialization with NaN/Infinity forbidden.
-- Audit hash-chain canonicalization also uses strict JSON and refuses NaN/Infinity, so values that cannot become valid durable audit JSON cannot become authenticated audit-chain authority.
+- Cloud Logging audit documents accept only finite numeric payload values, true integer sequence/timestamps, bounded UTF-8 envelope strings without ASCII controls, and strict JSON serialization with NaN/Infinity forbidden.
+- Audit hash-chain canonicalization uses strict JSON and refuses NaN/Infinity, so values that cannot become valid durable numeric audit JSON cannot become authenticated chain authority.
 - Production remediation HTTP requests do not follow redirects; authorization/idempotency authority is non-redirectable and detectable final-URL changes fail closed.
 - Browser/API/onboarding/CLI surfaces must not expose provider failure detail or turn evidence loss into actionable state.
 - Authentication failures expose only bounded StageGuard-owned messages.
@@ -71,47 +71,47 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image-pin regressions.
 - Production remediation transport disables automatic redirects, marks `Authorization` and `Idempotency-Key` non-redirectable, and fails closed on detectable final-URL changes.
 - Cloud Logging audit payloads reject NaN/Infinity, audit sequence/timestamps reject bool/float confusion, and audit JSON serialization is strict.
-- Audit hash-chain canonicalization now rejects NaN/Infinity as non-canonical rather than hashing Python-specific non-standard JSON tokens.
+- Cloud Logging audit envelope strings are now explicitly type-checked, UTF-8 byte-bounded, and reject ASCII controls so malformed custom events fail through a stable `ValueError` boundary instead of accidental attribute errors.
+- Audit hash-chain canonicalization rejects NaN/Infinity as non-canonical rather than hashing Python-specific non-standard JSON tokens.
 
-## Run log — 2026-09-13 — audit-chain canonical JSON integrity
+## Run log — 2026-09-13 — durable audit envelope boundary
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata, the runtime tree, `runtime/audit_integrity.py`, and `runtime/tests/test_audit_integrity.py`. Compared the audit hash-chain boundary against the immediately preceding Cloud Logging audit hardening. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected repository metadata, runtime tree, `runtime/cloud_audit.py`, `runtime/tests/test_cloud_audit.py`, `runtime/audit_integrity.py`, and the `AuditEvent`/local audit definitions in `runtime/incident_service.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-`cloud_audit.py` had already been hardened to reject NaN/Infinity and serialize with `allow_nan=False`, but `audit_integrity.canonical_audit_event()` still used permissive default JSON serialization. Therefore an `AuditEvent` containing non-finite payload numbers could become part of a trusted SHA-256 audit chain even though the same event is invalid for standards-compliant durable audit JSON. That created an inconsistent authority boundary between authenticated chain state and durable Cloud Logging state.
+The Cloud Logging sink already bounded envelope lengths, but it called `.encode()` directly on `incident_id`, `event_type`, and `actor`. A malformed/custom `AuditEvent` with a non-string envelope field could therefore escape the sink's documented validation behavior as `AttributeError` instead of a stable `ValueError`. The same fields also accepted ASCII control characters, creating avoidable ambiguity in durable structured audit identifiers even though the authenticated operator identity boundary already rejects them.
 
 ### Exact changes made
 
-1. Changed `canonical_audit_event()` to serialize with `allow_nan=False` while preserving deterministic key ordering, separators, UTF-8 handling, and existing validation.
-2. Kept canonicalization fail closed under the existing stable `ValueError("audit event is not canonically serializable")` process boundary.
-3. Added focused regressions proving top-level and nested NaN/±Infinity payload values cannot advance the audit chain.
-4. Added a regression proving finite integer/float nested audit payloads still hash successfully.
-5. Added a regression assertion that a failed non-finite append leaves the chain at the genesis checkpoint, preventing partial authority publication.
+1. Added a shared envelope-string validator requiring a non-empty string, rejecting ASCII controls (`0x00-0x1f` and `0x7f`), and enforcing the existing limits by UTF-8 bytes: incident ID 256, event type 128, actor 512.
+2. Added explicit `AuditEvent` and payload-mapping validation so malformed direct/custom sink callers fail through a stable audit validation boundary.
+3. Preserved the existing payload field/key/nesting restrictions, strict finite-number policy, 16 KiB entry cap, and `allow_nan=False` serialization.
+4. Added regressions for non-string envelope fields, CR/LF/NUL/ESC-style controls, exact UTF-8 byte boundaries including multibyte characters, and non-mapping payloads.
 
 Commits:
-- `f79eca48d18c4f8f5096f37a8bc6a4224d80a3cf` — Harden audit chain canonical JSON integrity
-- `11b41b8d5b17c837f37606620c91def2c685cadd` — Add audit chain non-finite regressions
+- `890a3c722588ca4b222a91f350cb9b7e30d9e0fd` — Harden Cloud audit envelope string validation
+- `58fbd3b3af1716b2de69af840cfe7bbf86227e64` — Add Cloud audit envelope validation regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
-- Attempted a fresh checkout followed by `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit -v`.
-- Checkout failed before tests with `Could not resolve host: github.com`.
-- Therefore the committed audit-integrity regressions did not execute from the repository in this run and no new green-suite claim is made.
+- Before modifying code, attempted a fresh checkout and the pending focused suite: `PYTHONPATH=runtime python -m unittest runtime.tests.test_audit_integrity runtime.tests.test_cloud_audit runtime.tests.test_mcp_metric_client runtime.tests.test_mcp_log_client runtime.tests.test_mcp_smoke_timeout runtime.tests.test_mcp_smoke_surface -v`.
+- Checkout again failed before tests with `Could not resolve host: github.com`.
+- Therefore neither the pending regressions nor the new audit-envelope regressions executed from the repository in this run; no new green-suite claim is made.
 - No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. The tamper-evident audit chain and durable audit sink must share the same standards-compliant numeric JSON domain; a value rejected by durable audit serialization must never become authenticated chain authority.
-2. Strict serialization belongs directly at the canonical hash boundary, not only in individual sinks, because future alternative sinks may otherwise reintroduce divergent semantics.
-3. Preserve the existing stable error contract rather than exposing raw JSON encoder details.
+1. Durable audit sinks should reject malformed custom/direct callers deterministically rather than leaking incidental Python exceptions.
+2. Envelope size policy is measured in UTF-8 bytes because transport/storage cost is byte-based; multibyte identifiers must not bypass configured limits.
+3. ASCII controls are not valid StageGuard durable audit identifiers even inside structured logging fields; this aligns the sink with the existing operator identity boundary.
 
 ### Blockers / unknowns
 
-- The new `test_audit_integrity` and preceding `test_cloud_audit` regressions need a current executable checkout.
+- The new `test_cloud_audit` regressions and the recent `test_audit_integrity` regressions need a current executable checkout.
 - Recent MCP, Gemini, metrics-bridge, watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run suites still need a current executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
