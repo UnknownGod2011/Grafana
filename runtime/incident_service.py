@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from activation import ActivationRecord, verify_activation_record
+from audit_file_lock import assert_open_regular_file_identity, audit_file_lock, open_regular_audit_file
 from gemini_commander import GeminiCommander, IncidentBriefing
 from incident_checkpoint import CheckpointConflictError, CheckpointStore, IncidentCheckpoint
 from investigator import IncidentReport, MetricQueryClient, investigate, investigate_with_log_corroboration
@@ -55,24 +56,27 @@ class MemoryAuditLog:
 
 
 class JsonlAuditLog:
-    """Append-only local-development audit sink/reader with owner-only permissions."""
+    """Append-only local audit sink/reader with descriptor-bound file integrity."""
 
     MAX_LINEAGE_READ_RESULTS = 4096
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        os.close(fd)
+        with audit_file_lock(self.path):
+            fd = open_regular_audit_file(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+            os.close(fd)
 
     def append(self, event: AuditEvent) -> None:
         line = json.dumps(asdict(event), sort_keys=True, separators=(",", ":")) + "\n"
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
-        try:
-            os.write(fd, line.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        with audit_file_lock(self.path):
+            fd = open_regular_audit_file(self.path, os.O_WRONLY | os.O_APPEND)
+            try:
+                assert_open_regular_file_identity(fd, self.path)
+                os.write(fd, line.encode("utf-8"))
+                os.fsync(fd)
+                assert_open_regular_file_identity(fd, self.path)
+            finally:
+                os.close(fd)
 
     def read(self, *, incident_id: str, after_sequence: int = 0, limit: int = 50) -> list[AuditEvent]:
         if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
@@ -81,17 +85,24 @@ class JsonlAuditLog:
             raise ValueError("limit must be between 1 and 100")
         events: list[AuditEvent] = []
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    raw = json.loads(line)
-                    event = AuditEvent(**raw)
-                    if event.incident_id == incident_id and event.sequence > after_sequence:
-                        events.append(event)
-                        if len(events) >= limit:
-                            break
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            with audit_file_lock(self.path):
+                fd = open_regular_audit_file(self.path, os.O_RDONLY)
+                try:
+                    assert_open_regular_file_identity(fd, self.path)
+                    with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as handle:
+                        for line in handle:
+                            if not line.strip():
+                                continue
+                            raw = json.loads(line)
+                            event = AuditEvent(**raw)
+                            if event.incident_id == incident_id and event.sequence > after_sequence:
+                                events.append(event)
+                                if len(events) >= limit:
+                                    break
+                    assert_open_regular_file_identity(fd, self.path)
+                finally:
+                    os.close(fd)
+        except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError("local audit log could not be read safely") from exc
         return events
 
@@ -114,19 +125,26 @@ class JsonlAuditLog:
             raise ValueError(f"limit must be between 1 and {self.MAX_LINEAGE_READ_RESULTS}")
         candidates: list[AuditEvent] = []
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    event = AuditEvent(**json.loads(line))
-                    if event.incident_id != incident_id or event.sequence > through_sequence:
-                        continue
-                    if event.sequence < 1:
-                        raise ValueError("audit candidate sequence must be positive")
-                    candidates.append(event)
-                    if len(candidates) > limit:
-                        raise ValueError("audit candidate read exceeded the safe result bound")
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            with audit_file_lock(self.path):
+                fd = open_regular_audit_file(self.path, os.O_RDONLY)
+                try:
+                    assert_open_regular_file_identity(fd, self.path)
+                    with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as handle:
+                        for line in handle:
+                            if not line.strip():
+                                continue
+                            event = AuditEvent(**json.loads(line))
+                            if event.incident_id != incident_id or event.sequence > through_sequence:
+                                continue
+                            if event.sequence < 1:
+                                raise ValueError("audit candidate sequence must be positive")
+                            candidates.append(event)
+                            if len(candidates) > limit:
+                                raise ValueError("audit candidate read exceeded the safe result bound")
+                    assert_open_regular_file_identity(fd, self.path)
+                finally:
+                    os.close(fd)
+        except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError("local audit candidates could not be read safely") from exc
         return candidates
 
