@@ -3,6 +3,8 @@ from email.message import Message
 from types import SimpleNamespace
 
 from identity import (
+    MAX_STATIC_BEARER_TOKEN_BYTES,
+    MIN_STATIC_BEARER_TOKEN_BYTES,
     AuthenticationError,
     GoogleIapIdentityProvider,
     LocalDevelopmentIdentityProvider,
@@ -11,6 +13,8 @@ from identity import (
 
 
 class IdentityProviderTests(unittest.TestCase):
+    STATIC_TOKEN = "stageguard-test-token-0123456789abcdef"
+
     def handler(self, authorization=None, **headers_to_add):
         headers = Message()
         if authorization is not None:
@@ -27,18 +31,43 @@ class IdentityProviderTests(unittest.TestCase):
         self.assertTrue(provider.is_development_only)
 
     def test_static_bearer_resolves_configured_subject(self):
-        provider = StaticBearerIdentityProvider({"secret-token": "operator@example.com"})
-        identity = provider.authenticate(self.handler("Bearer secret-token"))
+        provider = StaticBearerIdentityProvider({self.STATIC_TOKEN: "operator@example.com"})
+        identity = provider.authenticate(self.handler(f"Bearer {self.STATIC_TOKEN}"))
         self.assertEqual("operator@example.com", identity.subject)
         self.assertEqual("static-bearer", identity.provider)
         self.assertFalse(provider.is_development_only)
 
     def test_static_bearer_rejects_missing_or_invalid_credentials(self):
-        provider = StaticBearerIdentityProvider({"secret-token": "operator@example.com"})
+        provider = StaticBearerIdentityProvider({self.STATIC_TOKEN: "operator@example.com"})
         for authorization in (None, "Basic abc", "Bearer wrong"):
             with self.subTest(authorization=authorization):
                 with self.assertRaises(AuthenticationError):
                     provider.authenticate(self.handler(authorization))
+
+    def test_static_bearer_requires_strong_bounded_rfc6750_tokens(self):
+        valid_minimum = "a" * MIN_STATIC_BEARER_TOKEN_BYTES
+        provider = StaticBearerIdentityProvider({valid_minimum: "operator@example.com"})
+        identity = provider.authenticate(self.handler(f"Bearer {valid_minimum}"))
+        self.assertEqual("operator@example.com", identity.subject)
+
+        invalid_tokens = (
+            "a" * (MIN_STATIC_BEARER_TOKEN_BYTES - 1),
+            "a" * (MAX_STATIC_BEARER_TOKEN_BYTES + 1),
+            "a" * MIN_STATIC_BEARER_TOKEN_BYTES + " ",
+            "a" * MIN_STATIC_BEARER_TOKEN_BYTES + "\n",
+            "a" * MIN_STATIC_BEARER_TOKEN_BYTES + "?",
+            "a" * MIN_STATIC_BEARER_TOKEN_BYTES + "=not-trailing",
+        )
+        for token in invalid_tokens:
+            with self.subTest(token_length=len(token)):
+                with self.assertRaises(ValueError):
+                    StaticBearerIdentityProvider({token: "operator@example.com"})
+
+    def test_static_bearer_bounds_untrusted_candidate_before_comparison(self):
+        provider = StaticBearerIdentityProvider({self.STATIC_TOKEN: "operator@example.com"})
+        oversized = "a" * (MAX_STATIC_BEARER_TOKEN_BYTES + 1)
+        with self.assertRaisesRegex(AuthenticationError, "invalid bearer credential"):
+            provider.authenticate(self.handler(f"Bearer {oversized}"))
 
     def test_empty_token_map_is_rejected(self):
         with self.assertRaises(ValueError):
