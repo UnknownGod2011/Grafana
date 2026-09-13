@@ -38,6 +38,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; write/proxy restrictions and read-only tool annotations are regression-locked.
 - Grafana MCP smoke requests, stdout frames, and pending-frame queues are bounded.
 - The core remediation execution watchdog enforces the same finite 1-600 second policy as the Cloud Run boundary.
+- The remediation watchdog validates its monotonic clock before durable dispatch, and any active-clock corruption, non-finite value, type drift, exception, or backward movement fails readiness closed as execution uncertainty.
 - Cloud Run checkpoint HMAC keys are bounded to 32-512 UTF-8 bytes and reject boundary whitespace/control characters.
 - Evidence-plane readiness cache/backoff policy is finite and bounded: external probe TTL <= 300s, failure backoff <= 300s, stale-readiness grace <= 900s; booleans and NaN/infinity are rejected.
 
@@ -75,6 +76,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Grafana MCP metric parsing independently rejects boolean and non-finite samples.
 - Gemini metric evidence rejects boolean/non-numeric/non-finite values; confidence is finite in [0, 1]; Vertex JSON serialization forbids NaN/Infinity.
 - Core and Cloud Run remediation execution watchdog policy is 1-600 seconds.
+- Remediation watchdog clocks are now strict finite native numbers; invalid start clocks prevent durable dispatch/provider contact, and invalid/backward active clocks fail deadline/readiness closed.
 - Checkpoint HMAC key policy is 32-512 UTF-8 bytes with whitespace/control rejection.
 - Private metrics bridge timeout is capped at 60 seconds and bearer credentials at 4096 characters.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image-pin regressions.
@@ -132,6 +134,49 @@ Commits:
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
+## Run log — 2026-09-13 — Remediation watchdog clock integrity
+
+### Inspected at start
+
+Read this `progress.md` completely before selecting work. Inspected repository metadata/tree, `runtime/anchored_execution_safety.py`, and `runtime/tests/test_anchored_execution_safety.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or triggered.
+
+### Finding
+
+The remediation watchdog bounded configured execution duration but trusted every runtime value returned by the injectable monotonic clock. During an active execution, `NaN` caused the `age > maximum` deadline comparison to remain false, and a backward-moving clock was clamped to zero. A malformed custom clock could therefore make an in-flight remediation appear indefinitely within deadline. Invalid start-clock values were also read only after the durable dispatch barrier was persisted, creating avoidable ambiguous durable state even though provider contact had not yet begun.
+
+### Exact changes made
+
+1. Added `_read_execution_monotonic()` in `runtime/anchored_execution_safety.py`; watchdog readings must now be finite native `int`/`float` values and may not be booleans, strings, exceptions, NaN, or infinities.
+2. The start clock is validated before `_persist_dispatching_barrier()`. A broken local clock now prevents provider contact without writing durable state that suggests dispatch may already have happened.
+3. Active clock exceptions, type drift, non-finite values, arithmetic non-finiteness, or backward movement map to a bounded synthetic age of `execution_max_seconds + 1`, making `deadline_exceeded=True` and `checkpoint_state()` return `execution_uncertain`.
+4. Added `runtime/tests/test_execution_watchdog_clock_boundary.py` covering invalid start clocks, zero provider calls on start-clock failure, active clock corruption, and backward movement.
+
+Commits:
+- `3814f3bed7d62115fbd3fc426b30af3b7ee90af4` — Fail closed on invalid remediation watchdog clocks
+- `d4e8146bf453ca9d148429aaef951091e179c892` — Add remediation watchdog clock regressions
+
+### Checks / results
+
+- Authenticated GitHub connector reads/writes succeeded and both implementation/test commits landed on `UnknownGod2011/Grafana` `main`.
+- Attempted fresh checkout and focused execution: `PYTHONPATH=runtime python -m unittest runtime.tests.test_execution_watchdog_clock_boundary runtime.tests.test_anchored_execution_safety -v`.
+- Checkout failed before tests with `Could not resolve host: github.com`.
+- The new tests are therefore not claimed green. No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
+
+### Decisions
+
+1. The watchdog is part of the no-replay/remediation safety boundary, so its own clock dependency must fail closed rather than silently disable deadline enforcement.
+2. A broken clock before provider contact is a local precondition failure, not execution uncertainty; validating it before the durable dispatch barrier keeps that distinction exact.
+3. Once execution is active, clock corruption is indistinguishable from an untrustworthy execution age, so readiness must become `execution_uncertain` immediately.
+4. The fail-closed synthetic age remains finite and fixed-cardinality, preserving safe metrics/API serialization.
+
+### Blockers / unknowns
+
+- The new watchdog tests and existing anchored execution-safety suite require a current executable checkout.
+- Recent remediation, audit, MCP, Gemini, metrics-bridge, identity/auth/readiness/activation/onboarding/Cloud Run/investigator/Loki hardening suites still need a current executable checkout.
+- A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
+- The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
+
 ## Single best next step
 
-**As soon as executable checkout works, first run `PYTHONPATH=runtime python -m unittest runtime.tests.test_remediation runtime.tests.test_remediation_result_boundary runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_mcp_metric_client -v` and fix any failure immediately. If clean, run the accumulated audit/Gemini/auth/readiness/watchdog/bridge/activation suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, first run `PYTHONPATH=runtime python -m unittest runtime.tests.test_execution_watchdog_clock_boundary runtime.tests.test_anchored_execution_safety runtime.tests.test_remediation runtime.tests.test_remediation_result_boundary runtime.tests.test_log_evidence runtime.tests.test_mcp_log_client runtime.tests.test_investigator runtime.tests.test_mcp_metric_client -v` and fix any failure immediately. If clean, run the accumulated audit/Gemini/auth/readiness/bridge/activation suites, then the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
