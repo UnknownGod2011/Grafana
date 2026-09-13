@@ -32,14 +32,23 @@ def lock_path_for(audit_path: str | Path) -> Path:
     return path.with_name(f".{path.name}.stageguard.lock")
 
 
+def _same_file_identity(fd_stat: os.stat_result, path_stat: os.stat_result) -> bool:
+    """Return whether an opened descriptor still names the visible sidecar inode."""
+    # CPython exposes stable device/inode identifiers on the supported POSIX and
+    # Windows filesystems used by StageGuard. Comparing both closes the common
+    # check/open path-substitution gap when O_NOFOLLOW is unavailable.
+    return (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+
+
 def _open_lock_sidecar(sidecar: Path) -> int:
-    """Open one owner-only regular lock file without following symlinks.
+    """Open one owner-only regular lock file without accepting path substitution.
 
     The lock filename is derived from an operator-provided local audit path. A
     pre-created symlink must therefore never redirect StageGuard's chmod/write or
     locking operations onto an unrelated file. POSIX ``O_NOFOLLOW`` closes the
-    open-time race where available; the explicit symlink and regular-file checks
-    keep the contract fail-closed on platforms that do not expose that flag.
+    open-time symlink race where available. The post-open ``lstat`` identity check
+    additionally verifies that the descriptor is the same regular file still
+    visible at the sidecar path, including on platforms without ``O_NOFOLLOW``.
     """
     try:
         if sidecar.is_symlink():
@@ -57,9 +66,17 @@ def _open_lock_sidecar(sidecar: Path) -> int:
         raise RuntimeError("audit lock sidecar could not be opened safely") from exc
 
     try:
-        mode = os.fstat(fd).st_mode
-        if not stat.S_ISREG(mode):
+        fd_stat = os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode):
             raise RuntimeError("audit lock sidecar must be a regular file")
+        try:
+            path_stat = os.lstat(sidecar)
+        except OSError as exc:
+            raise RuntimeError("audit lock sidecar path changed while opening") from exc
+        if stat.S_ISLNK(path_stat.st_mode):
+            raise RuntimeError("audit lock sidecar must not be a symbolic link")
+        if not stat.S_ISREG(path_stat.st_mode) or not _same_file_identity(fd_stat, path_stat):
+            raise RuntimeError("audit lock sidecar path changed while opening")
         try:
             os.fchmod(fd, 0o600)
         except AttributeError:
