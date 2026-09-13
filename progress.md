@@ -25,9 +25,10 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Telemetry profiles require independent healthy comparators.
 - Private Cloud Run metric requests reject redirects and keep token audience/target boundaries explicit.
 - A metrics bridge bound beyond loopback requires explicit opt-in, inbound bearer authentication, strict token syntax, and a minimum 32-character credential.
+- Private metrics bridge upstream waits are bounded to 60 seconds; configured inbound bearer secrets are capped at 4096 token characters and oversized presented credentials are rejected before comparison.
 - The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; write/proxy restrictions and read-only tool annotations are regression-locked.
 - Grafana MCP smoke requests, stdout frames, and pending-frame queues are bounded.
-- The core remediation execution watchdog now enforces the same finite **1-600 second** policy as the Cloud Run boundary; alternate service embeddings cannot silently configure an effectively unbounded in-flight provider window.
+- The core remediation execution watchdog enforces the same finite **1-600 second** policy as the Cloud Run boundary; alternate service embeddings cannot silently configure an effectively unbounded in-flight provider window.
 - Cloud Run checkpoint HMAC keys are bounded to 32-512 UTF-8 bytes and reject boundary whitespace/control characters.
 - Evidence-plane readiness cache/backoff policy is finite and bounded: external probe TTL <= 300s, failure backoff <= 300s, stale-readiness grace <= 900s; booleans and NaN/infinity are rejected.
 
@@ -36,7 +37,7 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog hardening.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest activation/checkpoint/readiness/auth/watchdog/bridge hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke before a production-ready claim.
 - Recent hardening regressions have repeatedly been blocked from local execution because the automation runner cannot resolve `github.com`; do not infer green status from commits alone.
 
@@ -64,51 +65,52 @@ This file is intentionally compact; detailed earlier run history remains in Git 
 - Checkpoint HMAC key: 32-512 UTF-8 bytes with whitespace/control rejection.
 - Hermetic deploy-script regression prevents invalid watchdog values from reaching `gcloud`.
 - Private metrics acceptance job identity is selector-safe and bounded before any Cloud Run/Docker action.
+- Private metrics bridge upstream timeout is capped at 60 seconds; inbound bearer tokens are capped at 4096 characters and oversized presented candidates are rejected before comparison.
 - Grafana MCP smoke has request deadlines, strict JSON-RPC/version/response-ID validation, 1 MiB frame cap, 16-frame pending queue cap, read-only surface enforcement, and image pin regressions.
 
-## Run log — 2026-09-13 — core remediation watchdog policy
+## Run log — 2026-09-13 — private metrics bridge resource bounds
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the runtime tree, `runtime/anchored_execution_safety.py`, `runtime/tests/test_anchored_execution_safety.py`, and `runtime/cloudrun_entrypoint.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or manually triggered.
-
-Also checked the official Grafana `mcp-grafana` latest release through GitHub. As of 2026-09-13, the latest published release is still **v1.4.1**, published 2026-09-11, so the repository's pin is current: https://github.com/grafana/mcp-grafana/releases/tag/v1.4.1
+Read this `progress.md` completely before selecting work. Inspected repository metadata, the runtime tree, `runtime/cloud_run_metrics_bridge.py`, and the existing `runtime/tests/test_cloud_run_metrics_bridge.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, IAM binding, remediation provider, or GitHub Actions workflow was modified or manually triggered.
 
 ### Finding
 
-`runtime/cloudrun_entrypoint.py` correctly restricted `STAGEGUARD_REMEDIATION_EXECUTION_MAX_SECONDS` to 1-600 seconds, but `AnchoredExecutionSafeIncidentService` itself accepted any finite positive number. Alternate production embeddings that instantiate the core service directly could therefore configure an hours- or days-long watchdog. During that interval an in-flight provider call remains `dispatching`, and the execution watchdog would not fail checkpoint/readiness state closed until the excessive deadline elapsed. The production safety invariant belonged in the core service, not only in one deployment adapter.
+The authenticated private metrics bridge correctly rejected non-finite and non-positive upstream timeouts, but it had no upper bound. Any alternate deployment or operator could configure an hours- or days-long timeout. Since `/readyz` and `/metrics` synchronously fetch the authenticated Cloud Run evidence endpoint, an excessive timeout could pin bridge request threads and make evidence-plane failure detection operationally useless during a real incident.
+
+The bridge also validated inbound bearer-token syntax and required at least 32 characters for non-loopback binds, but there was no maximum configured secret size and no explicit oversized presented-candidate rejection before `hmac.compare_digest`.
 
 ### Exact changes made
 
-1. Added `MIN_REMEDIATION_EXECUTION_SECONDS = 1.0` and `MAX_REMEDIATION_EXECUTION_SECONDS = 600.0` to `runtime/anchored_execution_safety.py`.
-2. Core service construction now rejects values below 1 second or above 600 seconds in addition to existing boolean, non-numeric, NaN, infinity, zero, and negative rejection.
-3. Preserved the existing 60-second default.
-4. Added focused `runtime/tests/test_execution_watchdog_bounds.py` covering exact lower/upper boundary acceptance and rejection of below-minimum, above-maximum, boolean, non-finite, and non-numeric values.
+1. Added `MAX_TIMEOUT_SECONDS = 60.0` in `runtime/cloud_run_metrics_bridge.py` and made `CloudRunMetricsClient` reject any upstream timeout above 60 seconds in addition to existing boolean/non-numeric/non-finite/non-positive rejection.
+2. Added `MAX_BRIDGE_BEARER_TOKEN_LENGTH = 4096`; configured inbound bridge credentials above this limit now fail configuration before the server starts.
+3. Oversized presented bearer candidates are now rejected before constant-time comparison.
+4. Updated CLI help so the documented network-bind credential range is 32-4096 characters.
+5. Added `runtime/tests/test_cloud_run_metrics_bridge_bounds.py` covering exact timeout/token upper-bound acceptance, excessive timeout/token rejection, and HTTP-level oversized presented-bearer refusal without any upstream evidence fetch.
 
 Commits:
-- `cf564fe096cc83eedc24eac958aaaeac644d0606` — Bound remediation watchdog in core service
-- `14ee91f538329d4298a04fbd76d20b7c424beb53` — Add core watchdog bound regressions
+- `ca81dffbbf2c6e3a716d8066306c76cf01ea9d88` — Bound private metrics bridge resources
+- `37ad809b68b81d5f4947656423167d8bbd324ab6` — Add private metrics bridge resource-bound regressions
 
 ### Checks / results
 
-- Authenticated GitHub connector reads/writes succeeded; both implementation and regression commits landed on `UnknownGod2011/Grafana` `main`.
-- Re-read the committed implementation and regression file through the GitHub connector and verified the 1/600 constants and validation branches are present.
-- Attempted a fresh executable checkout and focused run:
-  `python -m unittest runtime.tests.test_execution_watchdog_bounds runtime.tests.test_anchored_execution_safety runtime.tests.test_cloudrun_entrypoint -v`
-- The runner failed before checkout with `Could not resolve host: github.com`; therefore no repository tests executed locally and no new green claim is made.
+- Authenticated GitHub connector reads/writes succeeded; implementation and regression commits landed on `UnknownGod2011/Grafana` `main`.
+- Re-read both commit diffs through the GitHub connector and verified the intended changes are narrowly scoped to the bridge resource policy and its tests.
+- Attempted a fresh executable checkout with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`; the runner failed before checkout with `Could not resolve host: github.com`.
+- Therefore `runtime.tests.test_cloud_run_metrics_bridge_bounds` and existing bridge tests did not execute locally in this run, and no new green-test claim is made.
 - No GitHub Actions workflow was triggered merely to bypass the transient runner DNS failure.
 
 ### Decisions
 
-1. Enforce the watchdog window inside the production service composition so CLI, test harnesses, alternate containers, and future deployment adapters cannot weaken the Cloud Run safety policy.
-2. Keep the same 1-600 second range already used by Cloud Run rather than introducing a second policy window.
-3. Keep the default at 60 seconds; this change only rejects unsafe/non-production configuration values.
-4. Add a focused constructor-policy regression module rather than expanding a concurrency-heavy test fixture for simple boundary validation.
+1. Use a 60-second absolute upstream bound: the bridge default remains 10 seconds, but even an operator override cannot make scrape/readiness calls effectively unbounded.
+2. Use the same 4096-character upper bound already used for StageGuard's non-development static bearer authentication policy, avoiding a second arbitrary credential-size regime.
+3. Reject oversized untrusted bearer candidates before `hmac.compare_digest`; the bridge never needs to compare a candidate that could not equal a valid configured credential.
+4. Preserve loopback development behavior and the existing 32-character minimum specifically for non-loopback binds.
 
 ### Blockers / unknowns
 
-- `runtime.tests.test_execution_watchdog_bounds` and the existing anchored-execution/Cloud Run tests need a current executable checkout.
-- The identity/auth/readiness/remediation/activation/onboarding/Cloud Run focused suites still need a current executable checkout.
+- The new metrics-bridge bounds regression and existing bridge suite need a current executable checkout.
+- The core watchdog, identity/auth/readiness/remediation/activation/onboarding/Cloud Run focused suites still need a current executable checkout.
 - MCP timeout/surface/image-pin regressions still need a current repository run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -116,4 +118,4 @@ Commits:
 
 ## Single best next step
 
-**As soon as executable checkout works, first run `python -m unittest runtime.tests.test_execution_watchdog_bounds runtime.tests.test_anchored_execution_safety runtime.tests.test_cloudrun_entrypoint -v`; fix any regression immediately. Then run the consolidated identity/auth/readiness/remediation/activation/onboarding/Cloud Run suite. If clean, run MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
+**As soon as executable checkout works, first run `python -m unittest runtime.tests.test_cloud_run_metrics_bridge_bounds runtime.tests.test_cloud_run_metrics_bridge runtime.tests.test_execution_watchdog_bounds runtime.tests.test_cloudrun_entrypoint -v`; fix any regression immediately. Then run the consolidated identity/auth/readiness/remediation/activation/onboarding/Cloud Run suite. If clean, run MCP timeout/surface/image-pin regressions and the live pinned Grafana MCP 1.4.1 smoke before the private `ADC -> Cloud Run /metrics -> authenticated bridge -> Prometheus up: 1 -> 0 -> 1` acceptance.**
