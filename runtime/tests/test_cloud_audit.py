@@ -114,6 +114,47 @@ class CloudAuditTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     audit_event_document(event)
 
+    def test_rejects_non_string_envelope_fields_through_value_error_boundary(self):
+        invalid_envelopes = (
+            AuditEvent(7, 1_700_000_000_000, 123, "event", "actor", {}),
+            AuditEvent(7, 1_700_000_000_000, "incident", b"event", "actor", {}),
+            AuditEvent(7, 1_700_000_000_000, "incident", "event", None, {}),
+        )
+        for event in invalid_envelopes:
+            with self.subTest(event=event):
+                with self.assertRaises(ValueError):
+                    audit_event_document(event)
+
+    def test_rejects_ascii_control_characters_in_envelope_fields(self):
+        invalid_envelopes = (
+            AuditEvent(7, 1_700_000_000_000, "incident\nforged", "event", "actor", {}),
+            AuditEvent(7, 1_700_000_000_000, "incident", "event\x00type", "actor", {}),
+            AuditEvent(7, 1_700_000_000_000, "incident", "event", "actor\x1bspoof", {}),
+        )
+        for event in invalid_envelopes:
+            with self.subTest(event=event):
+                with self.assertRaises(ValueError):
+                    audit_event_document(event)
+
+    def test_envelope_size_limits_are_measured_in_utf8_bytes(self):
+        accepted = AuditEvent(7, 1_700_000_000_000, "é" * 128, "e" * 128, "a" * 512, {})
+        document = audit_event_document(accepted)
+        self.assertEqual("é" * 128, document["incident_id"])
+
+        rejected = (
+            AuditEvent(7, 1_700_000_000_000, "é" * 129, "event", "actor", {}),
+            AuditEvent(7, 1_700_000_000_000, "incident", "é" * 65, "actor", {}),
+            AuditEvent(7, 1_700_000_000_000, "incident", "event", "é" * 257, {}),
+        )
+        for event in rejected:
+            with self.subTest(event=event):
+                with self.assertRaises(ValueError):
+                    audit_event_document(event)
+
+    def test_rejects_non_mapping_payload(self):
+        with self.assertRaises(ValueError):
+            audit_event_document(AuditEvent(7, 1_700_000_000_000, "incident", "event", "actor", []))
+
     def test_accepts_finite_payload_numbers_and_integer_envelope(self):
         document = audit_event_document(self.event({"confidence": 0.0, "attempt_count": 1}))
         self.assertEqual(0.0, document["payload"]["confidence"])
