@@ -38,12 +38,14 @@ def _same_file_identity(fd_stat: os.stat_result, path_stat: os.stat_result) -> b
 
 
 def assert_open_regular_file_identity(fd: int, path: str | Path) -> os.stat_result:
-    """Fail closed unless ``fd`` is the same regular file still visible at ``path``.
+    """Fail closed unless ``fd`` is the same private regular file visible at ``path``.
 
     Retention keeps an audit descriptor open across inventory, backup, and rewrite.
     Rechecking immediately before pathname mutation prevents a substituted path from
     becoming the target of the final ``os.replace`` even if the original descriptor
-    itself remains valid.
+    itself remains valid. Hard-linked audit files are rejected because a second
+    pathname to the same inode would permit writes or permission changes outside the
+    StageGuard-owned audit path while all inode-identity checks still pass.
     """
     audit_path = Path(path)
     try:
@@ -52,13 +54,15 @@ def assert_open_regular_file_identity(fd: int, path: str | Path) -> os.stat_resu
         raise RuntimeError("audit data file descriptor could not be inspected safely") from exc
     if not stat.S_ISREG(fd_stat.st_mode):
         raise RuntimeError("audit data file must be a regular file")
+    if fd_stat.st_nlink != 1:
+        raise RuntimeError("audit data file must not have multiple hard links")
     try:
         path_stat = os.lstat(audit_path)
     except OSError as exc:
         raise RuntimeError("audit data file path changed while in use") from exc
     if stat.S_ISLNK(path_stat.st_mode):
         raise RuntimeError("audit data file must not be a symbolic link")
-    if not stat.S_ISREG(path_stat.st_mode) or not _same_file_identity(fd_stat, path_stat):
+    if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1 or not _same_file_identity(fd_stat, path_stat):
         raise RuntimeError("audit data file path changed while in use")
     return fd_stat
 
