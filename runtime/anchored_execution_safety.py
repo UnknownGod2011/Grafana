@@ -25,6 +25,8 @@ from remediation import remediate_and_verify, remediation_operation_id
 
 
 DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS = 60.0
+MIN_REMEDIATION_EXECUTION_SECONDS = 1.0
+MAX_REMEDIATION_EXECUTION_SECONDS = 600.0
 
 
 class AnchoredExecutionSafeIncidentService(
@@ -55,7 +57,12 @@ class AnchoredExecutionSafeIncidentService(
             maximum = float(execution_max_seconds)
         except (TypeError, ValueError) as exc:
             raise ValueError("execution_max_seconds must be a finite positive number") from exc
-        if isinstance(execution_max_seconds, bool) or not math.isfinite(maximum) or maximum <= 0:
+        if (
+            isinstance(execution_max_seconds, bool)
+            or not math.isfinite(maximum)
+            or maximum < MIN_REMEDIATION_EXECUTION_SECONDS
+            or maximum > MAX_REMEDIATION_EXECUTION_SECONDS
+        ):
             raise ValueError("execution_max_seconds must be a finite positive number")
         self._execution_in_flight = False
         self._execution_started_monotonic: float | None = None
