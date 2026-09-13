@@ -52,7 +52,11 @@ def canonical_audit_event(event: AuditEvent) -> bytes:
         raise ValueError("audit payload must be a dictionary")
     try:
         return json.dumps(
-            asdict(event), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            asdict(event),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError("audit event is not canonically serializable") from exc
