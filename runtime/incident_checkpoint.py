@@ -5,14 +5,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
-import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from checkpoint_file_security import atomic_write_private_bytes, read_private_bytes
 from investigator import Evidence, IncidentReport
 from log_evidence import LogCorroboration
 from remediation import ActionResult, Approval, RecoverySample, RemediationOutcome
@@ -320,32 +319,14 @@ class JsonCheckpointStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> IncidentCheckpoint | None:
-        if not self.path.exists():
+        try:
+            raw = read_private_bytes(self.path, max_bytes=_MAX_BYTES)
+        except FileNotFoundError:
             return None
-        if self.path.is_symlink():
-            raise ValueError("incident checkpoint path must not be a symlink")
-        return _decode(self.path.read_bytes())
+        return _decode(raw)
 
     def save(self, checkpoint: IncidentCheckpoint) -> None:
-        encoded = _encode(checkpoint)
-        fd, tmp_name = tempfile.mkstemp(prefix=".checkpoint-", dir=self.path.parent)
-        try:
-            # Windows does not expose os.fchmod. Keep the descriptor lifecycle
-            # valid on every supported platform, then apply the portable chmod
-            # best-effort after the atomic write is complete.
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb", closefd=True) as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if not hasattr(os, "fchmod"):
-                os.chmod(tmp_name, 0o600)
-            os.replace(tmp_name, self.path)
-            os.chmod(self.path, 0o600)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+        atomic_write_private_bytes(self.path, _encode(checkpoint))
 
 
 class GoogleCloudStorageCheckpointStore:
