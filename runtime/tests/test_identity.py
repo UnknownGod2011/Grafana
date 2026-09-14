@@ -18,12 +18,14 @@ from identity import (
 class IdentityProviderTests(unittest.TestCase):
     STATIC_TOKEN = "stageguard-test-token-0123456789abcdef"
 
-    def handler(self, authorization=None, **headers_to_add):
+    def handler(self, authorization=None, duplicate_headers=(), **headers_to_add):
         headers = Message()
         if authorization is not None:
             headers["Authorization"] = authorization
         for name, value in headers_to_add.items():
             headers[name.replace("_", "-")] = value
+        for name, value in duplicate_headers:
+            headers[name] = value
         return SimpleNamespace(headers=headers)
 
     def test_operator_identity_normalizes_and_bounds_fields(self):
@@ -76,6 +78,15 @@ class IdentityProviderTests(unittest.TestCase):
             with self.subTest(authorization=authorization):
                 with self.assertRaises(AuthenticationError):
                     provider.authenticate(self.handler(authorization))
+
+    def test_static_bearer_rejects_duplicate_authorization_headers(self):
+        provider = StaticBearerIdentityProvider({self.STATIC_TOKEN: "operator@example.com"})
+        handler = self.handler(
+            f"Bearer {self.STATIC_TOKEN}",
+            duplicate_headers=(("Authorization", "Bearer attacker-controlled-credential"),),
+        )
+        with self.assertRaisesRegex(AuthenticationError, "invalid bearer credential"):
+            provider.authenticate(handler)
 
     def test_static_bearer_requires_strong_bounded_rfc6750_tokens(self):
         valid_minimum = "a" * MIN_STATIC_BEARER_TOKEN_BYTES
@@ -131,6 +142,19 @@ class IdentityProviderTests(unittest.TestCase):
         self.assertEqual("stable-user-123", identity.subject)
         self.assertEqual("google-iap", identity.provider)
         self.assertFalse(provider.is_development_only)
+
+    def test_iap_rejects_duplicate_signed_assertion_headers_before_verification(self):
+        audience = "/projects/123/locations/us-central1/services/stageguard"
+        provider = GoogleIapIdentityProvider(
+            audience,
+            verifier=lambda *_args: self.fail("verifier must not run for ambiguous duplicate assertions"),
+        )
+        handler = self.handler(
+            X_Goog_IAP_JWT_Assertion="signed.jwt.value",
+            duplicate_headers=(("X-Goog-IAP-JWT-Assertion", "attacker.jwt.value"),),
+        )
+        with self.assertRaisesRegex(AuthenticationError, "invalid IAP assertion"):
+            provider.authenticate(handler)
 
     def test_iap_rejects_unsigned_identity_headers(self):
         provider = GoogleIapIdentityProvider(
