@@ -77,6 +77,8 @@ class RecoveryRecheckApiTests(unittest.TestCase):
         status, body = self.request("/v1/investigate", {})
         self.assertEqual(200, status)
         incident = body["incident"]
+        self.assertEqual("none", body["recovery"]["state"])
+        self.assertFalse(body["recovery"]["recheck_eligible"])
 
         status, _ = self.request(
             "/v1/approve",
@@ -87,11 +89,23 @@ class RecoveryRecheckApiTests(unittest.TestCase):
         status, body = self.request("/v1/execute", {})
         self.assertEqual(200, status)
         self.assertEqual("recovery_unverified", body["incident"]["outcome"]["status"])
+        self.assertEqual("recovery_unverified", body["recovery"]["state"])
+        self.assertTrue(body["recovery"]["action_accepted"])
+        self.assertTrue(body["recovery"]["recheck_eligible"])
+        self.assertFalse(body["recovery"]["verified"])
+        self.assertTrue(body["recovery"]["checkpoint_phase_consistent"])
+        self.assertEqual(6, body["recovery"]["sample_count"])
         self.assertEqual(1, self.remediation.calls)
 
         status, body = self.request("/v1/recovery/recheck", {})
         self.assertEqual(200, status)
         self.assertEqual("recovered", body["incident"]["outcome"]["status"])
+        self.assertEqual("recovered", body["recovery"]["state"])
+        self.assertTrue(body["recovery"]["action_accepted"])
+        self.assertFalse(body["recovery"]["recheck_eligible"])
+        self.assertTrue(body["recovery"]["verified"])
+        self.assertTrue(body["recovery"]["checkpoint_phase_consistent"])
+        self.assertEqual(2, body["recovery"]["sample_count"])
         self.assertEqual(1, self.remediation.calls)
         self.assertEqual("operator@example.com", self.audit.events[-1].actor)
         self.assertEqual("recovery_rechecked", self.audit.events[-1].event_type)
