@@ -6,7 +6,9 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import checkpoint_file_security
 from checkpoint_file_security import (
     assert_private_regular_file_identity,
     atomic_write_private_bytes,
@@ -89,6 +91,88 @@ class CheckpointFileSecurityTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"do-not-touch")
             self.assertFalse(checkpoint.is_symlink())
             self.assertEqual(checkpoint.read_bytes(), b"new-state")
+
+    def test_atomic_write_rejects_symlink_parent_without_mutating_target_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_parent = root / "real-parent"
+            real_parent.mkdir()
+            linked_parent = root / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+            with self.assertRaises(RuntimeError):
+                atomic_write_private_bytes(linked_parent / "checkpoint.json", b"blocked")
+
+            self.assertFalse((real_parent / "checkpoint.json").exists())
+
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_atomic_write(),
+        "requires directory-relative atomic replacement",
+    )
+    def test_atomic_write_detects_parent_path_substitution_before_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "state"
+            parent.mkdir()
+            checkpoint = parent / "checkpoint.json"
+            displaced = root / "state-original"
+            real_write = checkpoint_file_security._write_all_and_sync
+            swapped = False
+
+            def write_then_swap(fd: int, data: bytes) -> None:
+                nonlocal swapped
+                real_write(fd, data)
+                parent.replace(displaced)
+                parent.mkdir()
+                swapped = True
+
+            with mock.patch.object(
+                checkpoint_file_security,
+                "_write_all_and_sync",
+                side_effect=write_then_swap,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "parent directory changed"):
+                    atomic_write_private_bytes(checkpoint, b"new-state")
+
+            self.assertTrue(swapped)
+            self.assertFalse(checkpoint.exists())
+            self.assertFalse((displaced / "checkpoint.json").exists())
+            self.assertEqual(list(displaced.glob(".checkpoint-*")), [])
+
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_atomic_write(),
+        "requires directory-relative atomic replacement",
+    )
+    def test_directory_relative_replace_never_targets_substituted_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "state"
+            parent.mkdir()
+            checkpoint = parent / "checkpoint.json"
+            displaced = root / "state-original"
+            real_replace = os.replace
+            swapped = False
+
+            def swap_then_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+                nonlocal swapped
+                if not swapped and src_dir_fd is not None and dst_dir_fd is not None:
+                    parent.replace(displaced)
+                    parent.mkdir()
+                    swapped = True
+                return real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with mock.patch.object(checkpoint_file_security.os, "replace", side_effect=swap_then_replace):
+                with self.assertRaisesRegex(RuntimeError, "parent directory changed"):
+                    atomic_write_private_bytes(checkpoint, b"new-state")
+
+            self.assertTrue(swapped)
+            self.assertFalse(checkpoint.exists())
+            self.assertEqual((displaced / "checkpoint.json").read_bytes(), b"new-state")
 
 
 if __name__ == "__main__":
