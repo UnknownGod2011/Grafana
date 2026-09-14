@@ -45,13 +45,23 @@ def assert_private_regular_file_identity(fd: int, path: str | Path) -> os.stat_r
 
 
 def _assert_directory_identity(fd: int, path: Path) -> os.stat_result:
-    """Require ``fd`` to be the exact directory still visible at ``path``."""
+    """Require ``fd`` to be the exact private directory still visible at ``path``.
+
+    Local checkpoint integrity depends on the containing directory controlling
+    namespace mutation. Group/world-writable parents are therefore rejected even
+    when sticky-bit semantics would reduce some rename attacks. Directory owner
+    equality is intentionally not required because container and mounted-volume
+    deployments may legitimately expose a non-process-owned, non-public writable
+    directory through ACLs or platform policy.
+    """
     try:
         fd_stat = os.fstat(fd)
     except OSError as exc:
         raise RuntimeError("checkpoint directory descriptor could not be inspected safely") from exc
     if not stat.S_ISDIR(fd_stat.st_mode):
         raise RuntimeError("checkpoint parent must be a directory")
+    if fd_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("checkpoint parent directory must not be group/world-writable")
     try:
         path_stat = os.lstat(path)
     except OSError as exc:
@@ -60,6 +70,8 @@ def _assert_directory_identity(fd: int, path: Path) -> os.stat_result:
         raise RuntimeError("checkpoint parent directory must not be a symbolic link")
     if not stat.S_ISDIR(path_stat.st_mode) or not _same_identity(fd_stat, path_stat):
         raise RuntimeError("checkpoint parent directory changed while in use")
+    if path_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("checkpoint parent directory must not be group/world-writable")
     return fd_stat
 
 
