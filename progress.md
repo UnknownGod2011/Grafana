@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, fail-closed HTTP/operator handling, no-replay reconciliation for post-remediation persistence uncertainty, versioned metric/Loki onboarding activation, recovery-only Grafana rechecks after an accepted remediation whose first verification window remains unverified, one fixed-cardinality recovery lifecycle observability contract shared by lifecycle JSON/readiness/Prometheus, and first-class Grafana recovery panels/alerts for that same contract.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, fail-closed HTTP/operator handling, no-replay reconciliation for post-remediation persistence uncertainty, versioned metric/Loki onboarding activation, recovery-only Grafana rechecks after accepted remediation, a fixed-cardinality recovery lifecycle contract shared by lifecycle JSON/readiness/Prometheus/Grafana, and a browser cockpit that now consumes that server-derived recovery contract instead of independently deriving recovery state.
 
 Detailed older run history remains in Git history; this file keeps the current invariants, validation baseline, latest run, blockers, and next step.
 
@@ -28,8 +28,9 @@ Detailed older run history remains in Git history; this file keeps the current i
 - On POSIX/Cloud Run, checkpoint reads/writes and generic secure opens bind to one validated parent-directory descriptor; parent substitution cannot redirect state access.
 - Local checkpoint parents must not be group- or world-writable, including sticky world-writable directories.
 - Recovery observability is fixed-cardinality and provider-detail-free: it may expose only bounded lifecycle state, literal action acceptance, no-replay recheck eligibility, recovery verification, bounded sample count, and checkpoint-phase consistency. It must not export incident IDs, revisions, actors, queries, datasource identities, provider metadata, operation IDs, or remediation targets.
-- A durable recovery outcome must agree with execution phase `resolved`; phase mismatch is exported explicitly, fails readiness closed, and now has a dedicated critical Grafana alert.
-- Grafana recovery panels query only the fixed-cardinality recovery metric families; they must not introduce incident/revision/provider/query/target labels.
+- A durable recovery outcome must agree with execution phase `resolved`; phase mismatch is exported explicitly, fails readiness closed, and has a dedicated critical Grafana alert.
+- Grafana recovery panels query only fixed-cardinality recovery metric families; they do not introduce incident/revision/provider/query/target labels.
+- The browser operator cockpit trusts the authenticated server-produced `recovery` contract for recovery labels and no-replay recheck eligibility. Missing, malformed, self-inconsistent, or checkpoint-inconsistent recovery contracts fail closed and disable lifecycle mutations rather than falling back to nested incident outcome interpretation.
 
 ## Retained validation baseline
 
@@ -38,67 +39,65 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
-- Current committed recovery/API/Grafana regressions remain blocked from repository execution because this automation runner cannot resolve `github.com`; authenticated connector reads/writes work, but commits are not treated as passing tests.
+- Current committed recovery/API/Grafana/operator regressions remain blocked from repository execution because this automation runner cannot resolve `github.com`; authenticated connector reads/writes work, but commits are not treated as passing tests.
 
-## Run log — 2026-09-14 — Grafana recovery lifecycle observability
+## Run log — 2026-09-14 — server-derived operator recovery contract
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the repository tree, `runtime/operator_console.py`, `runtime/recovery_observability.py`, `runtime/grafana/dashboards/stageguard-runtime.json`, `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml`, `runtime/tests/test_operator_recovery_recheck.py`, and `runtime/tests/test_grafana_runtime_observability.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected `runtime/operator_console.py`, `runtime/tests/test_operator_recovery_recheck.py`, `runtime/recovery_observability.py`, and the lifecycle/readiness/metrics wiring in `runtime/api.py`. Confirmed the server already emits one bounded `recovery` object containing `state`, `action_accepted`, `recheck_eligible`, `verified`, `sample_count`, and `checkpoint_phase_consistent`.
+
+No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The server-side recovery contract had already been wired into lifecycle JSON, readiness, and Prometheus, but the Grafana runtime dashboard still showed only remediation watchdog state. Operators therefore could not see whether recovery was telemetry-verified, whether only the no-replay recovery recheck path was eligible, or whether durable recovery state disagreed with the execution checkpoint phase. A checkpoint-phase mismatch failed `/readyz` closed but had no dedicated Grafana alert.
-
-The browser cockpit still derives recovery recheck eligibility from nested incident outcome fields instead of `data.recovery`; that remains an open UI consistency gap and is intentionally recorded below rather than hidden.
+The authenticated lifecycle API was already the authoritative recovery-state source, but the browser cockpit still derived recovery recheck eligibility and recovered/unverified labels from `current.outcome.status` and `current.outcome.action_result.accepted`. That duplicated lifecycle interpretation in the browser and meant a malformed or divergent server recovery contract could be ignored by the UI. The recovery card also rendered the full outcome object rather than the bounded provider-detail-free recovery view.
 
 ### Exact changes made
 
-1. Added a `Recovery verification` Grafana stat panel backed by `stageguard_recovery_verified`.
-2. Added a `Recovery recheck eligibility` stat panel backed by `stageguard_recovery_recheck_eligible`, explicitly described as the no-provider-replay path.
-3. Added a `Recovery checkpoint consistency` stat panel backed by `stageguard_recovery_checkpoint_phase_consistent`, with fail-closed semantics visible to operators.
-4. Added a bounded `Recovery evidence samples` stat panel backed by `stageguard_recovery_sample_count` and documented that it carries no incident/provider/query/target/revision labels.
-5. Added the `recovery` dashboard tag and advanced the dashboard version from 3 to 4.
-6. Added a critical provisioned alert `stageguard-recovery-checkpoint-inconsistent` that fires when the consistency gauge remains below 0.5 for 10 seconds and binds directly to dashboard panel 9.
-7. Kept missing-data semantics distinct from actual inconsistency: the new integrity alert uses `noDataState: NoData`, not `Alerting`, so a scrape outage is handled by the existing scrape/freshness alerts rather than falsely asserting checkpoint corruption.
-8. Added explicit no-replay guidance to the new critical alert description.
-9. Extended `runtime/tests/test_grafana_runtime_observability.py` to lock the four recovery metric queries, panel identities/titles, dashboard recovery tag, no-high-cardinality-selector rule, and critical checkpoint-consistency alert semantics.
-10. Compared the complete functional delta against the previous progress head; exactly three files changed before this progress update.
+1. Added strict browser validation for the authenticated server-produced recovery contract. Recognized states are fixed to `none`, `approval_required`, `action_failed`, `recovery_unverified`, `recovered`, and `unknown`.
+2. Required literal booleans for action acceptance, recheck eligibility, verification, and checkpoint consistency; required integer `sample_count` in the bounded 0..100 range.
+3. Added cross-field validation: `verified` must exactly match `state === recovered`, and `recheck_eligible` must exactly match `state === recovery_unverified && action_accepted === true`.
+4. Removed browser derivation of recheck eligibility from `current.outcome.status` / `current.outcome.action_result.accepted`; `recoveryRecheckAvailable()` now trusts only validated `data.recovery.recheck_eligible`.
+5. Wired every lifecycle response through `render(data.incident, data.recovery, ...)` so refresh, investigate, execute, recheck, reload, and reconciliation all refresh the same server-derived recovery contract.
+6. Added a fail-closed recovery contract safety block. Missing, malformed, self-inconsistent, or checkpoint-phase-inconsistent recovery data disables lifecycle mutation controls and surfaces an explicit operator safety message instead of inferring state in the browser.
+7. Changed the operator proof panel to render `RECOVERED ✓` and `RECHECK ONLY` from the server recovery contract rather than nested outcome status.
+8. Changed the recovery card to display only the bounded recovery contract, not the full remediation outcome/provider result structure.
+9. Preserved the existing no-provider-replay path and all existing checkpoint, audit-integrity, and composite safety interlocks.
+10. Extended `runtime/tests/test_operator_recovery_recheck.py` to regression-lock server-contract use, strict type/cross-field validation, fail-closed malformed/missing behavior, cold-restart `recovery_unverified` recheck-only labeling, terminal `recovered` labeling, and removal of the old outcome-derived eligibility checks.
+11. Compared the functional delta against the previous progress head; exactly two functional files changed before this progress update.
 
 Commits:
-- `8c4c23d3114f42158f4229b2452c689c07986735` — Add recovery lifecycle panels to Grafana runtime dashboard
-- `2c9bdfc15802270f24b97e48cec19101d748e9c4` — Alert on recovery checkpoint inconsistency
-- `ecf6c0ebde1e2b44d9866d60ed3816b1fb45997f` — Lock recovery lifecycle Grafana observability
+- `d412406bc28ac5a949c5de3a201991a6bf7421b4` — Trust server-derived recovery contract in operator cockpit
+- `04688e4f2fad65b69c2290ba637e52ae94e193ad` — Lock server-derived recovery contract in operator UI
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded on `UnknownGod2011/Grafana` `main`.
-- Commit comparison from `2205e2bec3ad0f5ed4e0f1697e0f605373401f21` through `ecf6c0ebde1e2b44d9866d60ed3816b1fb45997f` is `ahead` by three commits and reports exactly:
-  - `runtime/grafana/dashboards/stageguard-runtime.json` (+46/-2)
-  - `runtime/grafana/provisioning/alerting/stageguard-watchdog.yml` (+55)
-  - `runtime/tests/test_grafana_runtime_observability.py` (+63)
-- A fresh shallow clone plus `PYTHONPATH=runtime python -m unittest runtime.tests.test_grafana_runtime_observability` was attempted.
-- Execution could not begin because the runner still fails checkout with `Could not resolve host: github.com`.
-- No GitHub Actions workflow was triggered merely to bypass the transient DNS failure, and this run does not claim the committed tests green.
+- Commit comparison from `a57123a96cc14fc7511e9988e8cf1b642ef0f71e` through `04688e4f2fad65b69c2290ba637e52ae94e193ad` is `ahead` by two commits and reports exactly:
+  - `runtime/operator_console.py` (+11/-9)
+  - `runtime/tests/test_operator_recovery_recheck.py` (+28/-4)
+- A fresh shallow clone was attempted before editing and still failed before checkout with `Could not resolve host: github.com`.
+- Because executable checkout remains unavailable in this runner, the updated Python/embedded-JavaScript tests were not executed here and this run does not claim them green.
+- No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. Recovery/checkpoint inconsistency is an integrity fault and deserves its own critical Grafana signal because it already withdraws API readiness.
-2. Missing metrics and a proven zero-valued consistency gauge are different conditions; scrape/freshness alerts own transport absence while the new alert owns actual lifecycle inconsistency.
-3. Recovery dashboard queries remain direct fixed-cardinality metric names with no user-controlled or incident-specific selectors.
-4. `recovery_unverified` remains a normal operator lifecycle condition rather than a service outage; its dashboard signal is informative (`RECHECK ONLY`) and does not alert by itself.
-5. No provider-specific data, incident IDs, evidence revisions, actor identities, datasource IDs, PromQL payloads, targets, or operation IDs were added to Grafana recovery panels or alert labels.
-6. The existing browser cockpit should be changed next to trust the server-derived `data.recovery` object rather than independently deriving no-replay eligibility from nested outcome fields.
+1. The authenticated lifecycle API is the single recovery-state authority; the browser should present and enforce it, not reconstruct it.
+2. Recovery contract corruption or omission is a safety failure, not a compatibility condition. Operator mutation controls therefore fail closed.
+3. Cross-field validation belongs in the browser too because the UI is a safety surface: a contradictory object such as `state=recovered, verified=false` must not silently produce actionable controls.
+4. `checkpoint_phase_consistent=false` is treated as a lifecycle block in the cockpit, matching `/readyz` and Grafana alert semantics.
+5. The recovery card intentionally shows only the bounded recovery view, reducing accidental exposure of remediation/provider metadata in the browser.
+6. Existing provider execution remains separately guarded by the consumed approval/outcome model; this change does not create a new execution path.
 
 ### Blockers / unknowns
 
-- The updated Grafana observability unittest still requires a current executable repository checkout.
-- The browser cockpit still duplicates recovery eligibility/state interpretation and has not yet been migrated to `data.recovery`.
-- Recent audit/checkpoint/retention/recovery regressions still require consolidated execution.
+- The updated operator recovery regression still requires a current executable repository checkout.
+- Recent audit/checkpoint/retention/recovery/Grafana regressions still require consolidated execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**Remove the remaining browser-side recovery-state duplication: make the operator cockpit use the authenticated server-derived `data.recovery` contract for recheck eligibility, recovered/unverified labels, and terminal-state controls; fail closed on malformed/missing recovery fields; then add cold-restart/operator regressions proving restored `recovery_unverified` is visibly recheck-only and restored `recovered` is terminal without reopening provider execution.**
+**Add an executable browser-level/operator-console test harness (without external paid services) that feeds representative authenticated lifecycle payloads into the embedded cockpit JavaScript and proves controls for `none`, malformed recovery, `recovery_unverified`, and `recovered` states. This should validate actual DOM/button behavior rather than only source-string assertions, and should run locally without Grafana/Gemini/provider credentials.**
