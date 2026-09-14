@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 import unittest
 
@@ -46,6 +47,13 @@ class RemediationReceiverTests(unittest.TestCase):
         connection.close()
         return response.status, payload
 
+    def _raw_status(self, request: bytes) -> int:
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2) as sock:
+            sock.sendall(request)
+            response = sock.recv(4096)
+        status_line = response.split(b"\r\n", 1)[0]
+        return int(status_line.split(b" ", 2)[1])
+
     @staticmethod
     def _document(operation_id: str) -> dict:
         return {
@@ -54,6 +62,22 @@ class RemediationReceiverTests(unittest.TestCase):
             "production_id": "prod-1",
             "target": "uplink-a",
         }
+
+    def _raw_post(self, extra_headers: list[tuple[str, str]], *, body: bytes | None = None) -> int:
+        operation_id = "sg-" + "a" * 40
+        if body is None:
+            body = json.dumps(self._document(operation_id), separators=(",", ":")).encode()
+        headers = [
+            ("Host", f"127.0.0.1:{self.port}"),
+            ("Authorization", "Bearer secret"),
+            ("Content-Type", "application/json"),
+            ("Idempotency-Key", operation_id),
+        ] + extra_headers
+        wire = [b"POST /v1/recover HTTP/1.1\r\n"]
+        wire.extend(f"{name}: {value}\r\n".encode() for name, value in headers)
+        wire.append(b"\r\n")
+        wire.append(body)
+        return self._raw_status(b"".join(wire))
 
     def test_repeated_identical_operation_is_idempotently_accepted(self) -> None:
         operation_id = "sg-" + "a" * 40
@@ -79,6 +103,45 @@ class RemediationReceiverTests(unittest.TestCase):
         self.assertEqual(self._post(document, token="wrong")[0], 401)
         self.assertEqual(self._post(document, key="sg-" + "b" * 40)[0], 409)
         self.assertEqual(len(self.server.operations), 0)
+
+    def test_duplicate_authorization_header_fails_closed_before_mutation(self) -> None:
+        body = json.dumps(self._document("sg-" + "a" * 40), separators=(",", ":")).encode()
+        status = self._raw_post(
+            [("Authorization", "Bearer secret"), ("Content-Length", str(len(body)))],
+            body=body,
+        )
+        self.assertEqual(401, status)
+        self.assertEqual({}, self.server.operations)
+
+    def test_duplicate_idempotency_header_fails_closed_before_mutation(self) -> None:
+        body = json.dumps(self._document("sg-" + "a" * 40), separators=(",", ":")).encode()
+        status = self._raw_post(
+            [("Idempotency-Key", "sg-" + "a" * 40), ("Content-Length", str(len(body)))],
+            body=body,
+        )
+        self.assertEqual(400, status)
+        self.assertEqual({}, self.server.operations)
+
+    def test_ambiguous_request_framing_fails_closed_before_mutation(self) -> None:
+        body = json.dumps(self._document("sg-" + "a" * 40), separators=(",", ":")).encode()
+        cases = (
+            [("Content-Length", str(len(body))), ("Content-Length", str(len(body)))],
+            [("Transfer-Encoding", "chunked")],
+            [("Content-Length", str(len(body))), ("Transfer-Encoding", "chunked")],
+        )
+        for extra_headers in cases:
+            with self.subTest(extra_headers=extra_headers):
+                self.assertEqual(400, self._raw_post(extra_headers, body=body))
+                self.assertEqual({}, self.server.operations)
+
+    def test_non_json_media_type_is_rejected_before_mutation(self) -> None:
+        body = json.dumps(self._document("sg-" + "a" * 40), separators=(",", ":")).encode()
+        status = self._raw_post(
+            [("Content-Type", "text/plain"), ("Content-Length", str(len(body)))],
+            body=body,
+        )
+        self.assertEqual(415, status)
+        self.assertEqual({}, self.server.operations)
 
     def test_reconciliation_reports_not_found_then_accepted_without_replay(self) -> None:
         operation_id = "sg-" + "a" * 40
