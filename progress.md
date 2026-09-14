@@ -29,6 +29,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - On POSIX/Cloud Run, checkpoint atomic writes bind temporary creation and final replacement to one validated parent-directory descriptor; parent-path substitution cannot redirect the write into a substituted directory.
 - On POSIX/Cloud Run, checkpoint bounded reads bind the basename open and subsequent file-identity checks to one validated parent-directory descriptor; parent-path substitution cannot redirect a read into a substituted directory.
 - On POSIX/Cloud Run, the generic secure checkpoint opener also binds existing-file opens and `O_CREAT` creation to one validated parent-directory descriptor before returning a file descriptor.
+- Local checkpoint parents must not be group- or world-writable, including sticky world-writable directories. Directory ownership equality is deliberately not required so container/volume ownership models can remain compatible when namespace permissions are otherwise private.
 - A genuinely absent local checkpoint preserves normal empty-store semantics (`None`) without reintroducing a separate `exists()`/open race.
 
 ## Retained validation baseline
@@ -40,43 +41,41 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Recent hardening regressions remain blocked from full repository execution because this automation runner cannot resolve `github.com`; connector reads/writes work, but commits are not treated as passing repository tests.
 
-## Run log — 2026-09-14 — parent-bound generic checkpoint opens
+## Run log — 2026-09-14 — checkpoint parent permission policy
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected `runtime/checkpoint_file_security.py` and `runtime/tests/test_checkpoint_file_security.py`. Confirmed that bounded production reads and atomic writes were already parent-fd-bound on POSIX, while `open_private_regular_file()` still opened the complete configured pathname directly. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected `runtime/checkpoint_file_security.py`, `runtime/tests/test_checkpoint_file_security.py`, `runtime/bootstrap.py`, and the runtime container definition. Confirmed that the checkpoint parent directory was identity-bound but its namespace permissions were not constrained. The default local checkpoint path is `.stageguard/incident-checkpoint.json`; production can also use GCS. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The generic secure checkpoint opener still represented a weaker filesystem boundary than the dedicated read/write paths. A caller using `open_private_regular_file()` directly could resolve a substituted parent directory before final-component validation. This was especially undesirable because the API explicitly supports both existing-file opens and safe `O_CREAT` creation.
+Descriptor binding prevents parent-path substitution after open, but a group/world-writable parent still gives other principals unnecessary namespace mutation capability around local checkpoint state. Sticky-bit directories reduce unlink/rename attacks but do not provide the private namespace expected for durable incident state. Requiring the directory to be owned by the effective UID would be unnecessarily rigid for container and mounted-volume deployments, where ownership can legitimately differ while permissions/ACLs provide the intended isolation.
 
 ### Exact changes made
 
-1. Added `_open_private_regular_file_via_parent_fd()` for supported POSIX systems.
-2. The helper opens and validates the configured parent directory once, then opens only `state_path.name` relative to that descriptor using `O_NOFOLLOW` where available.
-3. The returned file must be a single-link regular file matching the exact directory entry in the bound parent, and the configured parent pathname must still name the same directory before and after the owner-only `fchmod` step.
-4. `FileNotFoundError` remains distinguishable for genuinely absent files, and `O_TRUNC` remains prohibited.
-5. `O_CREAT`/`O_EXCL` creation now occurs inside the already-bound parent directory instead of resolving the full pathname at creation time.
-6. Portable platforms retain the existing full-path implementation with file-identity checks rather than claiming POSIX-equivalent parent-binding guarantees.
-7. Added direct regressions covering a symlinked parent, a parent swap immediately before the basename open, and a normal parent-bound `O_CREAT|O_EXCL` round trip that produces a single-link `0600` regular file.
+1. Hardened `_assert_directory_identity()` so local checkpoint parents fail closed when either `S_IWGRP` or `S_IWOTH` is set.
+2. Enforced the permission check on both the opened directory descriptor and the currently visible parent pathname, alongside existing directory identity and symlink checks.
+3. Deliberately did not require `st_uid == geteuid()`. This preserves compatibility with non-process-owned container/volume directories while still rejecting namespace permissions that are explicitly group/world writable.
+4. Sticky world-writable directories such as mode `01777` are intentionally rejected for local checkpoint storage; deployments should use a private subdirectory instead.
+5. Added `runtime/tests/test_checkpoint_parent_directory_policy.py` with regressions for group-writable, world-writable, sticky world-writable, non-mutation on rejection, and a normal private-directory checkpoint round trip.
 
 Commits:
-- `0438b8c81e0275da9fec5fb5dccf453683e5adc8` — Bind generic checkpoint opens to parent directory
-- `ba67f7da3e8b4359269ad0a71428b65aad436704` — Add parent-bound generic checkpoint open regressions
+- `5ea9b2d258e32b153ee6889379b1ca8cb483dd96` — Reject unsafe writable checkpoint parent directories
+- `0f8c98e76f16ebedbb1d8c1dcef50368c262abf4` — Add checkpoint parent permission policy regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded on `UnknownGod2011/Grafana` `main`.
-- Fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was attempted after both implementation and regression commits and still failed before checkout with `Could not resolve host: github.com`.
-- Therefore the newly committed `runtime.tests.test_checkpoint_file_security` regressions are not claimed green in this run.
+- Fresh checkout plus focused test execution was attempted with `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` followed by the parent-policy/checkpoint-security unittest modules.
+- The run still failed before checkout with `Could not resolve host: github.com`; therefore the newly committed regressions are not claimed green.
 - No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. Direct secure checkpoint opens must have the same parent-directory trust boundary as higher-level reads and writes on the Linux/Cloud Run production path.
-2. Parent substitution after directory binding fails closed even when the already-open parent descriptor still points to a valid original directory; the configured checkpoint pathname must remain authoritative for the entire open operation.
-3. Creation is anchored to the bound directory descriptor. This prevents an attacker-controlled replacement parent from receiving newly created checkpoint state.
-4. The portable fallback keeps explicit weaker guarantees instead of emulating unsupported dir-fd behavior unsafely.
+1. Local incident checkpoint state requires a private namespace, not merely a securely opened final file.
+2. Group/world write bits are a clear, portable fail-closed signal and are rejected.
+3. Sticky-bit public directories are not accepted as the checkpoint parent; operators can create a private child directory or use the GCS checkpoint backend.
+4. Directory owner equality is not part of the invariant because container/volume ownership and ACL models can legitimately differ from the process UID.
 
 ### Blockers / unknowns
 
@@ -84,8 +83,7 @@ Commits:
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
-- The checkpoint parent directory itself is identity-bound but not yet constrained by ownership/writeability policy; deployment assumptions currently rely on the process account and configured state directory.
 
 ## Single best next step
 
-**Audit the checkpoint parent-directory ownership and writeability assumptions, then decide whether local checkpoint state should fail closed when the parent directory is group/world-writable or not owned by the effective StageGuard user; add focused regressions only if that policy is compatible with Cloud Run/container deployment.**
+**Move out of filesystem hardening and review the production operator path end-to-end: inspect incident investigation/evidence/diagnosis through approval, remediation, recovery verification, and UI state for any remaining user-visible dead ends or missing integration tests; implement the highest-impact functional gap found without depending on external credentials.**
