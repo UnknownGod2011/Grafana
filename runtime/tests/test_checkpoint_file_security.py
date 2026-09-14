@@ -156,7 +156,7 @@ class CheckpointFileSecurityTests(unittest.TestCase):
             def swap_then_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
                 nonlocal swapped
                 if not swapped and src_dir_fd is not None and dst_dir_fd is not None:
-                    parent.replace(displaced)
+                    real_replace(parent, displaced)
                     parent.mkdir()
                     swapped = True
                 return real_replace(
