@@ -227,12 +227,13 @@ class HttpRemediationTransportTests(unittest.TestCase):
         self.assertNotIn("prod-1", request.full_url)
         self.assertNotIn("uplink-a", request.full_url)
 
-    def test_reconcile_maps_404_to_not_found_without_retry_or_replay(self) -> None:
+    def test_reconcile_accepts_only_contract_bound_404_as_not_found(self) -> None:
         calls = []
 
         def missing(req, timeout):
             calls.append(req)
-            raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, None)
+            body = json.dumps({"operation_id": self.request.operation_id, "state": "not_found"}).encode()
+            raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, io.BytesIO(body))
 
         state = self._transport(missing, reconcile=True).reconcile(
             self.request.operation_id,
@@ -241,6 +242,43 @@ class HttpRemediationTransportTests(unittest.TestCase):
         self.assertEqual("not_found", state)
         self.assertEqual(1, len(calls))
         self.assertEqual("GET", calls[0].get_method())
+
+    def test_generic_or_malformed_404_reconciliation_is_unknown(self) -> None:
+        operation_id = self.request.operation_id
+        cases = (
+            b"",
+            b"not-json",
+            json.dumps({"error": "not_found"}).encode(),
+            json.dumps({"operation_id": "sg-" + "b" * 40, "state": "not_found"}).encode(),
+            json.dumps({"operation_id": operation_id, "state": "accepted"}).encode(),
+            json.dumps({"operation_id": operation_id, "state": "not_found", "detail": "proxy"}).encode(),
+            b"x" * (16 * 1024 + 1),
+        )
+        for body in cases:
+            def missing(req, timeout, payload=body):
+                raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, io.BytesIO(payload))
+
+            with self.subTest(body=body[:32]):
+                state = self._transport(missing, reconcile=True).reconcile(operation_id, timeout_seconds=1.0)
+                self.assertEqual("unknown", state)
+
+    def test_reconcile_404_from_different_final_url_is_unknown(self) -> None:
+        body = json.dumps({"operation_id": self.request.operation_id, "state": "not_found"}).encode()
+
+        def missing(_req, timeout):
+            raise urllib.error.HTTPError(
+                "https://proxy.example/not-found",
+                404,
+                "missing",
+                {},
+                io.BytesIO(body),
+            )
+
+        state = self._transport(missing, reconcile=True).reconcile(
+            self.request.operation_id,
+            timeout_seconds=1.0,
+        )
+        self.assertEqual("unknown", state)
 
     def test_reconcile_failures_and_malformed_documents_are_unknown(self) -> None:
         cases = (
