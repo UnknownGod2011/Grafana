@@ -21,7 +21,7 @@ from anchored_incident_service import AnchoredIncidentService
 from execution_safety import ExecutionSafeIncidentService
 from incident_checkpoint import CheckpointConflictError
 from incident_service import IncidentSnapshot
-from remediation import remediate_and_verify, remediation_operation_id
+from remediation import remediate_and_verify, remediation_operation_id, verify_recovery
 
 
 DEFAULT_MAX_REMEDIATION_EXECUTION_SECONDS = 60.0
@@ -65,6 +65,7 @@ class AnchoredExecutionSafeIncidentService(
         ):
             raise ValueError("execution_max_seconds must be a finite positive number")
         self._execution_in_flight = False
+        self._recovery_recheck_in_flight = False
         self._execution_started_monotonic: float | None = None
         self._execution_max_seconds = maximum
         self._execution_monotonic = monotonic or time.monotonic
@@ -107,17 +108,21 @@ class AnchoredExecutionSafeIncidentService(
         super()._require_checkpoint_consistency()
 
     def checkpoint_state(self) -> str:
-        """Fail readiness closed when an active provider call exceeds its bounded window."""
+        """Fail readiness closed when an active provider/recovery operation exceeds its bounded window."""
         with self._lock:
             if self._execution_deadline_exceeded_unlocked():
                 return "execution_uncertain"
             return super().checkpoint_state()
 
     def execution_checkpoint_phase(self):
-        """Expose active dispatch/recovery as a bounded operator-safe phase."""
+        """Expose active provider execution or recovery-only verification without provider detail."""
         with self._lock:
             if self._execution_in_flight:
-                return "dispatching"
+                # A recovery recheck performs no provider mutation, so do not expose
+                # it as a dispatching phase. ``resolved`` here means provider dispatch
+                # has already completed; the active watchdog metric still shows that
+                # fresh recovery evidence collection is in progress.
+                return "resolved" if self._recovery_recheck_in_flight else "dispatching"
             return super().execution_checkpoint_phase()
 
     def remediation_execution_observability(self) -> dict[str, float | bool]:
@@ -165,12 +170,10 @@ class AnchoredExecutionSafeIncidentService(
                 raise RuntimeError("this approval has already been consumed")
 
             operation_id = remediation_operation_id(snapshot.report, snapshot.approval)
-            # Validate the watchdog before persisting the dispatch barrier. A broken
-            # local clock must prevent provider contact without leaving durable state
-            # that falsely implies dispatch may already have happened.
             started_monotonic = self._read_execution_monotonic()
             dispatch_barrier = self._persist_dispatching_barrier(snapshot)
             self._execution_started_monotonic = started_monotonic
+            self._recovery_recheck_in_flight = False
             self._execution_in_flight = True
 
         try:
@@ -234,8 +237,6 @@ class AnchoredExecutionSafeIncidentService(
                 )
                 raise
             except Exception:
-                # Provider contact has already happened, but a failed lifecycle
-                # commit is not authority for exposing the candidate outcome.
                 self._snapshot = snapshot
                 self._mark_execution_uncertain(
                     operation_id=operation_id,
@@ -245,4 +246,74 @@ class AnchoredExecutionSafeIncidentService(
                 raise
             finally:
                 self._execution_in_flight = False
+                self._recovery_recheck_in_flight = False
+                self._execution_started_monotonic = None
+
+    def recheck_recovery(self, *, actor: str = "stageguard") -> IncidentSnapshot:
+        """Recheck Grafana recovery evidence without blocking reads or replaying remediation."""
+        with self._lock:
+            self._require_checkpoint_consistency()
+            snapshot = self._snapshot
+            if snapshot is None or snapshot.approval is None or snapshot.outcome is None:
+                raise RuntimeError("a completed accepted remediation is required before recovery recheck")
+            previous = snapshot.outcome
+            if previous.status != "recovery_unverified":
+                raise RuntimeError("recovery recheck is only allowed while recovery remains unverified")
+            if previous.action_result is None or previous.action_result.accepted is not True:
+                raise RuntimeError("recovery recheck requires a previously accepted remediation action")
+
+            started_monotonic = self._read_execution_monotonic()
+            self._execution_started_monotonic = started_monotonic
+            self._recovery_recheck_in_flight = True
+            self._execution_in_flight = True
+
+        try:
+            outcome = verify_recovery(
+                previous.action_result,
+                self._metrics,
+                profile=self._profile,
+                sleep=self._recovery_sleep,
+            )
+        except Exception:
+            # Recovery-only evidence collection has no provider side effect, so a
+            # telemetry failure must not manufacture provider execution uncertainty.
+            with self._lock:
+                self._execution_in_flight = False
+                self._recovery_recheck_in_flight = False
+                self._execution_started_monotonic = None
+            raise
+
+        with self._lock:
+            try:
+                current = self._snapshot
+                if (
+                    current is None
+                    or current.incident_id != snapshot.incident_id
+                    or current.revision != snapshot.revision
+                    or current.approval != snapshot.approval
+                    or current.outcome != previous
+                ):
+                    raise RuntimeError("incident state changed during recovery recheck")
+
+                candidate = IncidentSnapshot(
+                    snapshot.incident_id,
+                    snapshot.revision,
+                    snapshot.report,
+                    snapshot.approval,
+                    outcome,
+                )
+                return self._record_snapshot_transition(
+                    candidate,
+                    "recovery_rechecked",
+                    actor.strip() or "stageguard",
+                    {
+                        "revision": snapshot.revision,
+                        "status": outcome.status,
+                        "sample_count": len(outcome.samples),
+                        "provider_replayed": False,
+                    },
+                )
+            finally:
+                self._execution_in_flight = False
+                self._recovery_recheck_in_flight = False
                 self._execution_started_monotonic = None
