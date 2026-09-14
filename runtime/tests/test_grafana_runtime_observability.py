@@ -19,6 +19,13 @@ FRESHNESS_EXPR = (
     "or vector(1000000000) * absent(stageguard_remediation_execution_deadline_exceeded)"
 )
 
+RECOVERY_METRICS = {
+    "stageguard_recovery_verified",
+    "stageguard_recovery_recheck_eligible",
+    "stageguard_recovery_checkpoint_phase_consistent",
+    "stageguard_recovery_sample_count",
+}
+
 
 class GrafanaRuntimeObservabilityTests(unittest.TestCase):
     @classmethod
@@ -47,6 +54,45 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
             expressions,
         )
         self.assertIn(FRESHNESS_EXPR, expressions)
+
+    def test_dashboard_queries_provider_detail_free_recovery_contract(self) -> None:
+        expressions = {
+            target["expr"]
+            for panel in self.dashboard["panels"]
+            for target in panel.get("targets", [])
+        }
+        self.assertTrue(RECOVERY_METRICS.issubset(expressions))
+        panels = {panel["id"]: panel for panel in self.dashboard["panels"]}
+        self.assertEqual(panels[7]["title"], "Recovery verification")
+        self.assertEqual(panels[8]["title"], "Recovery recheck eligibility")
+        self.assertEqual(panels[9]["title"], "Recovery checkpoint consistency")
+        self.assertEqual(panels[10]["title"], "Recovery evidence samples")
+        self.assertIn("no-replay", panels[8]["description"].lower())
+        self.assertIn("fails closed", panels[9]["description"].lower())
+        self.assertIn("no incident", panels[10]["description"].lower())
+        self.assertIn("recovery", self.dashboard["tags"])
+
+    def test_recovery_dashboard_queries_have_no_high_cardinality_selectors(self) -> None:
+        recovery_expressions = [
+            target["expr"]
+            for panel in self.dashboard["panels"]
+            for target in panel.get("targets", [])
+            if target.get("expr", "").startswith("stageguard_recovery_")
+        ]
+        self.assertEqual(set(recovery_expressions), RECOVERY_METRICS)
+        rendered = "\n".join(recovery_expressions).lower()
+        for forbidden in (
+            "incident",
+            "revision",
+            "actor",
+            "provider",
+            "operation_id",
+            "target=",
+            "datasource",
+            "query=",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, rendered)
 
     def test_dashboard_uses_the_provisioned_read_only_prometheus_source(self) -> None:
         for panel in self.dashboard["panels"]:
@@ -115,6 +161,23 @@ class GrafanaRuntimeObservabilityTests(unittest.TestCase):
         self.assertIn("timestamp(stageguard_remediation_execution_deadline_exceeded)", FRESHNESS_EXPR)
         self.assertIn("absent(stageguard_remediation_execution_deadline_exceeded)", FRESHNESS_EXPR)
         self.assertIn("vector(1000000000)", FRESHNESS_EXPR)
+
+    def test_checkpoint_phase_inconsistency_has_critical_no_replay_alert(self) -> None:
+        marker = "- uid: stageguard-recovery-checkpoint-inconsistent"
+        self.assertIn(marker, self.alerting)
+        rule = self.alerting.split(marker, 1)[1]
+        self.assertIn(
+            "expr: min(stageguard_recovery_checkpoint_phase_consistent)",
+            rule,
+        )
+        self.assertIn("params: [0.5]", rule)
+        self.assertIn("type: lt", rule)
+        self.assertIn("panelId: 9", rule)
+        self.assertIn("noDataState: NoData", rule)
+        self.assertIn("execErrState: Error", rule)
+        self.assertIn("for: 10s", rule)
+        self.assertIn("severity: critical", rule)
+        self.assertIn("Do not replay remediation", rule)
 
     def test_provisioning_does_not_embed_notification_destinations_or_secrets(self) -> None:
         lowered = self.alerting.lower()
