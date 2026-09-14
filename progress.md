@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, no-replay execution reconciliation, recovery-only Grafana rechecks, fixed-cardinality recovery observability, stdio-only Grafana MCP launchers, duplicate authentication-header rejection, strict request framing, and fail-closed mutation protocol preflight.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, no-replay execution reconciliation, recovery-only Grafana rechecks, fixed-cardinality recovery observability, stdio-only Grafana MCP launchers, duplicate authentication-header rejection, strict request framing, fail-closed mutation protocol preflight, and a loopback reference remediation provider with idempotent writes plus read-only operation reconciliation.
 
 Detailed older run history remains in Git history; this file keeps the current invariants, validation baseline, latest run, blockers, and next step.
 
@@ -19,8 +19,9 @@ Detailed older run history remains in Git history; this file keeps the current i
 - `recovery_unverified` can only use the recovery-only verification path and cannot replay provider remediation.
 - Execution uncertainty is resolved only through durable reload/reconciliation and fresh Grafana evidence; `/v1/execute` is never the recovery mechanism.
 - Durable checkpoint/audit failures fail closed; ambiguous provider execution blocks replay.
-- Authentication credentials are bounded and duplicate credential-bearing headers fail closed.
-- Mutating HTTP requests reject every `Transfer-Encoding` field and duplicate `Content-Length` fields before body reads.
+- Provider reconciliation is read-only, keyed only by the server-owned StageGuard operation ID, and never returns mutation action/production/target detail.
+- Authentication credentials are bounded and duplicate credential-bearing headers fail closed on the StageGuard operator API.
+- Mutating StageGuard HTTP requests reject every `Transfer-Encoding` field and duplicate `Content-Length` fields before body reads.
 - Only the seven documented exact POST mutation paths are eligible for authentication/body processing; unknown or query-bearing POST routes are rejected before body consumption and the connection is closed.
 - Every `Expect` header is rejected with 417 before body processing. `handle_expect_100` is explicitly overridden so a future HTTP/1.1 response-mode change cannot silently enable provisional `100 Continue` behavior.
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
@@ -36,61 +37,71 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - The identity module plus its focused tests were previously reconstructed from committed content and executed independently: 14/14 passed.
 - The request-framing boundary was independently exercised through Python's real `BaseHTTPRequestHandler` parser with raw sockets: duplicate/conflicting CL, duplicate identical CL, TE-only chunked, and CL+TE were rejected before mutation; a normal single-CL JSON request succeeded.
-- This run independently exercised the new protocol-preflight behavior with a minimal real `ThreadingHTTPServer`: unknown POST and query-bearing POST returned immediate 404 responses without body bytes, `Expect: 100-continue` returned 417, and forcing the handler to HTTP/1.1 still returned 417 through the explicit `handle_expect_100` override.
+- The StageGuard API protocol-preflight behavior was independently exercised with a real `ThreadingHTTPServer`: unknown/query-bearing POSTs returned immediate 404 without body bytes and `Expect` returned 417, including the explicit HTTP/1.1 `handle_expect_100` path.
+- This run reconstructed the new loopback remediation-provider reconciliation behavior with the same standard-library server logic and executed a real HTTP smoke: unknown operation -> 404/not_found, POST acceptance -> 200, subsequent GET -> 200/accepted, bad reconciliation bearer -> 401, conflicting reuse -> 409, one operation retained. Result: PASS.
 - Current committed consolidated tests remain blocked from repository execution because this runner cannot resolve `github.com` for a fresh checkout. Connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — mutation protocol preflight hardening
+## Run log — 2026-09-15 — reference provider reconciliation
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected `runtime/api.py`, the existing raw request-framing regression, `API.md`, Python standard-library `BaseHTTPRequestHandler.parse_request`, and `handle_expect_100` semantics.
+Read this `progress.md` completely before selecting work. Inspected the repository tree and recent commits, confirmed there are currently no GitHub Actions runs to mine for the historical 9-failure/15-error output, and inspected:
 
-Confirmed two adjacent protocol facts:
+- `runtime/http_remediation_transport.py`
+- `runtime/production_remediation.py`
+- `runtime/execution_safety.py`
+- `runtime/tests/test_http_remediation_transport.py`
+- `runtime/remediation_receiver.py`
+- `runtime/tests/test_remediation_receiver.py`
+- `runtime/tests/test_http_remediation_tls_integration.py`
+- `README.md`
 
-1. StageGuard currently emits HTTP/1.0 responses, so the standard library does not normally auto-send `100 Continue` for HTTP/1.1 requests. However, the default `handle_expect_100` would send a provisional 100 response if the handler ever moved to HTTP/1.1 response mode.
-2. More importantly, `do_POST` authenticated and called `_read_json` before verifying that the request path was a supported mutation endpoint. Therefore an authenticated or otherwise processable POST to an unknown/query-bearing path with a declared-but-unsent body could occupy a request worker waiting for bytes that StageGuard would ultimately discard.
+A fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was also attempted and still fails with `Could not resolve host: github.com` in this runner.
 
-No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, provider credential, IAM binding, or GitHub Actions workflow was modified or triggered.
+### Triage decision
+
+Static inspection initially flagged the oversized remediation-response `ValueError` as a possible transport defect. Deeper inspection showed that behavior is intentional and safety-critical: after provider dispatch may have occurred, the exception propagates into `ExecutionSafeIncidentService`, which marks the operation `execution_uncertain` and forces provider reconciliation rather than incorrectly recording a definitive rejection. The existing regression explicitly requires that exception. No change was made to this no-replay behavior.
+
+The genuine working-software gap selected instead was the built-in reference remediation provider. It accepted idempotent `POST /v1/recover` requests but had no provider reconciliation endpoint, even though StageGuard's production transport and execution-safety flow require read-only reconciliation after ambiguous dispatch. Its `ThreadingHTTPServer` operation registry also used a non-atomic check-then-store sequence for duplicate operation IDs.
 
 ### Exact changes made
 
-1. Added the explicit `_POST_PATHS` allowlist containing the seven documented lifecycle mutation routes.
-2. Changed `StageGuardHandler.do_POST` to parse and validate the exact route before authentication and before `_read_json`.
-3. Unknown paths and query-bearing mutation routes now return bounded 404 JSON immediately, set `close_connection=True`, and never read the declared body.
-4. Any `Expect` header now returns bounded HTTP 417 `expectation_failed` before authentication/body processing and closes the connection.
-5. Overrode `handle_expect_100` to return the same fail-closed 417 response. This is defense-in-depth for any future change from the current HTTP/1.0 response protocol to HTTP/1.1.
-6. Kept dispatch keyed to the already-parsed path and added an internal fail-closed 500 guard if the allowlist and dispatch table ever drift.
-7. Added `runtime/tests/test_api_protocol_preflight.py` with real raw TCP requests. It verifies immediate rejection without sending the declared body, query-bearing route rejection, normal-HTTP `Expect` rejection, the HTTP/1.1 `handle_expect_100` path, no lifecycle mutation on rejection, and a normal authenticated control POST.
-8. Updated `API.md` to document the exact mutation protocol preflight contract.
+1. Added authenticated `GET /v1/operations/<operation_id>` to `runtime/remediation_receiver.py`.
+2. The endpoint returns only `{operation_id, state}` for accepted operations and a 404 `not_found` contract for absent operations; action, production, target, credentials, and other provider detail are not returned.
+3. Invalid reconciliation operation IDs fail closed with 400 and reconciliation requires the same bearer boundary as remediation writes.
+4. Added an `operations_lock` to make the idempotency registry's check-and-store operation atomic under `ThreadingHTTPServer`; conflicting reuse can no longer race through the absent-operation check.
+5. Refactored operation-ID validation and bearer checking into narrow helpers shared by write and reconciliation paths.
+6. Added receiver regressions for not-found -> accepted reconciliation, reconciliation authentication, absence of mutation detail in reconciliation output, and invalid reconciliation IDs.
+7. Updated `README.md` governed-remediation and repository-structure sections to document the loopback reference provider's write + read-only reconciliation contract and its non-production scope.
 
 Commits:
-- `e53b59c36b17fe257085974b12a58b9590d38075` — fail closed before reading unsupported POST bodies
-- `148c129bc720c3d78ebe873f35b44b8ef622aa64` — raw HTTP protocol preflight regressions
-- `acefa5b84cedf588bbdebc9526f2ac5eabaf0f64` — document mutation protocol preflight
+- `3cf7e2d6c2256e50c35b398ff884e53e296bd128` — add reference remediation reconciliation endpoint and atomic registry
+- `bb027005caad404f33fe1d23a405463ebe57bba5` — test reference provider reconciliation
+- `69f4c79c5c0195b96f97d4bfe5cf4656a8482c66` — document reference provider reconciliation contract
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded against `UnknownGod2011/Grafana`.
-- Inspected the committed `runtime/api.py` diff after write; only the intended allowlist, `Expect` guard, preflight ordering, parsed-path dispatch, and drift guard changed.
-- Fresh repository checkout was attempted and remains blocked by `Could not resolve host: github.com`; therefore the committed test modules could not be executed from the repository and no suite-green claim is made.
-- Independently exercised the exact protocol behavior using Python's real `ThreadingHTTPServer`/`BaseHTTPRequestHandler` with raw sockets: unknown route => HTTP/1.0 404, query-bearing route => HTTP/1.0 404, normal handler + `Expect` => HTTP/1.0 417, forced HTTP/1.1 handler + `Expect` => HTTP/1.1 417. These responses arrived without sending the declared 4096-byte body.
-- No GitHub Actions run was triggered merely to bypass local DNS.
+- Fresh repository checkout remains blocked by runner DNS; therefore the committed unittest module was not executed from a checkout and no repository-suite green claim is made.
+- Reconstructed the changed reference-provider behavior locally with Python's real `ThreadingHTTPServer` and `http.client`, then syntax-compiled and exercised it over real loopback HTTP. Assertions passed for missing reconciliation, accepted reconciliation, bad bearer rejection, conflicting idempotency-key reuse, and single-operation retention: `receiver reconciliation smoke: PASS`.
+- No GitHub Actions workflow was triggered merely to bypass the transient checkout/DNS problem.
+- No external Grafana, Gemini, Google Cloud, remediation provider, credential, or unrelated repository was touched.
 
 ### Decisions
 
-1. Keep StageGuard's mutation surface exact-path-only; POST query strings are unsupported rather than ignored.
-2. Reject all `Expect` headers instead of attempting partial RFC interoperability on a privileged lifecycle API.
-3. Route rejection must happen before authentication/body reads because unsupported paths do not need request bodies and should not consume worker capacity waiting for them.
-4. Preserve the current HTTP/1.0 response protocol; the `handle_expect_100` override exists only as defense-in-depth against a future protocol-version change.
+1. Preserve oversized/malformed post-dispatch response escalation into execution uncertainty; converting it into an ordinary non-retryable rejection could destroy the no-replay safety guarantee.
+2. Provider reconciliation remains GET-only/read-only and uses only StageGuard's stable server-owned operation identity.
+3. Keep the reference receiver explicitly loopback-only and non-production; it exists to make the provider contract executable without paid infrastructure or external credentials.
+4. Make provider-side idempotency check-and-store atomic because the fixture itself uses a threaded HTTP server and should model correct concurrent provider semantics.
 
 ### Blockers / unknowns
 
-- This runner still cannot resolve `github.com` for a fresh repository checkout, so the committed protocol-preflight regression and consolidated suites cannot execute here.
-- Recent audit/checkpoint/recovery/Grafana/MCP/auth/request-framing/protocol-preflight regressions still require consolidated execution.
+- This runner still cannot resolve `github.com` for a fresh repository checkout, so the committed receiver regression and consolidated suites cannot execute here.
+- Recent audit/checkpoint/recovery/Grafana/MCP/auth/request-framing/protocol-preflight/provider-reconciliation regressions still require consolidated execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege invoker identity, and Docker.
-- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
+- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim, and there are no stored GitHub Actions runs containing that historical failure output.
 
 ## Single best next step
 
-**Stop adding speculative HTTP protocol hardening. As soon as repository checkout is executable, run the focused HTTP/auth/MCP/recovery suites plus the full unittest suite, classify the historical 9 failures / 15 errors into stale-test vs genuine-product defects, and fix the highest-severity genuine defect first. If checkout remains unavailable, inspect the historical failing test/run data through the GitHub connector and begin that triage without triggering new CI.**
+**When checkout becomes executable, run `runtime.tests.test_remediation_receiver`, the HTTP remediation transport/TLS tests, the focused recovery/no-replay suite, and then the full unittest suite; classify every remaining full-suite failure/error and fix the highest-severity genuine product defect. If checkout is still unavailable, continue static triage through the connector, prioritizing end-to-end provider reconciliation and lifecycle paths over additional speculative protocol hardening.**
