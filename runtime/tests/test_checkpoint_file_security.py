@@ -45,6 +45,57 @@ class CheckpointFileSecurityTests(unittest.TestCase):
 
             self.assertEqual(target.read_bytes(), b"state")
 
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_open(),
+        "requires directory-relative checkpoint reads",
+    )
+    def test_read_rejects_symlink_parent_without_reading_target_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_parent = root / "real-parent"
+            real_parent.mkdir()
+            (real_parent / "checkpoint.json").write_bytes(b"attacker-state")
+            linked_parent = root / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+            with self.assertRaises(RuntimeError):
+                read_private_bytes(linked_parent / "checkpoint.json", max_bytes=64)
+
+            self.assertEqual((real_parent / "checkpoint.json").read_bytes(), b"attacker-state")
+
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_open(),
+        "requires directory-relative checkpoint reads",
+    )
+    def test_directory_relative_read_cannot_be_redirected_by_parent_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "state"
+            parent.mkdir()
+            checkpoint = parent / "checkpoint.json"
+            checkpoint.write_bytes(b"trusted-state")
+            displaced = root / "state-original"
+            real_open = os.open
+            real_replace = os.replace
+            swapped = False
+
+            def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if not swapped and dir_fd is not None and path == checkpoint.name:
+                    real_replace(parent, displaced)
+                    parent.mkdir()
+                    (parent / checkpoint.name).write_bytes(b"attacker-state")
+                    swapped = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(checkpoint_file_security.os, "open", side_effect=swap_then_open):
+                with self.assertRaisesRegex(RuntimeError, "parent directory changed"):
+                    read_private_bytes(checkpoint, max_bytes=64)
+
+            self.assertTrue(swapped)
+            self.assertEqual((displaced / checkpoint.name).read_bytes(), b"trusted-state")
+            self.assertEqual(checkpoint.read_bytes(), b"attacker-state")
+
     def test_identity_check_rejects_post_open_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
