@@ -191,6 +191,7 @@ def _atomic_write_via_parent_fd(state_path: Path, data: bytes, parent_fd: int) -
         finally:
             os.close(final_fd)
         os.fsync(parent_fd)
+        _assert_directory_identity(parent_fd, state_path.parent)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -223,6 +224,7 @@ def _atomic_write_portable_fallback(state_path: Path, data: bytes, parent_fd: in
             assert_private_regular_file_identity(final_fd, state_path)
         finally:
             os.close(final_fd)
+        _assert_directory_identity(parent_fd, state_path.parent)
     finally:
         if fd >= 0:
             os.close(fd)
