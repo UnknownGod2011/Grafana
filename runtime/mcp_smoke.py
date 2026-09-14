@@ -6,12 +6,13 @@ import json
 import math
 import os
 import queue
-import shlex
 import subprocess
 import sys
 import threading
 import time
 from typing import Any
+
+from command_line import split_command
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
@@ -28,6 +29,21 @@ REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
 
 class McpError(RuntimeError):
     pass
+
+
+def _configured_command(raw: str | None = None) -> list[str]:
+    """Return a validated stdio-only MCP launcher for the release smoke path.
+
+    The smoke test is part of StageGuard's acceptance boundary, so custom launcher
+    overrides must obey the same transport policy as production evidence adapters.
+    Keep parsing and policy enforcement centralized in ``command_line.split_command``
+    rather than letting this diagnostic path become a network-transport escape hatch.
+    """
+    command = os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND) if raw is None else raw
+    try:
+        return split_command(command)
+    except ValueError as exc:
+        raise McpError(f"invalid STAGEGUARD_MCP_COMMAND: {exc}") from exc
 
 
 def _request_timeout_seconds(raw: str | None) -> float:
@@ -237,7 +253,7 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    command = shlex.split(os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND))
+    command = _configured_command()
     request_timeout = _request_timeout_seconds(os.getenv("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS"))
     print("Launching official Grafana MCP smoke test:", " ".join(command))
     client = StdioClient(command, request_timeout_seconds=request_timeout)
