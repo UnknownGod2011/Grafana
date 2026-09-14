@@ -2,96 +2,95 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, fail-closed HTTP/operator handling, no-replay reconciliation for post-remediation persistence uncertainty, versioned metric/Loki onboarding activation, recovery-only Grafana rechecks after accepted remediation, fixed-cardinality recovery observability, stdio-only Grafana MCP launcher enforcement across production and smoke tooling, duplicate authentication-header rejection, and fail-closed HTTP mutation request framing.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, no-replay execution reconciliation, recovery-only Grafana rechecks, fixed-cardinality recovery observability, stdio-only Grafana MCP launchers, duplicate authentication-header rejection, strict request framing, and fail-closed mutation protocol preflight.
 
 Detailed older run history remains in Git history; this file keeps the current invariants, validation baseline, latest run, blockers, and next step.
 
 ## Core invariants
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
-- StageGuard's production Grafana MCP adapters and smoke/acceptance client are local **stdio-only** subprocess clients. Explicit SSE/streamable-HTTP launchers fail closed, and direct use of the official Docker image requires explicit `-t stdio` before the child process can be spawned.
+- StageGuard's production Grafana MCP adapters and smoke client are local stdio-only subprocess clients; network MCP transports fail closed.
 - Investigation and recovery accept only finite non-boolean numeric metric evidence; malformed samples become unavailable and can never prove diagnosis/recovery.
-- Loki corroboration validates adapter envelopes, exact evidence windows, record budgets/shapes, scope, and event identity before corroborating a diagnosis.
+- Loki corroboration validates bounded evidence envelopes, windows, shapes, scope, and event identity.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
-- Approval is exact-revision-bound and single-use; remediation acceptance requires literal boolean `True`.
-- Provider action success never counts as recovery; fresh Grafana telemetry must prove recovery.
-- Once an accepted provider action has produced `recovery_unverified`, follow-up verification uses a recovery-only path with no remediation client and therefore cannot replay the provider side effect.
-- Durable `recovery_unverified` state survives restart and remains eligible only for recovery-only verification; `recovered` is terminal.
-- Durable checkpoint/audit failures fail closed; once provider dispatch may have occurred, persistence uncertainty blocks replay.
-- Production remediation HTTP requests never follow redirects and do not redirect bearer/idempotency authority.
-- Authentication/identity inputs are bounded and attacker-controlled credentials are bounded before comparison.
-- Bearer and Google IAP authentication each require exactly one credential-bearing HTTP header; duplicate `Authorization` or `X-Goog-IAP-JWT-Assertion` fields fail closed before credential comparison or JWT verification.
-- Mutating HTTP requests reject every `Transfer-Encoding` field and reject duplicate `Content-Length` fields, including identical duplicates, before reading body bytes or invoking lifecycle mutation logic.
-- Metric activation v2 pins the exact ordered eight-query profile contract; Loki activation v2 pins policy-owned LogQL/limit and bounded preflight evidence.
-- The reference Grafana MCP dependency is pinned to `grafana/mcp-grafana:1.4.1`; read-only/tool-surface restrictions are regression-locked.
-- Core remediation watchdog clocks are finite native numbers; invalid/backward active clocks fail readiness closed.
-- Local audit/checkpoint state is symlink/hard-link/path-substitution hardened and owner-private; POSIX checkpoint access is parent-directory-descriptor bound.
-- Local checkpoint parents must not be group- or world-writable, including sticky world-writable directories.
-- Recovery observability is fixed-cardinality and provider-detail-free.
-- Durable recovery outcome and execution phase must agree; mismatch fails readiness closed and has a critical Grafana alert.
-- The browser cockpit trusts the authenticated server-produced recovery contract. Missing, malformed, self-inconsistent, or checkpoint-inconsistent recovery data fails closed and disables lifecycle mutations.
-- The browser recovery control uses only `POST /v1/recovery/recheck`; the operator UI must never infer a need to invoke `/v1/execute` when recovery is already `recovery_unverified`.
-- Execution uncertainty is resolved only by durable checkpoint reload plus server-owned provider reconciliation and fresh Grafana evidence; callers never supply provider operation identity/state.
-- Fast local recovery-safety validation executes the real embedded operator-console JavaScript; missing Node is an explicit validation failure rather than a silently skipped browser safety check.
+- Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
+- Fresh Grafana telemetry is required to verify recovery.
+- `recovery_unverified` can only use the recovery-only verification path and cannot replay provider remediation.
+- Execution uncertainty is resolved only through durable reload/reconciliation and fresh Grafana evidence; `/v1/execute` is never the recovery mechanism.
+- Durable checkpoint/audit failures fail closed; ambiguous provider execution blocks replay.
+- Authentication credentials are bounded and duplicate credential-bearing headers fail closed.
+- Mutating HTTP requests reject every `Transfer-Encoding` field and duplicate `Content-Length` fields before body reads.
+- Only the seven documented exact POST mutation paths are eligible for authentication/body processing; unknown or query-bearing POST routes are rejected before body consumption and the connection is closed.
+- Every `Expect` header is rejected with 417 before body processing. `handle_expect_100` is explicitly overridden so a future HTTP/1.1 response-mode change cannot silently enable provisional `100 Continue` behavior.
+- Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
+- Recovery observability remains fixed-cardinality and provider-detail-free.
+- The browser cockpit trusts the authenticated server-produced recovery contract and fails closed on malformed/inconsistent lifecycle state.
 
 ## Retained validation baseline
 
-- Local onboarding doctor: 8 passed, 1 expected platform-specific permission test skipped on Windows.
+- Local onboarding doctor: 8 passed, 1 expected Windows-specific permission test skipped.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
-- Current committed recovery/API/Grafana/operator/MCP transport/request-framing regressions remain blocked from repository execution because this runner cannot resolve `github.com`; authenticated connector reads/writes work, but connector commits are not treated as passing tests.
-- The identity module plus its focused unit tests were previously reconstructed locally from the exact committed change content and executed independently: 14/14 identity tests passed.
-- The exact new request-framing logic was independently exercised against Python's real `BaseHTTPRequestHandler`/`HTTPMessage` parser with raw sockets: duplicate conflicting CL, duplicate identical CL, TE-only chunked, and CL+TE were all rejected with 400 before mutation; the single-CL JSON control request succeeded. This validates parser semantics but is not a claim that the committed repository test module executed.
+- The identity module plus its focused tests were previously reconstructed from committed content and executed independently: 14/14 passed.
+- The request-framing boundary was independently exercised through Python's real `BaseHTTPRequestHandler` parser with raw sockets: duplicate/conflicting CL, duplicate identical CL, TE-only chunked, and CL+TE were rejected before mutation; a normal single-CL JSON request succeeded.
+- This run independently exercised the new protocol-preflight behavior with a minimal real `ThreadingHTTPServer`: unknown POST and query-bearing POST returned immediate 404 responses without body bytes, `Expect: 100-continue` returned 417, and forcing the handler to HTTP/1.1 still returned 417 through the explicit `handle_expect_100` override.
+- Current committed consolidated tests remain blocked from repository execution because this runner cannot resolve `github.com` for a fresh checkout. Connector commits are not treated as passing tests.
 
-## Run log — 2026-09-14 — HTTP request-framing hardening
+## Run log — 2026-09-15 — mutation protocol preflight hardening
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the current `runtime/api.py`, `runtime/tests/test_api.py`, test tree, and `API.md`. The previous run explicitly identified HTTP request framing as the next production boundary.
+Read this `progress.md` completely before selecting work. Inspected `runtime/api.py`, the existing raw request-framing regression, `API.md`, Python standard-library `BaseHTTPRequestHandler.parse_request`, and `handle_expect_100` semantics.
 
-Confirmed a concrete defect in `_read_json`: it used a single-value `headers.get("Content-Length")` lookup and did not inspect `Transfer-Encoding`. Python's request parser preserves repeated fields, so duplicate `Content-Length` values could be interpreted by StageGuard using only one field. A `Transfer-Encoding: chunked` request with no Content-Length was treated as an empty JSON body, which could let an authenticated empty-body lifecycle endpoint execute while transfer-coded bytes remained unread. This is an origin/proxy parser-differential and request-smuggling class boundary and must fail closed.
+Confirmed two adjacent protocol facts:
 
-No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+1. StageGuard currently emits HTTP/1.0 responses, so the standard library does not normally auto-send `100 Continue` for HTTP/1.1 requests. However, the default `handle_expect_100` would send a provisional 100 response if the handler ever moved to HTTP/1.1 response mode.
+2. More importantly, `do_POST` authenticated and called `_read_json` before verifying that the request path was a supported mutation endpoint. Therefore an authenticated or otherwise processable POST to an unknown/query-bearing path with a declared-but-unsent body could occupy a request worker waiting for bytes that StageGuard would ultimately discard.
+
+No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, provider credential, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Exact changes made
 
-1. Added `_header_values` to `runtime/api.py` so security-sensitive framing checks observe every received field-value through `HTTPMessage.get_all`, with a compatibility fallback for simpler header mappings.
-2. Changed `_read_json` to reject any `Transfer-Encoding` header before reading body bytes. StageGuard does not implement request transfer coding, so there is no safe reason to accept it.
-3. Changed `_read_json` to require at most one `Content-Length` field. Both conflicting and identical duplicates are rejected rather than normalized, eliminating ambiguity across proxies/parsers.
-4. Preserved the existing 16 KiB body cap, JSON object requirement, content-type check for non-empty bodies, and empty-body behavior for endpoints whose contract is `{}`.
-5. Added `runtime/tests/test_api_request_framing.py`, using real raw TCP/HTTP requests against `make_server` rather than mocked header maps. The regressions cover conflicting duplicate CL, identical duplicate CL, TE-only chunked framing, CL+TE framing, and a normal single-CL control request. Every rejection asserts that no audit event or incident mutation occurred.
-6. Updated `API.md` to make the strict mutation request-framing contract explicit for operators and integrators.
+1. Added the explicit `_POST_PATHS` allowlist containing the seven documented lifecycle mutation routes.
+2. Changed `StageGuardHandler.do_POST` to parse and validate the exact route before authentication and before `_read_json`.
+3. Unknown paths and query-bearing mutation routes now return bounded 404 JSON immediately, set `close_connection=True`, and never read the declared body.
+4. Any `Expect` header now returns bounded HTTP 417 `expectation_failed` before authentication/body processing and closes the connection.
+5. Overrode `handle_expect_100` to return the same fail-closed 417 response. This is defense-in-depth for any future change from the current HTTP/1.0 response protocol to HTTP/1.1.
+6. Kept dispatch keyed to the already-parsed path and added an internal fail-closed 500 guard if the allowlist and dispatch table ever drift.
+7. Added `runtime/tests/test_api_protocol_preflight.py` with real raw TCP requests. It verifies immediate rejection without sending the declared body, query-bearing route rejection, normal-HTTP `Expect` rejection, the HTTP/1.1 `handle_expect_100` path, no lifecycle mutation on rejection, and a normal authenticated control POST.
+8. Updated `API.md` to document the exact mutation protocol preflight contract.
 
 Commits:
-- `c469599262430c4bef701e4ed76c1cce4eb74a9a` — Harden HTTP request framing before JSON reads
-- `ebcd95ebabf2467757397faebd21d94dfa2c0a60` — Add raw HTTP request framing regressions
-- `a5effda51c240f01a7734d11b1fb17662221593d` — Document fail-closed HTTP request framing
+- `e53b59c36b17fe257085974b12a58b9590d38075` — fail closed before reading unsupported POST bodies
+- `148c129bc720c3d78ebe873f35b44b8ef622aa64` — raw HTTP protocol preflight regressions
+- `acefa5b84cedf588bbdebc9526f2ac5eabaf0f64` — document mutation protocol preflight
 
 ### Checks / results
 
-- Authenticated GitHub connector read/write operations succeeded against `UnknownGod2011/Grafana`.
-- Attempted the intended focused repository execution with `python -m unittest -v tests.test_api tests.test_api_request_framing` from a fresh clone. Checkout still fails first with `Could not resolve host: github.com`; therefore no committed-suite green claim is made.
-- Independently reproduced the exact framing helper logic in a minimal Python `ThreadingHTTPServer` and exercised raw requests through the real standard-library HTTP parser. Results: four unsafe framing cases returned HTTP 400 with the intended bounded details; one normal single-CL JSON request returned HTTP 200; the mutation counter incremented only for the normal request.
-- No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
+- Authenticated GitHub connector reads/writes succeeded against `UnknownGod2011/Grafana`.
+- Inspected the committed `runtime/api.py` diff after write; only the intended allowlist, `Expect` guard, preflight ordering, parsed-path dispatch, and drift guard changed.
+- Fresh repository checkout was attempted and remains blocked by `Could not resolve host: github.com`; therefore the committed test modules could not be executed from the repository and no suite-green claim is made.
+- Independently exercised the exact protocol behavior using Python's real `ThreadingHTTPServer`/`BaseHTTPRequestHandler` with raw sockets: unknown route => HTTP/1.0 404, query-bearing route => HTTP/1.0 404, normal handler + `Expect` => HTTP/1.0 417, forced HTTP/1.1 handler + `Expect` => HTTP/1.1 417. These responses arrived without sending the declared 4096-byte body.
+- No GitHub Actions run was triggered merely to bypass local DNS.
 
 ### Decisions
 
-1. Reject all request `Transfer-Encoding` rather than attempting chunked decoding in StageGuard's deliberately minimal origin server.
-2. Reject duplicate `Content-Length` even when values are identical. Intermediary normalization differences are unnecessary risk on privileged lifecycle endpoints.
-3. Perform framing validation after authentication but before consuming the request body or invoking any incident-service mutation.
-4. Keep this change scoped to request framing; do not alter reverse-proxy deployment assumptions or add speculative protocol features.
+1. Keep StageGuard's mutation surface exact-path-only; POST query strings are unsupported rather than ignored.
+2. Reject all `Expect` headers instead of attempting partial RFC interoperability on a privileged lifecycle API.
+3. Route rejection must happen before authentication/body reads because unsupported paths do not need request bodies and should not consume worker capacity waiting for them.
+4. Preserve the current HTTP/1.0 response protocol; the `handle_expect_100` override exists only as defense-in-depth against a future protocol-version change.
 
 ### Blockers / unknowns
 
-- This runner still cannot resolve `github.com` for a fresh repository checkout, so the committed raw-HTTP regression and consolidated suites cannot execute here.
-- Recent audit/checkpoint/retention/recovery/Grafana/MCP/request-framing regressions still require consolidated execution.
+- This runner still cannot resolve `github.com` for a fresh repository checkout, so the committed protocol-preflight regression and consolidated suites cannot execute here.
+- Recent audit/checkpoint/recovery/Grafana/MCP/auth/request-framing/protocol-preflight regressions still require consolidated execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
-- The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
+- The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
 
 ## Single best next step
 
-**Inspect the adjacent HTTP protocol boundary for unsupported `Expect: 100-continue` and method/path handling before body consumption. If the standard-library handler can emit a provisional 100 response or retain ambiguous unread bodies on rejected mutation requests, harden that behavior with raw-socket regressions; otherwise stop protocol hardening and return to the highest-severity historical full-suite defect once checkout is executable.**
+**Stop adding speculative HTTP protocol hardening. As soon as repository checkout is executable, run the focused HTTP/auth/MCP/recovery suites plus the full unittest suite, classify the historical 9 failures / 15 errors into stale-test vs genuine-product defects, and fix the highest-severity genuine defect first. If checkout remains unavailable, inspect the historical failing test/run data through the GitHub connector and begin that triage without triggering new CI.**
