@@ -29,6 +29,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Durable recovery outcome and execution phase must agree; mismatch fails readiness closed and has a critical Grafana alert.
 - The browser cockpit trusts the authenticated server-produced recovery contract. Missing, malformed, self-inconsistent, or checkpoint-inconsistent recovery data fails closed and disables lifecycle mutations.
 - The browser recovery control must use only `POST /v1/recovery/recheck`; the operator UI must never infer a need to invoke `/v1/execute` when recovery is already `recovery_unverified`.
+- Execution uncertainty is resolved only by durable checkpoint reload plus server-owned provider reconciliation and fresh Grafana evidence; callers never supply provider operation identity/state.
 - Fast local recovery-safety validation must execute the real embedded operator-console JavaScript; missing Node is an explicit validation failure rather than a silently skipped browser safety check.
 
 ## Retained validation baseline
@@ -40,59 +41,54 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed recovery/API/Grafana/operator regressions remain blocked from repository execution because this automation runner cannot resolve `github.com`; authenticated connector reads/writes work, but commits are not treated as passing tests.
 
-## Run log — 2026-09-14 — recovery safety documentation and API surface coherence
+## Run log — 2026-09-14 — canonical HTTP safety contract
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata/root contents, the main `README.md`, `OPERATOR_CONSOLE.md`, and `scripts/run_recovery_safety_suite.py`. Confirmed the prior run's highest-priority deliverable existed as code but was not visible from the main README, and confirmed the README's authenticated HTTP surface list omitted the already-implemented `POST /v1/recovery/recheck` endpoint.
+Read this `progress.md` completely before selecting work. Inspected repository metadata/root contents, `README.md`, `FINAL_RELEASE_REPORT.md`, `EXECUTION_UNCERTAINTY.md`, `OPERATOR_CONSOLE.md`, `runtime/api.py`, `runtime/execution_safety.py`, and `runtime/tests/test_execution_safety_api.py`.
 
-Attempted the intended fresh checkout and focused safety command first:
+The current runtime already implements two safety-critical authenticated endpoints that are essential when provider dispatch may have happened but durable lifecycle persistence is ambiguous:
 
-```bash
-python scripts/run_recovery_safety_suite.py
-```
+- `POST /v1/checkpoint/reload`
+- `POST /v1/execution/reconcile`
 
-The environment again failed during `git clone` with `Could not resolve host: github.com`, before any repository test could execute. Authenticated GitHub connector access remained available, so work continued through that channel without triggering GitHub Actions.
+Behavioral coverage proves they are authenticated, argument-free, preserve exactly-one provider dispatch, and require fresh Grafana evidence before lifecycle work can resume. However, the main HTTP surface documentation did not provide one canonical complete contract describing these endpoints alongside the newer recovery-only recheck path. That is a production operator/integrator defect because the wrong recovery action in `execution_uncertain` is to retry `/v1/execute`.
+
+Attempted the intended fresh checkout and focused safety command first. The environment again failed during `git clone` with `Could not resolve host: github.com`, before any repository test could execute. Authenticated GitHub connector access remained available, so work continued through that channel without triggering GitHub Actions.
 
 No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Exact changes made
 
-1. Updated `README.md` to document `POST /v1/recovery/recheck` in the authenticated operator HTTP surfaces.
-2. Documented the endpoint's critical no-replay property directly in the main README: it performs recovery-only Grafana verification after an already accepted provider action and has no remediation client capable of redispatching the provider mutation.
-3. Strengthened the README recovery safety-model row so accepted-but-unverified remediation is explicitly routed only to the recovery-only recheck path rather than another execution.
-4. Added a `Fast recovery/no-replay safety validation` section with the canonical command:
+1. Added `API.md` as the canonical StageGuard HTTP contract.
+2. Documented all platform probes, authenticated read surfaces, and authenticated lifecycle mutations in one place.
+3. Documented the execution-uncertainty no-replay workflow explicitly: reload durable winner, reconcile the server-owned idempotent provider operation, then collect fresh Grafana evidence; never retry `/v1/execute` to resolve ambiguity.
+4. Documented that `POST /v1/checkpoint/reload`, `POST /v1/execution/reconcile`, and `POST /v1/recovery/recheck` accept `{}` only and do not accept caller-supplied provider operation IDs/state.
+5. Documented the separate `recovery_unverified` path: only `POST /v1/recovery/recheck` may follow an accepted-but-unverified action, and that path has no remediation client capable of redispatch.
+6. Added `runtime/tests/test_http_surface_contract.py`, a dependency-free static regression that locks all platform/authenticated/lifecycle routes against both `runtime/api.py` and `API.md`.
+7. Added explicit regression assertions for the no-replay documentation and for the argument-free runtime shape of recovery recheck, checkpoint reload, and execution reconciliation.
 
-   ```bash
-   python scripts/run_recovery_safety_suite.py
-   ```
-
-5. Documented exactly what the focused runner covers: recovery observability, anchored recovery-only behavior, authenticated HTTP rechecks, restart durability, and the executable operator-console DOM/request harnesses.
-6. Documented prerequisites and non-requirements: Python + Node.js are required; Grafana, Gemini, remediation/provider credentials, Docker, browser downloads, npm packages, and paid cloud resources are not.
-7. Documented that missing Node is a hard validation failure so browser-level no-replay safety cannot silently skip.
-8. Explicitly stated that the focused recovery safety command is a fast high-risk-boundary gate, not a replacement for the full regression suite or live Grafana MCP/Docker rehearsals.
-9. Added `scripts/run_recovery_safety_suite.py` to the README repository structure so developers/operators can discover the safety entrypoint without reading `progress.md`.
-
-Commit:
-- `6cf62c3e70afe36afef1c5a667ad20821e5875e0` — Document recovery recheck and focused safety suite
+Commits:
+- `8cf43f680bc95f9efb67327667afaa0bc199a8be` — Document StageGuard authenticated HTTP safety contract
+- `8f1478207efc49c133b02f3c114697268e0481ee` — Lock documented StageGuard HTTP safety surface
 
 ### Checks / results
 
 - Authenticated GitHub connector read/write operations succeeded against `UnknownGod2011/Grafana`.
-- Re-fetched the updated README from `main` and confirmed the authenticated HTTP list now contains `POST /v1/recovery/recheck` with no-replay semantics.
-- Re-fetched the local-development section and confirmed the focused runner command, Node requirement, dependency-light scope, and non-replacement warning are present.
-- Inspected `OPERATOR_CONSOLE.md` and confirmed its existing recovery-recheck semantics agree with the new README wording: only fresh Grafana recovery telemetry is collected, the consumed approval is not reused, and no remediation client is present on the recheck path.
-- Inspected `scripts/run_recovery_safety_suite.py` and confirmed the README's documented test scope/prerequisites match the committed runner implementation.
+- Re-fetched `runtime/tests/test_http_surface_contract.py` from `main` and confirmed the committed route set includes all current platform probes, authenticated reads, lifecycle mutations, and both execution-uncertainty endpoints.
+- Cross-checked the contract against `runtime/api.py`: the documented recovery/reload/reconcile paths are real handlers, all three use `_only(payload, set())`, and reconciliation is server-owned.
+- Cross-checked the no-replay statements against `runtime/execution_safety.py` and the existing behavioral `test_execution_safety_api.py`; those tests already prove reload-before-reconciliation and exactly one remediation provider dispatch.
+- Syntax-compiled the new regression module shape locally with `python -m py_compile`: PASS.
 - Attempted a fresh shallow checkout plus `python scripts/run_recovery_safety_suite.py`; checkout failed before tests with `Could not resolve host: github.com`.
-- Therefore this run does **not** claim the focused recovery suite green.
+- Therefore this run does **not** claim the new committed test or focused recovery suite green.
 - No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. Treat missing documentation of a safety-critical endpoint as a production usability defect, not cosmetic documentation debt: operators and integrators should discover the no-replay recovery path from the main README.
-2. Keep the focused recovery suite dependency-light and developer-invoked rather than adding a noisy CI workflow while the project explicitly avoids unnecessary GitHub Actions usage.
-3. Keep the README honest about validation scope: the recovery runner is a high-risk-boundary fast gate, while the historical full-suite failures and live MCP 1.4.1 smoke remain separate obligations.
-4. Do not duplicate recovery implementation merely because the runtime checkout is unavailable; use authenticated repository inspection to eliminate documentation/API-surface drift while preserving the existing implementation contract.
+1. Treat a missing operator contract for execution uncertainty as a safety defect, not cosmetic documentation debt: during ambiguous provider execution, the recovery procedure must be unambiguous and must not encourage replay.
+2. Keep operation identity/state server-owned. The new contract explicitly rejects the pattern of callers submitting provider operation IDs or reconciliation state.
+3. Add a low-cost static drift test rather than a new CI workflow. The behavioral API tests remain authoritative for runtime semantics; this regression prevents future documentation/runtime divergence.
+4. Do not duplicate or alter the already-covered reconciliation implementation while executable repository checkout is unavailable.
 
 ### Blockers / unknowns
 
@@ -104,4 +100,4 @@ Commit:
 
 ## Single best next step
 
-**As soon as repository checkout is executable, run `python scripts/run_recovery_safety_suite.py` and fix every failure until the focused recovery/no-replay suite is green. If that passes, stop adding recovery-only assertions and move to the highest-impact unresolved production gap: triage the historical full-suite failures/errors into true defects versus obsolete tests, fixing the highest-severity real defect first while keeping GitHub Actions quiet.**
+**As soon as repository checkout is executable, run `python scripts/run_recovery_safety_suite.py` plus `python -m unittest runtime.tests.test_http_surface_contract`, fix every failure to green, then stop adding recovery/documentation assertions and triage the historical full-suite failures/errors into true defects versus obsolete tests. Fix the highest-severity genuine production defect first while keeping GitHub Actions quiet.**
