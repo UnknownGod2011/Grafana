@@ -130,6 +130,8 @@ A restored approval is accepted only when its evidence revision recomputes from 
 
 Production bootstrap uses `DisabledRemediationClient` unless writes are explicitly enabled. `runtime/production_remediation.py` owns the allowlisted policy and `runtime/http_remediation_transport.py` owns the credential-isolated HTTPS transport. Production operation IDs are deterministic and evidence-bound so an uncertain transport retry reuses the same idempotency identity.
 
+`runtime/remediation_receiver.py` is a loopback-only, non-production contract fixture for provider integration work. It implements the idempotent `POST /v1/recover` contract plus authenticated, read-only `GET /v1/operations/<operation_id>` reconciliation. A missing operation returns `not_found`; an accepted operation returns only the stable StageGuard operation ID and bounded state, never action/production/target detail. This lets provider adapters exercise the same no-replay reconciliation semantics StageGuard requires after ambiguous execution.
+
 The standard Cloud Run composition intentionally provides no environment flag that can enable production remediation.
 
 ## HTTP surfaces
@@ -198,6 +200,7 @@ This focused command does **not** replace the full regression suite or live Graf
 - `runtime/readiness.py` — activation-aware MCP readiness cache/backoff + metrics
 - `runtime/bootstrap.py` / `runtime/cloudrun_entrypoint.py` — production composition roots
 - `runtime/production_remediation.py` / `runtime/http_remediation_transport.py` — governed write path
+- `runtime/remediation_receiver.py` — loopback-only reference provider contract with idempotent write + read-only operation reconciliation
 - `runtime/remediation.py` — approval and Grafana-based recovery verification
 - `runtime/api.py` — authenticated API and platform health surfaces
 - `runtime/tests/` — credential-free regression coverage
