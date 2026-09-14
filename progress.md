@@ -29,6 +29,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Durable recovery outcome and execution phase must agree; mismatch fails readiness closed and has a critical Grafana alert.
 - The browser cockpit trusts the authenticated server-produced recovery contract. Missing, malformed, self-inconsistent, or checkpoint-inconsistent recovery data fails closed and disables lifecycle mutations.
 - The browser recovery control must use only `POST /v1/recovery/recheck`; the operator UI must never infer a need to invoke `/v1/execute` when recovery is already `recovery_unverified`.
+- Fast local recovery-safety validation must execute the real embedded operator-console JavaScript; missing Node is an explicit validation failure rather than a silently skipped browser safety check.
 
 ## Retained validation baseline
 
@@ -39,48 +40,52 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed recovery/API/Grafana/operator regressions remain blocked from repository execution because this automation runner cannot resolve `github.com`; authenticated connector reads/writes work, but commits are not treated as passing tests.
 
-## Run log — 2026-09-14 — behavioral recovery-only request-path lock
+## Run log — 2026-09-14 — focused recovery safety runner
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the existing dependency-free DOM harness in `runtime/tests/test_operator_console_dom.py` and the actual embedded `CONSOLE_JS` in `runtime/operator_console.py`. Confirmed the previous harness proved button/interlock state but did not click the real recovery control or record the resulting request path.
+Read this `progress.md` completely before selecting work. Inspected the repository root, `scripts/`, the current README safety/runtime description, the recovery regression inventory, `runtime/tests/test_operator_console_dom.py`, and `runtime/tests/test_operator_console_dom_requests.py`. Confirmed the two behavioral DOM harnesses existed but there was no stable explicit fast-safety entrypoint guaranteeing they run together with the service/API/restart recovery regressions.
 
 No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Exact changes made
 
-1. Added `runtime/tests/test_operator_console_dom_requests.py` as a dependency-free behavioral network-path harness for the real `CONSOLE_HTML` and `CONSOLE_JS` assets.
-2. The harness runs the actual cockpit JavaScript with Node's built-in `vm` module and creates its DOM from the IDs in the real HTML; it requires no npm package, browser binary, Grafana, Gemini, remediation credentials, or paid service.
-3. It injects a valid authenticated cold-restored `recovery_unverified` lifecycle where remediation has already been accepted and the provider execution button must remain disabled.
-4. It records every `fetch` request made by the real cockpit, clicks the real `recheck-recovery` control, and returns a server-derived `recovered` lifecycle response.
-5. The regression requires exactly one non-GET mutation and pins it to `POST /v1/recovery/recheck` with JSON `{}`, `credentials: same-origin`, and `Content-Type: application/json`.
-6. The regression explicitly fails if any request targets `/v1/execute`, behaviorally locking the no-provider-replay browser contract rather than checking source strings.
-7. After the mocked recovery response, the regression requires recheck and execute to be disabled, the judge recovery text to become `Verified by Grafana`, and the rendered bounded recovery object to show `state: recovered` and `verified: true`.
+1. Added `scripts/run_recovery_safety_suite.py` as a single dependency-light recovery/no-replay validation entrypoint.
+2. The runner executes these committed modules together from the `runtime` working directory so their existing bare runtime imports resolve consistently:
+   - `tests.test_recovery_observability`
+   - `tests.test_anchored_recovery_recheck`
+   - `tests.test_api_recovery_recheck`
+   - `tests.test_recovery_recheck_restart`
+   - `tests.test_operator_console_dom`
+   - `tests.test_operator_console_dom_requests`
+3. The suite therefore spans the bounded recovery observability contract, anchored/service recovery-only behavior, authenticated HTTP recheck behavior, restart durability/no-replay semantics, actual cockpit DOM interlocks, and the real browser request path.
+4. The runner explicitly requires Node.js before invoking unittest. This prevents the two JavaScript behavioral safety tests from being silently accepted as skipped on machines without a JavaScript runtime.
+5. The runner uses only Python stdlib + Node stdlib and does not require Grafana, Gemini, remediation credentials, Docker, browser downloads, npm packages, or paid cloud infrastructure.
 
 Commit:
-- `95eca71bcfd101d60488b5cad73bad2b1d5196d9` — Test operator recovery recheck request path
+- `6e2ef3b2e6b17ad58a66b6a0c0e3517908ce9ec2` — Add focused recovery safety test runner
 
 ### Checks / results
 
 - Authenticated GitHub connector read/write operations succeeded against `UnknownGod2011/Grafana`.
-- Re-read the committed test file from `main` after creation and confirmed the intended request recorder, endpoint assertions, no-`/v1/execute` assertion, and terminal recovered assertions are present.
-- Attempted a fresh shallow checkout and focused execution with:
-  - `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git`
-  - `python -m unittest tests.test_operator_console_dom tests.test_operator_console_dom_requests -v`
-- Checkout failed before any test could run with `Could not resolve host: github.com`.
-- Therefore this run does **not** claim either DOM harness green.
+- Confirmed all six referenced recovery test modules exist on `main`; directly inspected the DOM harnesses and recovery restart/observability modules.
+- Independently syntax-compiled the new runner logic with `python -m py_compile`: PASS.
+- Confirmed this execution environment has Node.js `v22.16.0`, so Node itself is not the current blocker.
+- Attempted a fresh shallow checkout followed by `python scripts/run_recovery_safety_suite.py`.
+- Checkout failed before any repository test could run with `Could not resolve host: github.com`.
+- Therefore this run does **not** claim the new focused suite green.
 - No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. The no-replay property is now tested at the browser request boundary in addition to server/service lifecycle tests: a valid recovery recheck must never transit through `/v1/execute`.
-2. The request-path harness remains dependency-free so it can be part of a fast local safety suite without Playwright/jsdom/browser-download churn.
-3. Same-origin credentials and JSON request shape are pinned because recovery verification is an authenticated lifecycle mutation and should not silently drift to a different browser authority model.
-4. The test uses a server-produced terminal recovery response; the browser is required to render that state rather than infer success from the request completing.
+1. Recovery/no-replay safety now has one intentional local command instead of relying on developers remembering a growing list of individual modules.
+2. Browser-level recovery safety is mandatory in this focused suite: absent Node is a failed prerequisite, not an acceptable skip.
+3. The runner is deliberately narrow rather than pretending the historical full suite is green; it targets the highest-risk accepted-remediation/recovery boundary while legacy full-suite failures remain to be triaged separately.
+4. No new CI workflow was added because the project explicitly avoids noisy Actions usage and the local runner provides the needed deterministic entrypoint without consuming CI storage/minutes.
 
 ### Blockers / unknowns
 
-- Both DOM harnesses require execution from a current repository checkout; this runner still cannot resolve `github.com`.
+- This automation runner still cannot resolve `github.com`, so a current repository checkout and executable suite remain unavailable here.
 - Recent audit/checkpoint/retention/recovery/Grafana regressions still require consolidated execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -88,4 +93,4 @@ Commit:
 
 ## Single best next step
 
-**Once executable checkout is available, run `runtime/tests/test_operator_console_dom.py` and `runtime/tests/test_operator_console_dom_requests.py` first and fix any harness/runtime issues. If green, add both to the existing focused local safety test command/documentation, then move to the highest-impact remaining production gap rather than adding more source-only UI assertions.**
+**As soon as repository checkout is executable, run `python scripts/run_recovery_safety_suite.py` first and fix any failure until the full focused recovery/no-replay suite is green. Then make that command visible in the main developer/operator documentation and move to the highest-impact remaining production gap rather than adding more source-only recovery assertions.**
