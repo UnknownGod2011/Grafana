@@ -79,7 +79,6 @@ def _is_loopback(host: str) -> bool:
 
 
 def _get_readiness_probe(service: IncidentService) -> EvidencePlaneReadinessProbe:
-    """Return one service-owned probe so external Grafana checks can be cached."""
     probe = getattr(service, "_readiness_probe", None)
     if probe is None:
         probe = EvidencePlaneReadinessProbe(
@@ -94,13 +93,6 @@ def _get_readiness_probe(service: IncidentService) -> EvidencePlaneReadinessProb
 
 
 def _execution_reconciliation_state(service: IncidentService) -> str:
-    """Return the operator-safe, low-cardinality reconciliation phase.
-
-    Base runtimes do not have an execution-uncertainty state machine, so they are
-    always ``clear``. A safer runtime may expose the bounded method. Any
-    unexpected value fails closed to ``reload_required`` rather than leaking
-    provider details or accidentally enabling reconciliation.
-    """
     getter = getattr(service, "execution_reconciliation_state", None)
     if not callable(getter):
         return "clear"
@@ -112,7 +104,6 @@ def _execution_reconciliation_state(service: IncidentService) -> str:
 
 
 def _execution_reconciliation_reason(service: IncidentService) -> str:
-    """Return a fixed-cardinality, provider-detail-free uncertainty reason."""
     getter = getattr(service, "execution_reconciliation_reason", None)
     if not callable(getter):
         return "clear"
@@ -124,7 +115,6 @@ def _execution_reconciliation_reason(service: IncidentService) -> str:
 
 
 def _execution_reconciliation_reference(service: IncidentService) -> str | None:
-    """Return only a bounded StageGuard operation reference, never provider detail."""
     getter = getattr(service, "execution_reconciliation_reference", None)
     if not callable(getter):
         return None
@@ -142,7 +132,6 @@ def _execution_reconciliation_reference(service: IncidentService) -> str | None:
 
 
 def _audit_integrity_state(service: IncidentService) -> str:
-    """Return the bounded audit-integrity state without exposing audit/provider details."""
     getter = getattr(service, "audit_integrity_state", None)
     if not callable(getter):
         return "disabled"
@@ -154,7 +143,6 @@ def _audit_integrity_state(service: IncidentService) -> str:
 
 
 def _audit_integrity_policy(service: IncidentService) -> str:
-    """Return the configured bounded readiness policy; invalid values fail hardened."""
     policy = getattr(service, "_audit_integrity_policy", "allow_unbound_legacy")
     return policy if policy in _AUDIT_INTEGRITY_POLICIES else "require_verified"
 
@@ -170,7 +158,6 @@ def _audit_integrity_policy_satisfied(service: IncidentService, state: str | Non
 
 
 def _lifecycle_safety_state(service: IncidentService) -> str:
-    """Collapse simultaneous lifecycle barriers into one bounded operator state."""
     integrity = _audit_integrity_state(service)
     reconciliation = _execution_reconciliation_state(service)
     try:
@@ -191,7 +178,6 @@ def _lifecycle_safety_state(service: IncidentService) -> str:
 
 
 def _remediation_execution_observability(service: IncidentService) -> dict[str, float | bool]:
-    """Return a sanitized fixed-shape watchdog view; malformed data fails closed."""
     getter = getattr(service, "remediation_execution_observability", None)
     if not callable(getter):
         return {"active": False, "age_seconds": 0.0, "max_seconds": 0.0, "deadline_exceeded": False}
@@ -220,7 +206,6 @@ def _remediation_execution_observability(service: IncidentService) -> dict[str, 
 
 
 def _evidence_source_view(service: IncidentService, snapshot=None) -> dict[str, object]:
-    """Expose judge-safe proof of the evidence path without exposing queries or secrets."""
     metrics = getattr(service, "_metrics", None)
     traces = getattr(metrics, "traces", ())
     trace_count = len(traces) if isinstance(traces, list) else 0
@@ -246,7 +231,6 @@ def _evidence_source_view(service: IncidentService, snapshot=None) -> dict[str, 
 
 
 def _execution_checkpoint_phase(service: IncidentService) -> str:
-    """Return a fixed-cardinality, provider-detail-free execution phase."""
     getter = getattr(service, "execution_checkpoint_phase", None)
     if callable(getter):
         try:
@@ -254,7 +238,6 @@ def _execution_checkpoint_phase(service: IncidentService) -> str:
         except Exception:
             return "unknown"
         return phase if phase in _EXECUTION_PHASES else "unknown"
-
     try:
         snapshot = service.status()
     except Exception:
@@ -286,7 +269,6 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
 
 
 def _service_readiness(service: IncidentService) -> dict[str, object]:
-    """Build a bounded readiness view from evidence-plane and lifecycle consistency state."""
     readiness = _get_readiness_probe(service).check().to_dict()
     checkpoint_state = service.checkpoint_state()
     audit_integrity = _audit_integrity_state(service)
@@ -352,10 +334,7 @@ def _service_metrics(service: IncidentService) -> str:
         "# TYPE stageguard_remediation_reconciliation_reason gauge\n"
     )
     for reason in _EXECUTION_RECONCILIATION_REASONS:
-        metrics += (
-            f'stageguard_remediation_reconciliation_reason{{reason="{reason}"}} '
-            f'{1 if reason == reconciliation_reason else 0}\n'
-        )
+        metrics += f'stageguard_remediation_reconciliation_reason{{reason="{reason}"}} {1 if reason == reconciliation_reason else 0}\n'
     metrics += (
         "# HELP stageguard_audit_integrity Fixed-cardinality audit-chain integrity state.\n"
         "# TYPE stageguard_audit_integrity gauge\n"
@@ -394,7 +373,7 @@ def _single_query_value(query: dict[str, list[str]], name: str, *, required: boo
 class StageGuardHandler(BaseHTTPRequestHandler):
     service: IncidentService
     identity_provider: IdentityProvider
-    server_version = "StageGuard/0.13"
+    server_version = "StageGuard/0.14"
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -566,6 +545,12 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             if self.path == "/v1/execute":
                 _only(payload, set())
                 snapshot = self.service.execute_approved(actor=identity.subject)
+                self._send(200, _lifecycle_view(self.service, snapshot))
+                return
+
+            if self.path == "/v1/recovery/recheck":
+                _only(payload, set())
+                snapshot = self.service.recheck_recovery(actor=identity.subject)
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
