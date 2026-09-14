@@ -80,7 +80,10 @@ def _open_parent_directory(path: Path) -> int:
 
 def _supports_directory_relative_atomic_write() -> bool:
     supports_dir_fd = getattr(os, "supports_dir_fd", set())
-    return os.open in supports_dir_fd and os.replace in supports_dir_fd
+    # CPython does not list os.replace separately even where it exposes the same
+    # dir-fd-capable renameat implementation as os.rename. POSIX + dir-fd open/
+    # rename therefore describes the production capability more accurately.
+    return os.name == "posix" and os.open in supports_dir_fd and os.rename in supports_dir_fd
 
 
 def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -> int:
