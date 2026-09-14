@@ -84,7 +84,7 @@ The deterministic fixture models three camera feeds and two uplinks. Its seeded 
 | Operator cockpit | Same-origin, authenticated, no browser secrets/persistence, strict CSP, dynamic values rendered as text |
 | Approval | Explicit, single-use approval is bound to the exact incident evidence revision |
 | Remediation | Production writes are disabled by default; enabled writes are allowlisted, idempotent, timeout/retry bounded, and credential isolated |
-| Recovery | Action acceptance never means recovery; Grafana telemetry must prove consecutive healthy samples |
+| Recovery | Action acceptance never means recovery; Grafana telemetry must prove consecutive healthy samples. An accepted-but-unverified action can only enter the recovery-only recheck path; the provider is never replayed |
 | Audit | Bounded lifecycle records preserve trusted actor plus non-secret activation/action/briefing provenance |
 | Checkpoint | Restored state is schema/version/integrity/scope/revision checked; provider metadata is stripped; GCS writes use generation preconditions |
 
@@ -151,6 +151,7 @@ Authenticated operator surfaces:
 - `POST /v1/briefing`
 - `POST /v1/approve`
 - `POST /v1/execute`
+- `POST /v1/recovery/recheck` — recovery-only Grafana verification after an already accepted provider action; this path has no remediation client and cannot redispatch the provider mutation
 
 Request bodies cannot supply actor identity, PromQL, LogQL, datasource IDs, prompts, remediation action names, targets, endpoints, credentials, Cloud Logging filters, or checkpoint object locations.
 
@@ -167,9 +168,22 @@ python runtime/preflight.py runtime/telemetry.example.json \
 
 Useful endpoints: simulator metrics `http://localhost:9108/metrics`, Prometheus `http://localhost:9090`, and Grafana `http://localhost:3000`.
 
+### Fast recovery/no-replay safety validation
+
+After changing incident lifecycle, recovery, API, checkpoint, operator-console, or recovery-observability code, run the dependency-light focused safety suite before broader integration testing:
+
+```bash
+python scripts/run_recovery_safety_suite.py
+```
+
+The runner executes the recovery observability contract, anchored recovery-only service behavior, authenticated HTTP rechecks, restart durability, and both executable operator-console DOM harnesses together. It requires Python and Node.js, but does not require Grafana, Gemini, remediation/provider credentials, Docker, browser downloads, npm packages, or paid cloud infrastructure. Missing Node is a hard validation failure so browser-level no-replay safety cannot silently skip.
+
+This focused command does **not** replace the full regression suite or live Grafana MCP/Docker rehearsals; it is the fast gate for the accepted-remediation → recovery boundary where replay would be most dangerous.
+
 ## Repository structure
 
 - `scripts/stageguard_doctor.py` — credential-safe local onboarding prerequisite checks
+- `scripts/run_recovery_safety_suite.py` — focused dependency-light recovery/no-replay regression gate, including real embedded cockpit JavaScript
 - `runtime/telemetry.py` — validated semantic metric mapping + query builders
 - `runtime/onboarding.py` — strict profile loader + eight-slot metric preflight
 - `runtime/activation.py` / `runtime/log_activation.py` — expiring metric/Loki activation pins
