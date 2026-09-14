@@ -8,7 +8,6 @@ queries, datasource identities, provider metadata, or remediation targets.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import object as _object
 
 
 RECOVERY_STATES = (
