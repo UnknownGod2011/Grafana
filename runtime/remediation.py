@@ -96,14 +96,7 @@ def remediation_operation_id(report: IncidentReport, approval: Approval) -> str:
 
 
 def _safe_production_metadata(metadata: object, *, expected_operation_id: str) -> dict:
-    """Return only StageGuard-owned production result metadata.
-
-    Remediation adapters are an extension boundary and may wrap third-party APIs.
-    Their raw response text or metadata must never become API, audit, or checkpoint
-    state. The built-in production adapter emits a deliberately tiny set of fields;
-    retain those fields only when the adapter identity and deterministic operation
-    identity both match StageGuard's policy-owned values.
-    """
+    """Return only StageGuard-owned production result metadata."""
     if not isinstance(metadata, dict):
         return {}
     if metadata.get("adapter") != "allowlisted_production":
@@ -132,15 +125,7 @@ def _safe_production_metadata(metadata: object, *, expected_operation_id: str) -
 
 
 def sanitize_action_result(action: ActionResult, *, expected_operation_id: str) -> ActionResult:
-    """Discard provider-controlled detail before it can become lifecycle state.
-
-    ``ActionResult`` is returned by deployment-specific adapters, so its fields are
-    untrusted even when the adapter satisfies the static protocol. Only the literal
-    boolean ``True`` authorizes post-action recovery verification; truthy strings,
-    integers, or other malformed values fail closed as rejection. Provider detail is
-    replaced locally, and only narrowly validated StageGuard production metadata can
-    survive into API, audit, or checkpoint state.
-    """
+    """Discard provider-controlled detail before it can become lifecycle state."""
     accepted = action.accepted is True
     detail = "remediation action accepted" if accepted else "remediation action rejected or failed"
     metadata = _safe_production_metadata(action.metadata, expected_operation_id=expected_operation_id)
@@ -163,20 +148,67 @@ def _execute_remediation(
 
 
 def _normalize_recovery_metric(value: object) -> float | None:
-    """Normalize adapter evidence before it can authorize a recovery transition.
-
-    Metric adapters are pluggable. Python booleans are subclasses of integers, so
-    accepting arbitrary numeric-looking values would make ``False`` compare as zero
-    and could falsely satisfy healthy thresholds. Only finite real int/float samples
-    or explicit ``None`` are valid recovery evidence; malformed samples are treated
-    as unavailable and therefore cannot contribute to a healthy streak.
-    """
+    """Normalize adapter evidence before it can authorize a recovery transition."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     normalized = float(value)
     return normalized if math.isfinite(normalized) else None
+
+
+def verify_recovery(
+    action: ActionResult,
+    metrics: MetricQueryClient,
+    *,
+    profile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE,
+    max_attempts: int = 6,
+    required_consecutive_healthy: int = 2,
+    poll_interval_seconds: float = 5.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> RemediationOutcome:
+    """Verify recovery from fresh Grafana evidence without dispatching remediation.
+
+    This is intentionally safe to call after an accepted action whose first bounded
+    verification window ended as ``recovery_unverified``. It never receives a
+    remediation client and therefore cannot replay the provider side effect.
+    """
+    if action.accepted is not True:
+        raise ValueError("recovery verification requires a previously accepted remediation action")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+    if required_consecutive_healthy < 1:
+        raise ValueError("required_consecutive_healthy must be >= 1")
+
+    queries = recovery_queries(profile)
+    samples: list[RecoverySample] = []
+    healthy_streak = 0
+    for attempt in range(1, max_attempts + 1):
+        packet_loss = _normalize_recovery_metric(metrics.instant(queries["packet_loss"][0]))
+        dropped_frames = _normalize_recovery_metric(metrics.instant(queries["dropped_frames"][0]))
+        healthy = (
+            packet_loss is not None and dropped_frames is not None
+            and packet_loss < queries["packet_loss"][1]
+            and dropped_frames < queries["dropped_frames"][1]
+        )
+        samples.append(RecoverySample(attempt, packet_loss, dropped_frames, healthy))
+        healthy_streak = healthy_streak + 1 if healthy else 0
+        if healthy_streak >= required_consecutive_healthy:
+            return RemediationOutcome(
+                "recovered",
+                action,
+                tuple(samples),
+                "Recovery verified from consecutive healthy Grafana/Prometheus telemetry samples.",
+            )
+        if attempt < max_attempts:
+            sleep(poll_interval_seconds)
+
+    return RemediationOutcome(
+        "recovery_unverified",
+        action,
+        tuple(samples),
+        "Fresh bounded Grafana telemetry still did not prove recovery; keep the incident open without replaying remediation.",
+    )
 
 
 def remediate_and_verify(
@@ -193,39 +225,31 @@ def remediate_and_verify(
 ) -> RemediationOutcome:
     """Execute one matching approved action, then prove recovery from bounded telemetry."""
     if not _approval_matches(report, approval, profile):
-        return RemediationOutcome("approval_required", None, (),
-            "Remediation was not executed because explicit matching human approval is required.")
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be >= 1")
-    if required_consecutive_healthy < 1:
-        raise ValueError("required_consecutive_healthy must be >= 1")
+        return RemediationOutcome(
+            "approval_required",
+            None,
+            (),
+            "Remediation was not executed because explicit matching human approval is required.",
+        )
 
     action = _execute_remediation(remediation, report, approval, profile)
     if not action.accepted:
-        return RemediationOutcome("action_failed", action, (),
-            "The remediation endpoint rejected or failed the action; recovery was not inferred.")
-
-    queries = recovery_queries(profile)
-    samples: list[RecoverySample] = []
-    healthy_streak = 0
-    for attempt in range(1, max_attempts + 1):
-        packet_loss = _normalize_recovery_metric(metrics.instant(queries["packet_loss"][0]))
-        dropped_frames = _normalize_recovery_metric(metrics.instant(queries["dropped_frames"][0]))
-        healthy = (
-            packet_loss is not None and dropped_frames is not None
-            and packet_loss < queries["packet_loss"][1]
-            and dropped_frames < queries["dropped_frames"][1]
+        return RemediationOutcome(
+            "action_failed",
+            action,
+            (),
+            "The remediation endpoint rejected or failed the action; recovery was not inferred.",
         )
-        samples.append(RecoverySample(attempt, packet_loss, dropped_frames, healthy))
-        healthy_streak = healthy_streak + 1 if healthy else 0
-        if healthy_streak >= required_consecutive_healthy:
-            return RemediationOutcome("recovered", action, tuple(samples),
-                "Recovery verified from consecutive healthy Grafana/Prometheus telemetry samples.")
-        if attempt < max_attempts:
-            sleep(poll_interval_seconds)
 
-    return RemediationOutcome("recovery_unverified", action, tuple(samples),
-        "The action was accepted, but bounded post-action telemetry did not prove recovery; keep the incident open.")
+    return verify_recovery(
+        action,
+        metrics,
+        profile=profile,
+        max_attempts=max_attempts,
+        required_consecutive_healthy=required_consecutive_healthy,
+        poll_interval_seconds=poll_interval_seconds,
+        sleep=sleep,
+    )
 
 
 class SimulatorRemediationClient:
@@ -242,8 +266,12 @@ class SimulatorRemediationClient:
         profile = DEFAULT_TELEMETRY_PROFILE
         if production_id != profile.production_id or uplink != profile.affected_uplink:
             return ActionResult(False, "unsupported remediation target")
-        request = urllib.request.Request(f"{self.base_url}/scenario/recover", data=b"{}",
-            headers={"Content-Type": "application/json"}, method="POST")
+        request = urllib.request.Request(
+            f"{self.base_url}/scenario/recover",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -251,4 +279,7 @@ class SimulatorRemediationClient:
         except Exception as exc:
             return ActionResult(False, f"simulator remediation request failed: {type(exc).__name__}")
         accepted = status == 200 and payload.get("faulted") is False
-        return ActionResult(accepted, "simulator accepted recovery action" if accepted else "unexpected simulator response")
+        return ActionResult(
+            accepted,
+            "simulator accepted recovery action" if accepted else "unexpected simulator response",
+        )
