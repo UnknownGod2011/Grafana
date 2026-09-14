@@ -170,3 +170,58 @@ groups:
         labels:
           component: stageguard-runtime
           severity: warning
+
+      - uid: stageguard-recovery-checkpoint-inconsistent
+        title: StageGuard recovery checkpoint phase inconsistent
+        condition: B
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: stageguard-prometheus
+            model:
+              expr: min(stageguard_recovery_checkpoint_phase_consistent)
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: -100
+            model:
+              conditions:
+                - evaluator:
+                    params: [0.5]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: -100
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        dashboardUid: stageguard-runtime-safety
+        panelId: 9
+        noDataState: NoData
+        execErrState: Error
+        for: 10s
+        annotations:
+          summary: StageGuard durable recovery outcome disagrees with execution checkpoint phase
+          description: StageGuard has failed readiness closed because recovery lifecycle state and the durable execution phase are inconsistent. Do not replay remediation. Inspect checkpoint integrity and recover the durable winner before further lifecycle mutation.
+        labels:
+          component: stageguard-runtime
+          severity: critical
