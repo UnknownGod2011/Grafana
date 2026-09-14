@@ -225,6 +225,22 @@ class ExecutionSafeIncidentService(IncidentService):
             )
         super()._require_checkpoint_consistency()
 
+    def _require_reconciliation_checkpoint_consistency(self) -> None:
+        """Validate durable consistency without disabling the uncertainty barrier.
+
+        Reconciliation is the one lifecycle operation that must be allowed to run
+        while ``_execution_uncertain`` is true. Temporarily bypass only that local
+        uncertainty guard while still executing the full cooperative consistency
+        chain (including anchored/in-flight, audit-integrity, and checkpoint-conflict
+        checks). The flag is restored before any provider lookup or investigation.
+        """
+        previous = self._allow_uncertainty_investigation
+        self._allow_uncertainty_investigation = True
+        try:
+            self._require_checkpoint_consistency()
+        finally:
+            self._allow_uncertainty_investigation = previous
+
     def _persist_dispatching_barrier(self, snapshot: IncidentSnapshot) -> bool:
         """Persist ``dispatching`` and the current audit head before provider contact."""
         requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
@@ -328,7 +344,7 @@ class ExecutionSafeIncidentService(IncidentService):
                 raise RuntimeError("no uncertain remediation execution requires reconciliation")
             if not self._execution_reloaded:
                 raise RuntimeError("durable checkpoint winner must be reloaded before reconciliation")
-            self._require_checkpoint_consistency()
+            self._require_reconciliation_checkpoint_consistency()
 
             reason = self.execution_reconciliation_reason()
             provider_state = self._provider_reconciliation()
