@@ -78,12 +78,59 @@ def _open_parent_directory(path: Path) -> int:
         raise
 
 
+def _supports_directory_relative_open() -> bool:
+    supports_dir_fd = getattr(os, "supports_dir_fd", set())
+    supports_follow_symlinks = getattr(os, "supports_follow_symlinks", set())
+    return (
+        os.name == "posix"
+        and os.open in supports_dir_fd
+        and os.stat in supports_dir_fd
+        and os.stat in supports_follow_symlinks
+    )
+
+
 def _supports_directory_relative_atomic_write() -> bool:
     supports_dir_fd = getattr(os, "supports_dir_fd", set())
     # CPython does not list os.replace separately even where it exposes the same
     # dir-fd-capable renameat implementation as os.rename. POSIX + dir-fd open/
     # rename therefore describes the production capability more accurately.
     return os.name == "posix" and os.open in supports_dir_fd and os.rename in supports_dir_fd
+
+
+def _assert_private_regular_file_at_parent(
+    fd: int,
+    state_path: Path,
+    parent_fd: int,
+) -> os.stat_result:
+    """Validate ``fd`` against ``state_path.name`` inside one bound parent fd."""
+    try:
+        fd_stat = os.fstat(fd)
+    except OSError as exc:
+        raise RuntimeError("checkpoint file descriptor could not be inspected safely") from exc
+    if not stat.S_ISREG(fd_stat.st_mode):
+        raise RuntimeError("checkpoint file must be a regular file")
+    if fd_stat.st_nlink != 1:
+        raise RuntimeError("checkpoint file must not have multiple hard links")
+    try:
+        entry_stat = os.stat(
+            state_path.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("checkpoint file path changed while in use") from exc
+    except OSError as exc:
+        raise RuntimeError("checkpoint file could not be inspected safely") from exc
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise RuntimeError("checkpoint file must not be a symbolic link")
+    if (
+        not stat.S_ISREG(entry_stat.st_mode)
+        or entry_stat.st_nlink != 1
+        or not _same_identity(fd_stat, entry_stat)
+    ):
+        raise RuntimeError("checkpoint file path changed while in use")
+    _assert_directory_identity(parent_fd, state_path.parent)
+    return fd_stat
 
 
 def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -> int:
@@ -122,13 +169,20 @@ def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -
         raise
 
 
-def read_private_bytes(path: str | Path, *, max_bytes: int) -> bytes:
-    """Read bounded local state while detecting path replacement during the read."""
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
-        raise ValueError("max_bytes must be a positive integer")
-    fd = open_private_regular_file(path, os.O_RDONLY)
+def _read_private_bytes_via_parent_fd(state_path: Path, *, max_bytes: int) -> bytes:
+    """Read state relative to one validated parent directory descriptor."""
+    parent_fd = _open_parent_directory(state_path.parent)
+    fd = -1
     try:
-        assert_private_regular_file_identity(fd, path)
+        _assert_directory_identity(parent_fd, state_path.parent)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(state_path.name, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise RuntimeError("checkpoint file could not be opened safely") from exc
+        _assert_private_regular_file_at_parent(fd, state_path, parent_fd)
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining > 0:
@@ -140,7 +194,37 @@ def read_private_bytes(path: str | Path, *, max_bytes: int) -> bytes:
         raw = b"".join(chunks)
         if len(raw) > max_bytes:
             raise ValueError("checkpoint file exceeds size limit")
-        assert_private_regular_file_identity(fd, path)
+        _assert_private_regular_file_at_parent(fd, state_path, parent_fd)
+        return raw
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def read_private_bytes(path: str | Path, *, max_bytes: int) -> bytes:
+    """Read bounded local state while detecting file and parent-path replacement."""
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
+    state_path = Path(path)
+    if _supports_directory_relative_open():
+        return _read_private_bytes_via_parent_fd(state_path, max_bytes=max_bytes)
+
+    fd = open_private_regular_file(state_path, os.O_RDONLY)
+    try:
+        assert_private_regular_file_identity(fd, state_path)
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > max_bytes:
+            raise ValueError("checkpoint file exceeds size limit")
+        assert_private_regular_file_identity(fd, state_path)
         return raw
     finally:
         os.close(fd)
