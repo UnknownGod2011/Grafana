@@ -20,6 +20,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Execution uncertainty is resolved only through durable reload/reconciliation and fresh Grafana evidence; `/v1/execute` is never the recovery mechanism.
 - Durable checkpoint/audit failures fail closed; ambiguous provider execution blocks replay.
 - Provider reconciliation is read-only, keyed only by the server-owned StageGuard operation ID, and never returns mutation action/production/target detail.
+- A provider `not_found` reconciliation result is trusted only when the exact requested lookup URL returns the exact bounded `{operation_id, state:not_found}` contract. Generic/malformed/proxy 404s remain `unknown` and keep execution blocked.
 - Authentication credentials are bounded and duplicate credential-bearing headers fail closed on the StageGuard operator API.
 - Mutating StageGuard HTTP requests reject every `Transfer-Encoding` field and duplicate `Content-Length` fields before body reads.
 - Only the seven documented exact POST mutation paths are eligible for authentication/body processing; unknown or query-bearing POST routes are rejected before body consumption and the connection is closed.
@@ -38,70 +39,79 @@ Detailed older run history remains in Git history; this file keeps the current i
 - The identity module plus its focused tests were previously reconstructed from committed content and executed independently: 14/14 passed.
 - The request-framing boundary was independently exercised through Python's real `BaseHTTPRequestHandler` parser with raw sockets: duplicate/conflicting CL, duplicate identical CL, TE-only chunked, and CL+TE were rejected before mutation; a normal single-CL JSON request succeeded.
 - The StageGuard API protocol-preflight behavior was independently exercised with a real `ThreadingHTTPServer`: unknown/query-bearing POSTs returned immediate 404 without body bytes and `Expect` returned 417, including the explicit HTTP/1.1 `handle_expect_100` path.
-- This run reconstructed the new loopback remediation-provider reconciliation behavior with the same standard-library server logic and executed a real HTTP smoke: unknown operation -> 404/not_found, POST acceptance -> 200, subsequent GET -> 200/accepted, bad reconciliation bearer -> 401, conflicting reuse -> 409, one operation retained. Result: PASS.
+- The loopback remediation-provider reconciliation behavior was previously reconstructed and exercised over real HTTP: unknown operation -> 404/not_found, POST acceptance -> 200, subsequent GET -> 200/accepted, bad reconciliation bearer -> 401, conflicting reuse -> 409, one operation retained. Result: PASS.
+- This run independently exercised the new reconciliation-404 parser against real `urllib.error.HTTPError` objects: an exact same-URL 404 carrying `{operation_id, state:not_found}` resolved to `not_found`; empty, malformed, generic error, and oversized 404 bodies remained `unknown`.
 - Current committed consolidated tests remain blocked from repository execution because this runner cannot resolve `github.com` for a fresh checkout. Connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — reference provider reconciliation
+## Run log — 2026-09-15 — authoritative provider not-found reconciliation
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the repository tree and recent commits, confirmed there are currently no GitHub Actions runs to mine for the historical 9-failure/15-error output, and inspected:
+Read this `progress.md` completely before selecting work. Inspected the repository root and the execution-uncertainty path, including:
 
-- `runtime/http_remediation_transport.py`
-- `runtime/production_remediation.py`
 - `runtime/execution_safety.py`
+- `runtime/incident_service.py`
+- `runtime/tests/test_execution_safety.py`
+- `runtime/http_remediation_transport.py`
 - `runtime/tests/test_http_remediation_transport.py`
+- `runtime/tests/test_execution_safety_http_transport.py`
 - `runtime/remediation_receiver.py`
-- `runtime/tests/test_remediation_receiver.py`
-- `runtime/tests/test_http_remediation_tls_integration.py`
-- `README.md`
+- `EXECUTION_UNCERTAINTY.md`
 
-A fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was also attempted and still fails with `Could not resolve host: github.com` in this runner.
+A fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was attempted again and still fails with `Could not resolve host: github.com` in this runner.
 
 ### Triage decision
 
-Static inspection initially flagged the oversized remediation-response `ValueError` as a possible transport defect. Deeper inspection showed that behavior is intentional and safety-critical: after provider dispatch may have occurred, the exception propagates into `ExecutionSafeIncidentService`, which marks the operation `execution_uncertain` and forces provider reconciliation rather than incorrectly recording a definitive rejection. The existing regression explicitly requires that exception. No change was made to this no-replay behavior.
+Static lifecycle tracing found a genuine no-replay defect in `HttpRemediationTransport.reconcile()`: every HTTP 404 from the configured reconciliation lookup was converted directly into authoritative `not_found`, without validating the response body or final URL. A reverse proxy, WAF, deployment router, stale path, or custom opener could therefore produce a generic 404 that StageGuard interpreted as provider proof that the deterministic operation did not exist.
 
-The genuine working-software gap selected instead was the built-in reference remediation provider. It accepted idempotent `POST /v1/recover` requests but had no provider reconciliation endpoint, even though StageGuard's production transport and execution-safety flow require read-only reconciliation after ambiguous dispatch. Its `ThreadingHTTPServer` operation registry also used a non-atomic check-then-store sequence for duplicate operation IDs.
+That is unsafe during `execution_uncertain`. Provider `not_found` is one of the two states that allows StageGuard to leave the provider-ambiguity barrier and proceed to fresh Grafana investigation. A routing 404 is not evidence about the provider's idempotency registry and must remain ambiguous.
+
+While tracing the end-to-end regression, another concrete issue was found in the tests: `runtime/tests/test_execution_safety_http_transport.py` still patched `urllib.request.urlopen`, but production transport networking had already moved to `_default_urlopen_no_redirect()` backed by `urllib.request.build_opener(...).open()`. Those tests therefore no longer intercepted the production seam and could attempt real network I/O against `.example.test`, likely contributing to the historical full-suite errors.
 
 ### Exact changes made
 
-1. Added authenticated `GET /v1/operations/<operation_id>` to `runtime/remediation_receiver.py`.
-2. The endpoint returns only `{operation_id, state}` for accepted operations and a 404 `not_found` contract for absent operations; action, production, target, credentials, and other provider detail are not returned.
-3. Invalid reconciliation operation IDs fail closed with 400 and reconciliation requires the same bearer boundary as remediation writes.
-4. Added an `operations_lock` to make the idempotency registry's check-and-store operation atomic under `ThreadingHTTPServer`; conflicting reuse can no longer race through the absent-operation check.
-5. Refactored operation-ID validation and bearer checking into narrow helpers shared by write and reconciliation paths.
-6. Added receiver regressions for not-found -> accepted reconciliation, reconciliation authentication, absence of mutation detail in reconciliation output, and invalid reconciliation IDs.
-7. Updated `README.md` governed-remediation and repository-structure sections to document the loopback reference provider's write + read-only reconciliation contract and its non-production scope.
+1. Hardened `runtime/http_remediation_transport.py` so HTTP 404 reconciliation is no longer automatically `not_found`.
+2. Added one strict parser for reconciliation documents. Both 2xx and 404 paths now require exactly `{operation_id, state}` with an exact operation-id echo and only `accepted|not_found` states.
+3. A 404 is accepted as `not_found` only when:
+   - the response resolves to the exact requested lookup URL;
+   - the bounded response body is valid UTF-8 JSON;
+   - the document contains exactly `operation_id` and `state`;
+   - `operation_id` exactly matches StageGuard's server-owned deterministic ID;
+   - `state` is exactly `not_found`.
+4. Generic proxy/router 404s, wrong-operation echoes, malformed/extra fields, an `accepted` body carried on HTTP 404, oversized bodies, and different-final-URL 404s all collapse to `unknown`.
+5. Updated `runtime/tests/test_http_remediation_transport.py` to lock the authoritative 404 contract and add malformed/generic/wrong-URL 404 regressions.
+6. Reworked `runtime/tests/test_execution_safety_http_transport.py` to use `HttpRemediationTransport`'s supported injected `urlopen` seam through a switchable deterministic opener instead of patching the obsolete global `urllib.request.urlopen` path.
+7. Updated the end-to-end execution-safety regression so a contract-valid 404 permits reconciliation while a generic 404 keeps `execution_uncertain`, performs no second remediation POST, and surfaces only the bounded unresolved-state error.
 
 Commits:
-- `3cf7e2d6c2256e50c35b398ff884e53e296bd128` — add reference remediation reconciliation endpoint and atomic registry
-- `bb027005caad404f33fe1d23a405463ebe57bba5` — test reference provider reconciliation
-- `69f4c79c5c0195b96f97d4bfe5cf4656a8482c66` — document reference provider reconciliation contract
+- `d8762727de5eea733d59a41e55dd03f181cff335` — fail closed on ambiguous reconciliation 404s
+- `52ffe422d94fd3b6c30bea69ca3e1b293339dd93` — test authoritative reconciliation not-found contract
+- `e8c4a334fbce2bf203c296a8f24590599e74d4a1` — repair concrete HTTP reconciliation safety tests
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded against `UnknownGod2011/Grafana`.
-- Fresh repository checkout remains blocked by runner DNS; therefore the committed unittest module was not executed from a checkout and no repository-suite green claim is made.
-- Reconstructed the changed reference-provider behavior locally with Python's real `ThreadingHTTPServer` and `http.client`, then syntax-compiled and exercised it over real loopback HTTP. Assertions passed for missing reconciliation, accepted reconciliation, bad bearer rejection, conflicting idempotency-key reuse, and single-operation retention: `receiver reconciliation smoke: PASS`.
+- Fresh repository checkout remains blocked by runner DNS; therefore the committed unittest modules were not executed from a checkout and no repository-suite green claim is made.
+- Independently exercised the exact new 404 decision rule using Python's real `urllib.request.Request` and `urllib.error.HTTPError` behavior. The exact same-URL provider contract produced `not_found`; empty, malformed JSON, generic `{error:not_found}`, and oversized 404 bodies produced `unknown`.
+- Verified by static inspection that the loopback reference provider already emits the required exact 404 body: `{operation_id, state:not_found}`.
 - No GitHub Actions workflow was triggered merely to bypass the transient checkout/DNS problem.
 - No external Grafana, Gemini, Google Cloud, remediation provider, credential, or unrelated repository was touched.
 
 ### Decisions
 
-1. Preserve oversized/malformed post-dispatch response escalation into execution uncertainty; converting it into an ordinary non-retryable rejection could destroy the no-replay safety guarantee.
-2. Provider reconciliation remains GET-only/read-only and uses only StageGuard's stable server-owned operation identity.
-3. Keep the reference receiver explicitly loopback-only and non-production; it exists to make the provider contract executable without paid infrastructure or external credentials.
-4. Make provider-side idempotency check-and-store atomic because the fixture itself uses a threaded HTTP server and should model correct concurrent provider semantics.
+1. HTTP status alone is not provider idempotency evidence. `not_found` must be authenticated by the bounded application-level reconciliation contract, not inferred from a router status code.
+2. Keep `accepted` on HTTP 200 only. A contradictory HTTP 404 carrying `state: accepted` remains `unknown` rather than trying to interpret provider/proxy behavior.
+3. Preserve the existing fail-closed execution-uncertainty state machine: ambiguous reconciliation remains blocked and never replays `/v1/execute` or the provider action.
+4. Use the transport's explicit dependency-injection seam for deterministic tests; do not patch implementation details that production networking no longer calls.
 
 ### Blockers / unknowns
 
-- This runner still cannot resolve `github.com` for a fresh repository checkout, so the committed receiver regression and consolidated suites cannot execute here.
+- This runner still cannot resolve `github.com` for a fresh repository checkout, so the committed transport/execution-safety regressions and consolidated suites cannot execute here.
 - Recent audit/checkpoint/recovery/Grafana/MCP/auth/request-framing/protocol-preflight/provider-reconciliation regressions still require consolidated execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege invoker identity, and Docker.
-- Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim, and there are no stored GitHub Actions runs containing that historical failure output.
+- Historical full-suite failures/errors remain incompletely triaged; the stale `urllib.request.urlopen` patch found in this run is one plausible source of errors, but there is still no full-suite green claim.
 
 ## Single best next step
 
-**When checkout becomes executable, run `runtime.tests.test_remediation_receiver`, the HTTP remediation transport/TLS tests, the focused recovery/no-replay suite, and then the full unittest suite; classify every remaining full-suite failure/error and fix the highest-severity genuine product defect. If checkout is still unavailable, continue static triage through the connector, prioritizing end-to-end provider reconciliation and lifecycle paths over additional speculative protocol hardening.**
+**When checkout becomes executable, first run `runtime.tests.test_http_remediation_transport` and `runtime.tests.test_execution_safety_http_transport`, then the reference receiver tests and focused recovery/no-replay suite. If those are green, run the full unittest suite and classify every remaining historical failure/error; fix the highest-severity genuine production defect before adding more hardening. If checkout remains unavailable, continue static full-suite triage through the connector, prioritizing stale test seams and end-to-end lifecycle defects over new speculative protocol work.**
