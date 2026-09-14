@@ -36,14 +36,39 @@ class ReferenceRemediationHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args) -> None:
         return
 
+    def _single_header(self, name: str) -> str | None:
+        values = self.headers.get_all(name, [])
+        if len(values) != 1:
+            return None
+        return values[0]
+
     def _authenticated(self) -> bool:
-        auth = self.headers.get("Authorization", "")
+        auth = self._single_header("Authorization")
+        if auth is None:
+            return False
         expected = f"Bearer {self.server.token}"
         return hmac.compare_digest(auth, expected)
 
     @staticmethod
     def _valid_operation_id(value: object) -> bool:
         return isinstance(value, str) and value.startswith("sg-") and len(value) == 43
+
+    def _validated_content_length(self) -> int | None:
+        # The reference provider deliberately does not implement chunked request
+        # decoding. More importantly, accepting CL+TE or duplicate CL would make
+        # its interpretation depend on an upstream proxy/parser. Fail closed.
+        if self.headers.get_all("Transfer-Encoding", []):
+            return None
+        values = self.headers.get_all("Content-Length", [])
+        if len(values) != 1:
+            return None
+        try:
+            length = int(values[0])
+        except (TypeError, ValueError):
+            return None
+        if length <= 0 or length > MAX_BODY_BYTES:
+            return None
+        return length
 
     def do_POST(self) -> None:
         if self.path != "/v1/recover":
@@ -53,13 +78,19 @@ class ReferenceRemediationHandler(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized"})
             return
 
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self._json(400, {"error": "invalid_content_length"})
+        length = self._validated_content_length()
+        if length is None:
+            self._json(400, {"error": "invalid_request_framing"})
             return
-        if length <= 0 or length > MAX_BODY_BYTES:
-            self._json(413, {"error": "invalid_body_size"})
+
+        idempotency_key = self._single_header("Idempotency-Key")
+        if idempotency_key is None:
+            self._json(400, {"error": "invalid_idempotency_key_header"})
+            return
+
+        content_type = self._single_header("Content-Type")
+        if content_type is None or content_type.split(";", 1)[0].strip().lower() != "application/json":
+            self._json(415, {"error": "unsupported_media_type"})
             return
 
         try:
@@ -77,7 +108,7 @@ class ReferenceRemediationHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid_operation_id"})
             return
         assert isinstance(operation_id, str)
-        if self.headers.get("Idempotency-Key") != operation_id:
+        if idempotency_key != operation_id:
             self._json(409, {"error": "idempotency_key_mismatch"})
             return
         if document.get("action") != "recover_uplink":
