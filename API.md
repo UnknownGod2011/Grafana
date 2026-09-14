@@ -60,6 +60,8 @@ Production operator surfaces are intended to sit behind the configured productio
 
 Mutation request framing is deliberately stricter than generic HTTP interoperability. StageGuard does not implement request transfer coding, so any `Transfer-Encoding` field is rejected before body bytes are read. `Content-Length` may appear at most once; duplicate values are rejected even when identical. This avoids proxy/origin parser differentials and ensures ambiguous framing cannot reach a lifecycle mutation. A missing `Content-Length` is treated as an empty body, while non-empty bodies remain capped by `MAX_BODY_BYTES` and must be JSON objects.
 
+Mutation protocol preflight happens before authentication and before body consumption. Only the seven documented exact POST paths are eligible for body processing; unknown or query-bearing mutation paths are rejected immediately and the connection is closed, so an unsupported request cannot occupy a worker by declaring a body it never sends. StageGuard also rejects every `Expect` header with `417 expectation_failed`. The request handler overrides the standard-library `handle_expect_100` hook as a second fail-closed boundary, so a future move to HTTP/1.1 responses cannot silently begin emitting `100 Continue` before StageGuard has accepted the mutation protocol surface.
+
 The API caps JSON bodies, rejects unsupported fields, uses same-origin cockpit requests, and returns bounded error messages. Sensitive provider responses, credentials, raw PromQL/LogQL, arbitrary targets, and infrastructure endpoints are not accepted through this API surface.
 
 ## Related design documents
