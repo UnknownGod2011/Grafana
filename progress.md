@@ -28,6 +28,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Both unsigned and HMAC-signed local JSON checkpoint stores use the dedicated descriptor-bound checkpoint primitive; symlinks, hard-link aliases, post-open file substitution, unsafe truncation, and post-replace pathname chmod races are rejected or avoided.
 - On POSIX/Cloud Run, checkpoint atomic writes bind temporary creation and final replacement to one validated parent-directory descriptor; parent-path substitution cannot redirect the write into a substituted directory.
 - On POSIX/Cloud Run, checkpoint bounded reads bind the basename open and subsequent file-identity checks to one validated parent-directory descriptor; parent-path substitution cannot redirect a read into a substituted directory.
+- On POSIX/Cloud Run, the generic secure checkpoint opener also binds existing-file opens and `O_CREAT` creation to one validated parent-directory descriptor before returning a file descriptor.
 - A genuinely absent local checkpoint preserves normal empty-store semantics (`None`) without reintroducing a separate `exists()`/open race.
 
 ## Retained validation baseline
@@ -39,53 +40,43 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Recent hardening regressions remain blocked from full repository execution because this automation runner cannot resolve `github.com`; connector reads/writes work, but commits are not treated as passing repository tests.
 
-## Run log — 2026-09-14 — checkpoint parent-bound reads
+## Run log — 2026-09-14 — parent-bound generic checkpoint opens
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected `runtime/checkpoint_file_security.py`, `runtime/tests/test_checkpoint_file_security.py`, and the local checkpoint-store integration in `runtime/incident_checkpoint.py`. Confirmed that both unsigned `JsonCheckpointStore` and signed local checkpoint storage consume the shared bounded-read primitive, so strengthening `read_private_bytes()` protects both local backends without changing checkpoint serialization or incident lifecycle behavior. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected `runtime/checkpoint_file_security.py` and `runtime/tests/test_checkpoint_file_security.py`. Confirmed that bounded production reads and atomic writes were already parent-fd-bound on POSIX, while `open_private_regular_file()` still opened the complete configured pathname directly. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-Atomic checkpoint writes were already parent-fd-bound on POSIX, but bounded reads still opened the full configured checkpoint pathname first and only then validated the resulting file descriptor. A parent directory substituted before that full-path open could therefore redirect which file was initially opened, even though later file-identity checks protected against final-component substitution.
-
-Because checkpoint state controls replay safety and incident lifecycle restoration, the parent directory must be part of the read trust boundary as well as the write trust boundary.
+The generic secure checkpoint opener still represented a weaker filesystem boundary than the dedicated read/write paths. A caller using `open_private_regular_file()` directly could resolve a substituted parent directory before final-component validation. This was especially undesirable because the API explicitly supports both existing-file opens and safe `O_CREAT` creation.
 
 ### Exact changes made
 
-1. Added `_supports_directory_relative_open()` capability detection for the POSIX production path using dir-fd-capable `os.open`, dir-fd-capable `os.stat`, and `follow_symlinks=False` support.
-2. Added `_assert_private_regular_file_at_parent()` to validate a checkpoint descriptor against the exact basename visible inside one already-bound parent descriptor. It enforces regular-file shape, single-link ownership, exact `(st_dev, st_ino)` identity, non-symlink directory entry, and parent-path identity.
-3. Added `_read_private_bytes_via_parent_fd()`:
-   - validates and opens the parent directory once;
-   - opens only `state_path.name` relative to that descriptor with `O_NOFOLLOW` where available;
-   - preserves genuine `FileNotFoundError` semantics;
-   - validates file and parent identity before reading;
-   - performs the existing bounded descriptor read;
-   - revalidates file and parent identity after reading before returning bytes.
-4. Routed `read_private_bytes()` through the directory-relative implementation on supported POSIX systems while retaining the existing portable descriptor/path fallback elsewhere.
-5. Added regression coverage proving:
-   - a symlinked checkpoint parent is rejected without trusting the target directory;
-   - swapping the parent after its descriptor is opened but immediately before the child basename open cannot redirect StageGuard into attacker-controlled state; the operation fails closed when the configured parent path no longer names the bound directory.
+1. Added `_open_private_regular_file_via_parent_fd()` for supported POSIX systems.
+2. The helper opens and validates the configured parent directory once, then opens only `state_path.name` relative to that descriptor using `O_NOFOLLOW` where available.
+3. The returned file must be a single-link regular file matching the exact directory entry in the bound parent, and the configured parent pathname must still name the same directory before and after the owner-only `fchmod` step.
+4. `FileNotFoundError` remains distinguishable for genuinely absent files, and `O_TRUNC` remains prohibited.
+5. `O_CREAT`/`O_EXCL` creation now occurs inside the already-bound parent directory instead of resolving the full pathname at creation time.
+6. Portable platforms retain the existing full-path implementation with file-identity checks rather than claiming POSIX-equivalent parent-binding guarantees.
+7. Added direct regressions covering a symlinked parent, a parent swap immediately before the basename open, and a normal parent-bound `O_CREAT|O_EXCL` round trip that produces a single-link `0600` regular file.
 
 Commits:
-- `7ed97a25050ab1877205137b60b3cceb8837aa5b` — Bind checkpoint reads to validated parent directory
-- `2e9b0340c7feff37314f621896aa523067b9c9b7` — Add checkpoint parent-bound read regressions
+- `0438b8c81e0275da9fec5fb5dccf453683e5adc8` — Bind generic checkpoint opens to parent directory
+- `ba67f7da3e8b4359269ad0a71428b65aad436704` — Add parent-bound generic checkpoint open regressions
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded on `UnknownGod2011/Grafana` `main`.
-- Re-read the committed `runtime/checkpoint_file_security.py` from `main` after the implementation commit to verify the intended production path was present.
-- The runner reports the required POSIX capabilities (`os.open` and `os.stat` dir-fd support plus `os.stat(..., follow_symlinks=False)`) as available.
-- Fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was attempted for executable validation and still failed before checkout with `Could not resolve host: github.com`.
+- Fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was attempted after both implementation and regression commits and still failed before checkout with `Could not resolve host: github.com`.
 - Therefore the newly committed `runtime.tests.test_checkpoint_file_security` regressions are not claimed green in this run.
 - No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. A checkpoint read must bind both the containing directory and file entry; validating only the final file inode after a full-path open is insufficient against pre-open parent substitution.
-2. If the configured parent path changes while a read is in progress, StageGuard fails closed even if the already-bound directory descriptor still points to a readable original file. Returning data would falsely imply that the configured checkpoint location remained authoritative.
-3. Genuine absence remains distinguishable from an unsafe existing path so normal empty-store startup behavior is preserved.
-4. Portable platforms retain the older descriptor/path validation path rather than pretending to provide the same race-free parent binding as POSIX dir-fd operations.
+1. Direct secure checkpoint opens must have the same parent-directory trust boundary as higher-level reads and writes on the Linux/Cloud Run production path.
+2. Parent substitution after directory binding fails closed even when the already-open parent descriptor still points to a valid original directory; the configured checkpoint pathname must remain authoritative for the entire open operation.
+3. Creation is anchored to the bound directory descriptor. This prevents an attacker-controlled replacement parent from receiving newly created checkpoint state.
+4. The portable fallback keeps explicit weaker guarantees instead of emulating unsupported dir-fd behavior unsafely.
 
 ### Blockers / unknowns
 
@@ -93,8 +84,8 @@ Commits:
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
-- The generic `open_private_regular_file()` API is still full-path-based. Production checkpoint reads no longer depend on that path on POSIX, but direct callers and the portable atomic-write verification fallback still use it.
+- The checkpoint parent directory itself is identity-bound but not yet constrained by ownership/writeability policy; deployment assumptions currently rely on the process account and configured state directory.
 
 ## Single best next step
 
-**Migrate `open_private_regular_file()` itself onto the validated parent-directory descriptor model on supported POSIX systems, preserving `FileNotFoundError` and safe `O_CREAT` behavior, then add direct-open parent-swap regressions so every checkpoint file opener shares the same parent-binding guarantee.**
+**Audit the checkpoint parent-directory ownership and writeability assumptions, then decide whether local checkpoint state should fail closed when the parent directory is group/world-writable or not owned by the effective StageGuard user; add focused regressions only if that policy is compatible with Cloud Run/container deployment.**
