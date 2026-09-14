@@ -25,7 +25,8 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Secure local audit data descriptors must name a single-link regular file that still matches the visible pathname; symbolic links, hard-link aliases, and path substitution fail closed.
 - Base and anchored local JSONL audit create/read/append paths use the shared secure descriptor primitive under the cooperative audit lock.
 - Retention planning/execution uses the shared secure descriptor primitive, revalidates descriptor/path identity immediately before destructive pathname replacement, and builds recovery backups from the already-open authenticated source descriptor.
-- Both unsigned and HMAC-signed local JSON checkpoint stores use the dedicated descriptor-bound checkpoint primitive; symlinks, hard-link aliases, post-open path substitution, unsafe truncation, and post-replace pathname chmod races are rejected or avoided.
+- Both unsigned and HMAC-signed local JSON checkpoint stores use the dedicated descriptor-bound checkpoint primitive; symlinks, hard-link aliases, post-open file substitution, unsafe truncation, and post-replace pathname chmod races are rejected or avoided.
+- On POSIX/Cloud Run, checkpoint atomic writes bind temporary creation and final replacement to one validated parent-directory descriptor; parent-path substitution cannot redirect the write into a substituted directory.
 - A genuinely absent local checkpoint preserves normal empty-store semantics (`None`) without reintroducing a separate `exists()`/open race.
 
 ## Retained validation baseline
@@ -37,52 +38,58 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Recent hardening regressions remain blocked from full repository execution because this automation runner cannot resolve `github.com`; connector reads/writes work, but commits are not treated as passing repository tests.
 
-## Run log — 2026-09-14 — signed local checkpoint filesystem hardening
+## Run log — 2026-09-14 — checkpoint parent-directory binding
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected `runtime/checkpoint_file_security.py`, `runtime/incident_checkpoint.py`, `runtime/bootstrap.py`, `runtime/signed_json_checkpoint.py`, `runtime/tests/test_checkpoint_file_security.py`, and `runtime/tests/test_json_checkpoint_store_file_security.py`. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
+Read this `progress.md` completely before selecting work. Inspected `runtime/checkpoint_file_security.py` and `runtime/tests/test_checkpoint_file_security.py` first, with the previous run's signed/unsigned checkpoint integration state as the active baseline. No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Finding
 
-The previously hardened `JsonCheckpointStore` was using the shared descriptor-bound checkpoint primitive, but the authenticated `SignedJsonCheckpointStore` still used the old `exists()`/`read_bytes()` load path and its own `mkstemp`/`os.replace`/post-replacement pathname `chmod` save path. This left the production-oriented local signed backend with weaker filesystem integrity than the unsigned backend: check/open races, hard-link acceptance, and a pathname permission-mutation race remained possible even though the document itself was HMAC-authenticated.
+The checkpoint file entry itself was already protected by descriptor/path identity checks, single-link regular-file enforcement, symlink rejection, bounded reads, owner-only mode, and atomic replacement. However, `atomic_write_private_bytes()` still created its temporary file and performed final `os.replace()` by repeatedly resolving the parent pathname. A parent directory swapped between those operations could redirect a write even though the final checkpoint file primitive itself was secure.
 
-This was higher priority than expanding parent-directory policy because it was an active duplicated implementation on an explicitly selectable runtime backend (`--checkpoint-backend signed-json`).
+This matters on the production Linux/Cloud Run path because checkpoint durability is part of the incident replay-safety boundary.
 
 ### Exact changes made
 
-1. Migrated `SignedJsonCheckpointStore.load()` to `read_private_bytes(path, max_bytes=_MAX_BYTES)` and preserved genuine `FileNotFoundError` as empty-store `None` semantics.
-2. Migrated `SignedJsonCheckpointStore.save()` to `atomic_write_private_bytes(path, _encode(..., signing_key=...))`.
-3. Removed duplicated `os` and `tempfile` filesystem code and the post-replacement pathname `chmod`.
-4. Preserved HMAC-authenticated `_decode(..., require_signature=True)` semantics; filesystem hardening does not weaken document authenticity checks.
-5. Added `runtime/tests/test_signed_json_checkpoint_file_security.py` covering:
-   - missing signed checkpoint -> `None` without an `exists()` precheck;
-   - signed round trip with single-link regular-file and owner-only mode invariants;
-   - symlink load rejection without reading/mutating the target;
-   - hard-link load rejection;
-   - safe replacement of a symlink directory entry without mutating its target;
-   - wrong signing-key rejection after secure read;
-   - propagation of secure-reader path-identity failure;
-   - delegation of signed writes to the atomic private writer with bounded encoded bytes.
+1. Added validated parent-directory descriptors with regular-directory and `(st_dev, st_ino)` identity checks plus final-component symlink rejection.
+2. Added a POSIX directory-relative atomic-write path:
+   - create the random private temporary file via `os.open(..., dir_fd=parent_fd, O_CREAT|O_EXCL)`;
+   - write and `fsync()` through the file descriptor;
+   - revalidate parent identity before replacement;
+   - replace using `os.replace(..., src_dir_fd=parent_fd, dst_dir_fd=parent_fd)` so a pathname swap cannot redirect the operation;
+   - validate final file shape/mode and `fsync()` the parent directory for rename durability;
+   - revalidate the parent path again before returning.
+3. Retained a portability fallback for platforms without directory-relative replacement, but added parent identity checks around every pathname-sensitive phase.
+4. Corrected feature detection after confirming CPython exposes `os.replace(..., src_dir_fd=..., dst_dir_fd=...)` on POSIX while not listing `os.replace` separately in `os.supports_dir_fd`; support is now based on POSIX plus dir-fd-capable `os.open`/`os.rename`.
+5. Added regressions for:
+   - symlinked parent directories without target-directory mutation;
+   - parent substitution after the temp file is written but before replacement, including temp cleanup in the displaced original directory;
+   - a race immediately around replacement proving the dir-fd operation writes only to the originally opened parent, never the substituted pathname.
+6. Fixed the replacement-race harness to use the captured real `os.replace` directly so patching the module's `os.replace` cannot recurse through `Path.replace()`.
 
 Commits:
-- `458cc7f643ae873d3be29ed90331de059771cf34` — Harden signed local checkpoint filesystem access
-- `31923d5da1805152966071724b86517aeaf615b1` — Add signed checkpoint filesystem security regressions
+- `69a8be32a3e6e181f3ea186d122a3bca44b9a462` — Bind checkpoint atomic writes to validated parent directory
+- `ad1de0bb51a22de0bc988d8e513af6ef4cb8f62a` — Detect directory-relative replace support portably
+- `2cccd5b38f4039dea7de3579a987eb8bfb64307c` — Add checkpoint parent-directory substitution regressions
+- `b3394f6e4a1f111486dde5eabe20ca7b29ecfefb` — Revalidate checkpoint parent after durable replace
+- `9e928518855335def8a70cda9b1552086b1989c5` — Fix parent-directory race regression harness
 
 ### Checks / results
 
 - Authenticated GitHub connector reads/writes succeeded on `UnknownGod2011/Grafana` `main`.
-- The committed production module was independently syntax-compiled with `python -m py_compile`: PASS.
-- Fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was attempted again so the signed and unsigned focused checkpoint suites could run together; checkout failed before execution with `Could not resolve host: github.com`.
-- Therefore `runtime.tests.test_signed_json_checkpoint_file_security` and the current committed repository suite are not claimed green in this run.
+- The runner was checked for the actual runtime capability: `os.open` and `os.rename` are dir-fd capable on POSIX, and `os.replace` exposes `src_dir_fd`/`dst_dir_fd` even though it is not separately listed in `os.supports_dir_fd`.
+- A minimal local syscall smoke using one directory descriptor successfully created a temp file and replaced it through `os.replace(..., src_dir_fd=..., dst_dir_fd=...)`: PASS.
+- Fresh `git clone --depth 1 https://github.com/UnknownGod2011/Grafana.git` was attempted again for the committed regression suite and still failed before checkout with `Could not resolve host: github.com`.
+- Therefore the committed `runtime.tests.test_checkpoint_file_security` suite is not claimed green in this run.
 - No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. Local signed and unsigned checkpoint backends must share one filesystem trust boundary; signing protects checkpoint contents, not pathname/inode integrity.
-2. Missing local signed state remains a normal state-machine condition, while unsafe existing paths fail closed.
-3. HMAC verification remains mandatory for the signed backend after secure descriptor-bound reading.
-4. Parent-directory identity/ownership hardening remains worth reviewing, but duplicated insecure checkpoint I/O was a more immediate defect and is now removed.
+1. Parent-directory identity is part of the checkpoint trust boundary, not merely the final file inode.
+2. Linux/Cloud Run should use directory-relative syscalls so the operation stays anchored even if the pathname is substituted after validation.
+3. A detected parent substitution fails closed even when the replacement itself safely landed in the originally opened directory; returning success would give callers a false claim that the checkpoint is reachable at the configured path.
+4. Portability fallbacks remain supported but cannot provide the same race-free guarantee as dir-fd operations; they therefore perform repeated identity checks instead of silently claiming equivalent protection.
 
 ### Blockers / unknowns
 
@@ -90,8 +97,8 @@ Commits:
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
 - Historical full-suite failures/errors remain untriaged; there is still no full-suite green claim.
-- The shared checkpoint primitive secures the final file entry itself but still creates/uses the parent directory by pathname; parent-directory substitution/ownership assumptions have not yet been formally hardened.
+- Checkpoint writes are now parent-fd-bound on POSIX, but checkpoint reads/opening still resolve the full configured pathname before validating the file descriptor. A parent-path substitution that occurs before `open_private_regular_file()` resolves the path therefore remains worth reviewing, especially for the unsigned local backend.
 
 ## Single best next step
 
-**Run the focused signed+unsigned checkpoint suites immediately when executable checkout is restored; in parallel, review and, if portable, bind checkpoint atomic writes to a validated parent-directory descriptor so parent path substitution cannot redirect temp creation or final replacement.**
+**Extend the validated parent-directory descriptor model to checkpoint reads/opening on POSIX: open the checkpoint basename relative to the bound parent fd, validate both parent and file identity before/after bounded reads, and add regressions proving a substituted parent path cannot redirect unsigned checkpoint reads.**
