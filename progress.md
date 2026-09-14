@@ -40,52 +40,63 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed recovery/API/Grafana/operator regressions remain blocked from repository execution because this automation runner cannot resolve `github.com`; authenticated connector reads/writes work, but commits are not treated as passing tests.
 
-## Run log — 2026-09-14 — focused recovery safety runner
+## Run log — 2026-09-14 — recovery safety documentation and API surface coherence
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected the repository root, `scripts/`, the current README safety/runtime description, the recovery regression inventory, `runtime/tests/test_operator_console_dom.py`, and `runtime/tests/test_operator_console_dom_requests.py`. Confirmed the two behavioral DOM harnesses existed but there was no stable explicit fast-safety entrypoint guaranteeing they run together with the service/API/restart recovery regressions.
+Read this `progress.md` completely before selecting work. Inspected repository metadata/root contents, the main `README.md`, `OPERATOR_CONSOLE.md`, and `scripts/run_recovery_safety_suite.py`. Confirmed the prior run's highest-priority deliverable existed as code but was not visible from the main README, and confirmed the README's authenticated HTTP surface list omitted the already-implemented `POST /v1/recovery/recheck` endpoint.
+
+Attempted the intended fresh checkout and focused safety command first:
+
+```bash
+python scripts/run_recovery_safety_suite.py
+```
+
+The environment again failed during `git clone` with `Could not resolve host: github.com`, before any repository test could execute. Authenticated GitHub connector access remained available, so work continued through that channel without triggering GitHub Actions.
 
 No unrelated repository, cloud resource, Grafana instance, Gemini endpoint, remediation provider, IAM binding, or GitHub Actions workflow was modified or triggered.
 
 ### Exact changes made
 
-1. Added `scripts/run_recovery_safety_suite.py` as a single dependency-light recovery/no-replay validation entrypoint.
-2. The runner executes these committed modules together from the `runtime` working directory so their existing bare runtime imports resolve consistently:
-   - `tests.test_recovery_observability`
-   - `tests.test_anchored_recovery_recheck`
-   - `tests.test_api_recovery_recheck`
-   - `tests.test_recovery_recheck_restart`
-   - `tests.test_operator_console_dom`
-   - `tests.test_operator_console_dom_requests`
-3. The suite therefore spans the bounded recovery observability contract, anchored/service recovery-only behavior, authenticated HTTP recheck behavior, restart durability/no-replay semantics, actual cockpit DOM interlocks, and the real browser request path.
-4. The runner explicitly requires Node.js before invoking unittest. This prevents the two JavaScript behavioral safety tests from being silently accepted as skipped on machines without a JavaScript runtime.
-5. The runner uses only Python stdlib + Node stdlib and does not require Grafana, Gemini, remediation credentials, Docker, browser downloads, npm packages, or paid cloud infrastructure.
+1. Updated `README.md` to document `POST /v1/recovery/recheck` in the authenticated operator HTTP surfaces.
+2. Documented the endpoint's critical no-replay property directly in the main README: it performs recovery-only Grafana verification after an already accepted provider action and has no remediation client capable of redispatching the provider mutation.
+3. Strengthened the README recovery safety-model row so accepted-but-unverified remediation is explicitly routed only to the recovery-only recheck path rather than another execution.
+4. Added a `Fast recovery/no-replay safety validation` section with the canonical command:
+
+   ```bash
+   python scripts/run_recovery_safety_suite.py
+   ```
+
+5. Documented exactly what the focused runner covers: recovery observability, anchored recovery-only behavior, authenticated HTTP rechecks, restart durability, and the executable operator-console DOM/request harnesses.
+6. Documented prerequisites and non-requirements: Python + Node.js are required; Grafana, Gemini, remediation/provider credentials, Docker, browser downloads, npm packages, and paid cloud resources are not.
+7. Documented that missing Node is a hard validation failure so browser-level no-replay safety cannot silently skip.
+8. Explicitly stated that the focused recovery safety command is a fast high-risk-boundary gate, not a replacement for the full regression suite or live Grafana MCP/Docker rehearsals.
+9. Added `scripts/run_recovery_safety_suite.py` to the README repository structure so developers/operators can discover the safety entrypoint without reading `progress.md`.
 
 Commit:
-- `6e2ef3b2e6b17ad58a66b6a0c0e3517908ce9ec2` — Add focused recovery safety test runner
+- `6cf62c3e70afe36afef1c5a667ad20821e5875e0` — Document recovery recheck and focused safety suite
 
 ### Checks / results
 
 - Authenticated GitHub connector read/write operations succeeded against `UnknownGod2011/Grafana`.
-- Confirmed all six referenced recovery test modules exist on `main`; directly inspected the DOM harnesses and recovery restart/observability modules.
-- Independently syntax-compiled the new runner logic with `python -m py_compile`: PASS.
-- Confirmed this execution environment has Node.js `v22.16.0`, so Node itself is not the current blocker.
-- Attempted a fresh shallow checkout followed by `python scripts/run_recovery_safety_suite.py`.
-- Checkout failed before any repository test could run with `Could not resolve host: github.com`.
-- Therefore this run does **not** claim the new focused suite green.
+- Re-fetched the updated README from `main` and confirmed the authenticated HTTP list now contains `POST /v1/recovery/recheck` with no-replay semantics.
+- Re-fetched the local-development section and confirmed the focused runner command, Node requirement, dependency-light scope, and non-replacement warning are present.
+- Inspected `OPERATOR_CONSOLE.md` and confirmed its existing recovery-recheck semantics agree with the new README wording: only fresh Grafana recovery telemetry is collected, the consumed approval is not reused, and no remediation client is present on the recheck path.
+- Inspected `scripts/run_recovery_safety_suite.py` and confirmed the README's documented test scope/prerequisites match the committed runner implementation.
+- Attempted a fresh shallow checkout plus `python scripts/run_recovery_safety_suite.py`; checkout failed before tests with `Could not resolve host: github.com`.
+- Therefore this run does **not** claim the focused recovery suite green.
 - No GitHub Actions workflow was triggered merely to bypass the runner DNS failure.
 
 ### Decisions
 
-1. Recovery/no-replay safety now has one intentional local command instead of relying on developers remembering a growing list of individual modules.
-2. Browser-level recovery safety is mandatory in this focused suite: absent Node is a failed prerequisite, not an acceptable skip.
-3. The runner is deliberately narrow rather than pretending the historical full suite is green; it targets the highest-risk accepted-remediation/recovery boundary while legacy full-suite failures remain to be triaged separately.
-4. No new CI workflow was added because the project explicitly avoids noisy Actions usage and the local runner provides the needed deterministic entrypoint without consuming CI storage/minutes.
+1. Treat missing documentation of a safety-critical endpoint as a production usability defect, not cosmetic documentation debt: operators and integrators should discover the no-replay recovery path from the main README.
+2. Keep the focused recovery suite dependency-light and developer-invoked rather than adding a noisy CI workflow while the project explicitly avoids unnecessary GitHub Actions usage.
+3. Keep the README honest about validation scope: the recovery runner is a high-risk-boundary fast gate, while the historical full-suite failures and live MCP 1.4.1 smoke remain separate obligations.
+4. Do not duplicate recovery implementation merely because the runtime checkout is unavailable; use authenticated repository inspection to eliminate documentation/API-surface drift while preserving the existing implementation contract.
 
 ### Blockers / unknowns
 
-- This automation runner still cannot resolve `github.com`, so a current repository checkout and executable suite remain unavailable here.
+- This automation runner still cannot resolve `github.com`, so a current repository checkout and executable focused suite remain unavailable here.
 - Recent audit/checkpoint/retention/recovery/Grafana regressions still require consolidated execution.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege ADC invoker identity, and Docker.
@@ -93,4 +104,4 @@ Commit:
 
 ## Single best next step
 
-**As soon as repository checkout is executable, run `python scripts/run_recovery_safety_suite.py` first and fix any failure until the full focused recovery/no-replay suite is green. Then make that command visible in the main developer/operator documentation and move to the highest-impact remaining production gap rather than adding more source-only recovery assertions.**
+**As soon as repository checkout is executable, run `python scripts/run_recovery_safety_suite.py` and fix every failure until the focused recovery/no-replay suite is green. If that passes, stop adding recovery-only assertions and move to the highest-impact unresolved production gap: triage the historical full-suite failures/errors into true defects versus obsolete tests, fixing the highest-severity real defect first while keeping GitHub Actions quiet.**
