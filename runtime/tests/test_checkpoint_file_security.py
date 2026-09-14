@@ -96,6 +96,81 @@ class CheckpointFileSecurityTests(unittest.TestCase):
             self.assertEqual((displaced / checkpoint.name).read_bytes(), b"trusted-state")
             self.assertEqual(checkpoint.read_bytes(), b"attacker-state")
 
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_open(),
+        "requires directory-relative checkpoint opens",
+    )
+    def test_generic_open_rejects_symlink_parent_without_opening_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_parent = root / "real-parent"
+            real_parent.mkdir()
+            target = real_parent / "checkpoint.json"
+            target.write_bytes(b"attacker-state")
+            linked_parent = root / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+            with self.assertRaises(RuntimeError):
+                open_private_regular_file(linked_parent / "checkpoint.json", os.O_RDONLY)
+
+            self.assertEqual(target.read_bytes(), b"attacker-state")
+
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_open(),
+        "requires directory-relative checkpoint opens",
+    )
+    def test_generic_open_cannot_be_redirected_by_parent_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "state"
+            parent.mkdir()
+            checkpoint = parent / "checkpoint.json"
+            checkpoint.write_bytes(b"trusted-state")
+            displaced = root / "state-original"
+            real_open = os.open
+            real_replace = os.replace
+            swapped = False
+
+            def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if not swapped and dir_fd is not None and path == checkpoint.name:
+                    real_replace(parent, displaced)
+                    parent.mkdir()
+                    (parent / checkpoint.name).write_bytes(b"attacker-state")
+                    swapped = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(checkpoint_file_security.os, "open", side_effect=swap_then_open):
+                with self.assertRaisesRegex(RuntimeError, "parent directory changed"):
+                    open_private_regular_file(checkpoint, os.O_RDONLY)
+
+            self.assertTrue(swapped)
+            self.assertEqual((displaced / checkpoint.name).read_bytes(), b"trusted-state")
+            self.assertEqual(checkpoint.read_bytes(), b"attacker-state")
+
+    @unittest.skipUnless(
+        checkpoint_file_security._supports_directory_relative_open(),
+        "requires directory-relative checkpoint opens",
+    )
+    def test_generic_open_create_is_parent_bound_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "checkpoint.json"
+            fd = open_private_regular_file(
+                checkpoint,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            )
+            try:
+                os.write(fd, b"state")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+            st = os.lstat(checkpoint)
+            self.assertTrue(stat.S_ISREG(st.st_mode))
+            self.assertEqual(st.st_nlink, 1)
+            self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+            self.assertEqual(checkpoint.read_bytes(), b"state")
+
     def test_identity_check_rejects_post_open_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
