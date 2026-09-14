@@ -10,10 +10,33 @@ StageGuard serves a minimal same-origin operator cockpit at `GET /console` from 
 4. Optionally generate a Gemini briefing. The request contains only the current `incident_id` and `revision`; StageGuard discards the response in the browser if the displayed revision changed while generation was in flight.
 5. For a diagnosed incident, type the complete current revision into the approval field. The approval button remains disabled until the text exactly matches that revision, then an explicit confirmation is required.
 6. Execution is available only after server-side approval exists and no outcome has already consumed it. Recovery state is rendered from the server response; action acceptance is not presented as recovery proof.
+7. If the provider accepted the action but the bounded verification window ends as `recovery_unverified`, the cockpit exposes **Recheck recovery only**. This calls `POST /v1/recovery/recheck`, collects fresh Grafana recovery telemetry, and never calls the remediation provider again. The operator can safely repeat this read-only verification later until recovery is proven or choose a separate fresh investigation; the consumed approval is never reused to replay the side effect.
+
+## Recovery-only verification after an accepted action
+
+`recovery_unverified` is an intentionally distinct lifecycle state: StageGuard knows the approved provider action was accepted, but the bounded post-action Grafana samples did not yet establish the required consecutive healthy streak. Treating this as either success or permission to execute again would be unsafe.
+
+The authenticated endpoint:
+
+`POST /v1/recovery/recheck`
+
+accepts an empty JSON object only. Server-side state must prove all of the following before the endpoint becomes actionable:
+
+- the current incident has a revision-bound human approval;
+- that approval has already been consumed by a completed remediation attempt;
+- the stored outcome is exactly `recovery_unverified`;
+- the stored action result is literally `accepted: true`;
+- checkpoint/audit/execution-safety interlocks are clear.
+
+The recheck receives no remediation client and therefore has no code path capable of redispatching the provider mutation. It reuses only StageGuard's pinned recovery queries and finite-sample validation against fresh Grafana/Prometheus evidence. A healthy consecutive streak promotes the same incident revision to `recovered`; otherwise it remains `recovery_unverified` and may be checked again later.
+
+Every committed attempt records a bounded `recovery_rechecked` audit event with revision, resulting status, sample count, and the explicit invariant `provider_replayed: false`. Provider responses, endpoints, credentials, raw queries, and action metadata are not exposed in that event.
+
+The production `AnchoredExecutionSafeIncidentService` performs the potentially slow Grafana polling outside the lifecycle lock. Authenticated status/readiness requests therefore remain responsive while the recheck is active, competing lifecycle mutations remain blocked, and the execution watchdog remains observable. Because the recheck has no provider side effect, a Grafana/query failure does **not** create provider-execution uncertainty; the previous `recovery_unverified` state remains authoritative.
 
 ## No-replay remediation interlock
 
-The cockpit treats authenticated `safety_state` as an independent lifecycle interlock. Any non-`ok` value disables investigation, Gemini briefing, approval input, approval, and execution even if older detailed fields appear superficially actionable.
+The cockpit treats authenticated `safety_state` as an independent lifecycle interlock. Any non-`ok` value disables investigation, Gemini briefing, approval input, approval, execution, and recovery recheck even if older detailed fields appear superficially actionable.
 
 The highest-severity states are `execution_uncertain` and `execution_uncertain_audit_failed`. They mean provider dispatch may already have occurred and therefore the operator must **not replay remediation**. The cockpit renders a prominent `DO NOT REPLAY REMEDIATION` panel and keeps unsafe lifecycle controls disabled.
 
@@ -48,7 +71,7 @@ Timeline entries expose only:
 - sequence and timestamp;
 - bounded lifecycle event type;
 - a 12-character SHA-256-derived pseudonymous actor reference;
-- an event-specific allow-list of safe metadata such as evidence revision, diagnosis status/confidence, evidence mode, briefing digest/next-step classification, approved action name, and recovery status/sample count.
+- an event-specific allow-list of safe metadata such as evidence revision, diagnosis status/confidence, evidence mode, briefing digest/next-step classification, approved action name, remediation/recovery status and sample count, and the fixed no-replay flag on recovery rechecks.
 
 The timeline deliberately excludes raw operator identity, Grafana URLs or datasource IDs, activation identifiers, PromQL/LogQL, raw logs/evidence, provider exception strings, remediation targets/endpoints, credentials/tokens, and arbitrary action metadata. Unknown lifecycle event payload fields are dropped by default.
 
@@ -58,7 +81,7 @@ Local/free development continues to use the process-local projection with the JS
 
 The cockpit is deliberately small and dependency-free:
 
-- `/console`, `/assets/operator.js`, `/assets/operator.css`, `/v1/incident`, and `/v1/audit` all require the configured StageGuard identity provider;
+- `/console`, `/assets/operator.js`, `/assets/operator.css`, `/v1/incident`, `/v1/audit`, and every lifecycle POST including `/v1/recovery/recheck` require the configured StageGuard identity provider;
 - production deployment therefore relies on the same verified IAP signed assertion as the JSON API;
 - the page uses only same-origin API requests and no third-party JavaScript, CSS, fonts, analytics, CDNs, or images;
 - a strict CSP permits only same-origin script/style/connect resources and forbids framing, forms, external defaults, and a base URL override;
@@ -67,12 +90,12 @@ The cockpit is deliberately small and dependency-free:
 - the cockpit uses neither `localStorage` nor `sessionStorage`;
 - there is no browser-side Grafana URL/token, Gemini API key, remediation token, datasource UID configuration, PromQL, LogQL, endpoint, action target, Cloud Logging credential, or raw operator identity.
 
-The browser is a presentation and confirmation surface only. Server-side lifecycle validation remains authoritative for revision matching, diagnosis eligibility, approval, single-use execution, audit, reconciliation, and telemetry recovery verification.
+The browser is a presentation and confirmation surface only. Server-side lifecycle validation remains authoritative for revision matching, diagnosis eligibility, approval, single-use execution, audit, reconciliation, no-replay recovery rechecks, and telemetry recovery verification.
 
 ## Local testing
 
 A static-bearer deployment can exercise the HTTP assets with an explicit `Authorization` header. For an interactive browser, local development is better run with the loopback development identity provider; never bind that identity mode to a non-loopback interface.
 
-Credential-free regression coverage lives in `runtime/tests/test_operator_console.py`, `runtime/tests/test_operator_integrity_policy.py`, `runtime/tests/test_operator_browser_evidence_unavailable.py`, `runtime/tests/test_operator_browser_execution_uncertain.py`, `runtime/tests/test_audit_timeline.py`, and `runtime/tests/test_durable_audit_reader.py`. It checks authentication, CSP/no-store behavior, absence of embedded credential markers, exact revision binding, composite safety blocking, strict reconciliation-reference validation, no-replay guidance, evidence-unavailable handling, lack of browser persistence, bounded timeline pagination, incident scoping, actor pseudonymization, payload redaction, malformed-query rejection, durable query bounds/log pinning/document validation, durable/local merge conflict handling, and independence of `/healthz` and `/metrics`.
+Credential-free regression coverage lives in `runtime/tests/test_operator_console.py`, `runtime/tests/test_operator_integrity_policy.py`, `runtime/tests/test_operator_browser_evidence_unavailable.py`, `runtime/tests/test_operator_browser_execution_uncertain.py`, `runtime/tests/test_audit_timeline.py`, `runtime/tests/test_durable_audit_reader.py`, `runtime/tests/test_recovery_recheck.py`, `runtime/tests/test_anchored_recovery_recheck.py`, and `runtime/tests/test_api_recovery_recheck.py`. It checks authentication, CSP/no-store behavior, absence of embedded credential markers, exact revision binding, composite safety blocking, strict reconciliation-reference validation, no-replay guidance, evidence-unavailable handling, lack of browser persistence, bounded timeline pagination, incident scoping, actor pseudonymization, payload redaction, malformed-query rejection, durable query bounds/log pinning/document validation, durable/local merge conflict handling, recovery-only provider non-replay, production read responsiveness during recovery polling, and independence of `/healthz` and `/metrics`.
 
 The two browser acceptance modules are optional and use Playwright/Chromium. `test_operator_browser_execution_uncertain` drives the real execution-safe service through diagnosis, approval, one provider dispatch, successful telemetry recovery verification, and then a simulated final checkpoint persistence failure. The rendered console must show `DO NOT REPLAY`, display only the bounded `sg-...` reconciliation reference, keep investigation/briefing/approval/execution controls disabled, preserve exactly one provider dispatch, and exclude injected provider endpoint/token sentinels from the DOM.
