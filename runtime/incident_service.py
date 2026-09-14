@@ -19,7 +19,14 @@ from incident_checkpoint import CheckpointConflictError, CheckpointStore, Incide
 from investigator import IncidentReport, MetricQueryClient, investigate, investigate_with_log_corroboration
 from log_activation import LogActivationRecord
 from log_evidence import LogQueryClient
-from remediation import Approval, RemediationClient, RemediationOutcome, remediate_and_verify, required_approval
+from remediation import (
+    Approval,
+    RemediationClient,
+    RemediationOutcome,
+    remediate_and_verify,
+    required_approval,
+    verify_recovery,
+)
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
 
 
@@ -173,6 +180,7 @@ _TIMELINE_PAYLOAD_FIELDS = {
     "briefing_failed": ("revision", "error_type"),
     "remediation_approved": ("revision", "action"),
     "remediation_completed": ("revision", "status", "sample_count", "action_accepted"),
+    "recovery_rechecked": ("revision", "status", "sample_count", "provider_replayed"),
 }
 _MAX_TIMELINE_EVENTS = 512
 _MAX_AUDIT_LINEAGE_READ_EVENTS = 4096
@@ -304,7 +312,6 @@ class IncidentService:
         return events
 
     def _read_audit_candidates(self, incident_id: str, through_sequence: int) -> list[AuditEvent] | None:
-        """Read a complete bounded branched prefix when the reader supports it."""
         if self._audit_reader is None:
             return None
         reader = getattr(self._audit_reader, "read_candidates", None)
@@ -320,24 +327,14 @@ class IncidentService:
         return candidates
 
     def _assert_no_audit_tail(self, incident_id: str, authenticated_sequence: int) -> None:
-        """Reject durable events that are not committed by an unbranched/legacy reader."""
         if self._audit_reader is None:
             return
-        tail = self._audit_reader.read(
-            incident_id=incident_id,
-            after_sequence=authenticated_sequence,
-            limit=1,
-        )
+        tail = self._audit_reader.read(incident_id=incident_id, after_sequence=authenticated_sequence, limit=1)
         if tail:
             raise ValueError("durable audit contains events beyond authenticated checkpoint head")
 
     def _restore_audit_integrity(self, checkpoint: IncidentCheckpoint) -> None:
-        from audit_integrity import (
-            AuditChain,
-            AuditChainCheckpoint,
-            select_committed_audit_lineage,
-            verify_audit_chain,
-        )
+        from audit_integrity import AuditChain, AuditChainCheckpoint, select_committed_audit_lineage, verify_audit_chain
 
         self._committed_audit_history = []
         bound = checkpoint.audit_chain_sequence is not None and checkpoint.audit_chain_head_sha256 is not None
@@ -416,7 +413,6 @@ class IncidentService:
             return state if state in _AUDIT_INTEGRITY_STATES else "failed"
 
     def reload_checkpoint_after_conflict(self) -> IncidentSnapshot:
-        """Explicitly adopt and revalidate the winning durable checkpoint after CAS contention."""
         with self._lock:
             if self._checkpoint_store is None:
                 raise RuntimeError("checkpoint persistence is not configured")
@@ -476,8 +472,6 @@ class IncidentService:
             except Exception:
                 self._audit_integrity_state = "failed"
                 raise RuntimeError("audit integrity chain could not advance safely")
-        # The append is not lifecycle authority until checkpoint persistence succeeds.
-        # A CAS loser therefore never enters the committed in-process timeline.
         self._save_checkpoint()
         self._timeline.append(event)
         self._committed_audit_history.append(event)
@@ -493,15 +487,6 @@ class IncidentService:
         actor: str,
         payload: dict,
     ) -> IncidentSnapshot:
-        """Publish a snapshot only after the complete audit/checkpoint transition succeeds.
-
-        Audit sinks intentionally append before optimistic checkpoint persistence so a
-        competing writer can be reconstructed later. A CAS loser must therefore not
-        remain visible through ``status()`` as if it were authoritative lifecycle
-        state. Any other audit/checkpoint failure is likewise non-authoritative and,
-        when checkpoint persistence is configured, moves the lifecycle into an
-        explicit fail-closed integrity state.
-        """
         previous = self._snapshot
         self._snapshot = candidate
         try:
@@ -565,8 +550,12 @@ class IncidentService:
             report = investigate(self._metrics, self._profile) if self._logs is None else investigate_with_log_corroboration(self._metrics, self._logs, self._profile)
             incident_id = self._snapshot.incident_id if self._snapshot is not None else self._id_factory()
             snapshot = IncidentSnapshot(incident_id, _revision(report), report, None, None)
-            payload = {"revision": snapshot.revision, "status": report.status, "confidence": report.confidence,
-                       "evidence_mode": "metric+loki" if self._logs is not None else "metric-only"}
+            payload = {
+                "revision": snapshot.revision,
+                "status": report.status,
+                "confidence": report.confidence,
+                "evidence_mode": "metric+loki" if self._logs is not None else "metric-only",
+            }
             if self._activation is not None:
                 payload["activation_profile_sha256"] = self._activation.profile_sha256
                 payload["activation_datasource_sha256"] = self._activation.datasource_sha256
@@ -597,11 +586,19 @@ class IncidentService:
             try:
                 briefing = self._commander.brief(snapshot.report)
             except Exception as exc:
-                self._record(snapshot.incident_id, "briefing_failed", normalized_actor,
-                             {"revision": snapshot.revision, "error_type": type(exc).__name__})
+                self._record(
+                    snapshot.incident_id,
+                    "briefing_failed",
+                    normalized_actor,
+                    {"revision": snapshot.revision, "error_type": type(exc).__name__},
+                )
                 raise RuntimeError("Gemini briefing generation failed") from exc
-            self._record(snapshot.incident_id, "briefing_generated", normalized_actor,
-                         {"revision": snapshot.revision, "briefing_sha256": _briefing_digest(briefing), "next_step": briefing.next_step})
+            self._record(
+                snapshot.incident_id,
+                "briefing_generated",
+                normalized_actor,
+                {"revision": snapshot.revision, "briefing_sha256": _briefing_digest(briefing), "next_step": briefing.next_step},
+            )
             return briefing
 
     def approve(self, *, incident_id: str, revision: str, approved_by: str) -> IncidentSnapshot:
@@ -634,11 +631,21 @@ class IncidentService:
                 raise RuntimeError("matching explicit approval is required before remediation")
             if snapshot.outcome is not None:
                 raise RuntimeError("this approval has already been consumed")
-            outcome = remediate_and_verify(snapshot.report, snapshot.approval, self._remediation, self._metrics,
-                                           profile=self._profile, sleep=self._recovery_sleep)
+            outcome = remediate_and_verify(
+                snapshot.report,
+                snapshot.approval,
+                self._remediation,
+                self._metrics,
+                profile=self._profile,
+                sleep=self._recovery_sleep,
+            )
             candidate = IncidentSnapshot(snapshot.incident_id, snapshot.revision, snapshot.report, snapshot.approval, outcome)
-            payload = {"revision": snapshot.revision, "status": outcome.status, "sample_count": len(outcome.samples),
-                       "action_accepted": bool(outcome.action_result and outcome.action_result.accepted)}
+            payload = {
+                "revision": snapshot.revision,
+                "status": outcome.status,
+                "sample_count": len(outcome.samples),
+                "action_accepted": bool(outcome.action_result and outcome.action_result.accepted),
+            }
             if outcome.action_result is not None and outcome.action_result.metadata:
                 payload["action_metadata"] = dict(outcome.action_result.metadata)
             return self._record_snapshot_transition(
@@ -646,4 +653,42 @@ class IncidentService:
                 "remediation_completed",
                 actor.strip() or "stageguard",
                 payload,
+            )
+
+    def recheck_recovery(self, *, actor: str = "stageguard") -> IncidentSnapshot:
+        """Collect fresh recovery evidence without replaying the remediation provider action."""
+        with self._lock:
+            self._require_checkpoint_consistency()
+            snapshot = self._snapshot
+            if snapshot is None or snapshot.approval is None or snapshot.outcome is None:
+                raise RuntimeError("a completed accepted remediation is required before recovery recheck")
+            previous = snapshot.outcome
+            if previous.status != "recovery_unverified":
+                raise RuntimeError("recovery recheck is only allowed while recovery remains unverified")
+            if previous.action_result is None or previous.action_result.accepted is not True:
+                raise RuntimeError("recovery recheck requires a previously accepted remediation action")
+
+            outcome = verify_recovery(
+                previous.action_result,
+                self._metrics,
+                profile=self._profile,
+                sleep=self._recovery_sleep,
+            )
+            candidate = IncidentSnapshot(
+                snapshot.incident_id,
+                snapshot.revision,
+                snapshot.report,
+                snapshot.approval,
+                outcome,
+            )
+            return self._record_snapshot_transition(
+                candidate,
+                "recovery_rechecked",
+                actor.strip() or "stageguard",
+                {
+                    "revision": snapshot.revision,
+                    "status": outcome.status,
+                    "sample_count": len(outcome.samples),
+                    "provider_replayed": False,
+                },
             )
