@@ -18,6 +18,7 @@ from identity import AuthenticationError, IdentityProvider, LocalDevelopmentIden
 from incident_service import IncidentService
 from operator_console import CONSOLE_CSS, CONSOLE_HTML, CONSOLE_JS
 from readiness import EvidencePlaneReadinessProbe
+from recovery_observability import prometheus_recovery_metrics, recovery_observability
 
 
 MAX_BODY_BYTES = 16 * 1024
@@ -254,9 +255,12 @@ def _execution_checkpoint_phase(service: IncidentService) -> str:
 def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
     if snapshot is None:
         snapshot = service.status()
+    execution_phase = _execution_checkpoint_phase(service)
+    recovery = recovery_observability(snapshot, execution_phase)
     return {
         "incident": None if snapshot is None else snapshot.to_dict(),
         "evidence_source": _evidence_source_view(service, snapshot),
+        "recovery": recovery.to_dict(),
         "safety_state": _lifecycle_safety_state(service),
         "checkpoint_state": service.checkpoint_state(),
         "audit_integrity": _audit_integrity_state(service),
@@ -270,20 +274,32 @@ def _lifecycle_view(service: IncidentService, snapshot=None) -> dict[str, Any]:
 
 def _service_readiness(service: IncidentService) -> dict[str, object]:
     readiness = _get_readiness_probe(service).check().to_dict()
+    snapshot = service.status()
     checkpoint_state = service.checkpoint_state()
     audit_integrity = _audit_integrity_state(service)
     audit_policy = _audit_integrity_policy(service)
     audit_policy_satisfied = _audit_integrity_policy_satisfied(service, audit_integrity)
     safety_state = _lifecycle_safety_state(service)
+    execution_phase = _execution_checkpoint_phase(service)
+    recovery = recovery_observability(snapshot, execution_phase)
     execution = _remediation_execution_observability(service)
     readiness["checks"]["lifecycle_safety"] = safety_state
     readiness["checks"]["checkpoint"] = checkpoint_state
     readiness["checks"]["audit_integrity"] = audit_integrity
     readiness["checks"]["audit_integrity_policy"] = audit_policy
-    readiness["checks"]["remediation_execution_phase"] = _execution_checkpoint_phase(service)
+    readiness["checks"]["remediation_execution_phase"] = execution_phase
     readiness["checks"]["remediation_execution_deadline"] = "exceeded" if execution["deadline_exceeded"] else "ok"
     readiness["checks"]["remediation_reconciliation_reason"] = _execution_reconciliation_reason(service)
-    if safety_state != "ok" or not audit_policy_satisfied or execution["deadline_exceeded"]:
+    readiness["checks"]["recovery_state"] = recovery.state
+    readiness["checks"]["recovery_recheck_eligible"] = "yes" if recovery.recheck_eligible else "no"
+    readiness["checks"]["recovery_verified"] = "yes" if recovery.verified else "no"
+    readiness["checks"]["recovery_checkpoint_phase"] = "consistent" if recovery.checkpoint_phase_consistent else "inconsistent"
+    if (
+        safety_state != "ok"
+        or not audit_policy_satisfied
+        or execution["deadline_exceeded"]
+        or not recovery.checkpoint_phase_consistent
+    ):
         readiness["ready"] = False
     return readiness
 
@@ -294,6 +310,7 @@ def _service_metrics(service: IncidentService) -> str:
     exporter = getattr(checkpoint_store, "prometheus_metrics", None)
     if callable(exporter):
         metrics += exporter()
+    snapshot = service.status()
     checkpoint_state = service.checkpoint_state()
     conflict_blocked = 1 if checkpoint_state == "conflicted" else 0
     reconciliation_state = _execution_reconciliation_state(service)
@@ -356,6 +373,7 @@ def _service_metrics(service: IncidentService) -> str:
     )
     for state in _LIFECYCLE_SAFETY_STATES:
         metrics += f'stageguard_lifecycle_safety_state{{state="{state}"}} {1 if state == lifecycle_safety else 0}\n'
+    metrics += prometheus_recovery_metrics(snapshot, execution_phase)
     return metrics
 
 
@@ -457,6 +475,10 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                         "remediation_execution_phase": "unknown",
                         "remediation_execution_deadline": "failed",
                         "remediation_reconciliation_reason": "phase_unavailable",
+                        "recovery_state": "unknown",
+                        "recovery_recheck_eligible": "no",
+                        "recovery_verified": "no",
+                        "recovery_checkpoint_phase": "inconsistent",
                     },
                 }
             self._send(200 if readiness["ready"] else 503, readiness)
