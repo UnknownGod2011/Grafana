@@ -165,6 +165,21 @@ class HttpRemediationTransport:
             return TransportResult(False, status, retryable=False)
         return TransportResult(document["accepted"], status, retryable=False)
 
+    @staticmethod
+    def _validated_reconciliation_document(body: bytes, operation_id: str) -> str:
+        """Return a provider reconciliation state only for the exact bounded contract."""
+
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return "unknown"
+        if not isinstance(document, dict) or set(document) != {"operation_id", "state"}:
+            return "unknown"
+        if document.get("operation_id") != operation_id:
+            return "unknown"
+        state = document.get("state")
+        return state if state in _RECONCILIATION_STATES else "unknown"
+
     def reconcile(self, operation_id: str, *, timeout_seconds: float) -> str:
         """Look up provider idempotency state without replaying remediation.
 
@@ -172,7 +187,9 @@ class HttpRemediationTransport:
 
         - request: ``GET <reconciliation_endpoint>/<url-encoded-operation-id>``;
         - response: exactly ``{"operation_id": "...", "state": "accepted|not_found"}``;
-        - 404 maps to ``not_found`` only when the endpoint itself was configured;
+        - ``not_found`` is trusted only when a 404 response from the exact lookup
+          URL carries that exact bounded provider document; a generic proxy/router
+          404 is ambiguous and therefore maps to ``unknown``;
         - every redirect, timeout, transport failure, auth failure, unexpected
           status, oversized body, malformed document, wrong operation echo, or
           unknown state maps to ``unknown``.
@@ -202,22 +219,23 @@ class HttpRemediationTransport:
                     return "unknown"
                 body = self._read_bounded(response)
         except urllib.error.HTTPError as exc:
-            return "not_found" if int(exc.code) == 404 else "unknown"
+            if int(exc.code) != 404 or not self._response_matches_request(exc, request):
+                return "unknown"
+            try:
+                body = self._read_bounded(exc)
+            except (OSError, ValueError):
+                return "unknown"
+            return (
+                "not_found"
+                if self._validated_reconciliation_document(body, operation_id) == "not_found"
+                else "unknown"
+            )
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             return "unknown"
 
         if status < 200 or status >= 300:
             return "unknown"
-        try:
-            document = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return "unknown"
-        if not isinstance(document, dict) or set(document) != {"operation_id", "state"}:
-            return "unknown"
-        if document.get("operation_id") != operation_id:
-            return "unknown"
-        state = document.get("state")
-        return state if state in _RECONCILIATION_STATES else "unknown"
+        return self._validated_reconciliation_document(body, operation_id)
 
     @staticmethod
     def _read_bounded(response) -> bytes:
