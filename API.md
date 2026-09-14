@@ -58,7 +58,9 @@ When the remediation provider explicitly accepted the action but the bounded ver
 
 Production operator surfaces are intended to sit behind the configured production identity provider (for example the verified Google IAP assertion path used by the Cloud Run composition). Local loopback development may use the development identity provider; non-loopback binds reject development-only identity.
 
-The API caps JSON bodies, requires JSON object payloads for mutation bodies, rejects unsupported fields, uses same-origin cockpit requests, and returns bounded error messages. Sensitive provider responses, credentials, raw PromQL/LogQL, arbitrary targets, and infrastructure endpoints are not accepted through this API surface.
+Mutation request framing is deliberately stricter than generic HTTP interoperability. StageGuard does not implement request transfer coding, so any `Transfer-Encoding` field is rejected before body bytes are read. `Content-Length` may appear at most once; duplicate values are rejected even when identical. This avoids proxy/origin parser differentials and ensures ambiguous framing cannot reach a lifecycle mutation. A missing `Content-Length` is treated as an empty body, while non-empty bodies remain capped by `MAX_BODY_BYTES` and must be JSON objects.
+
+The API caps JSON bodies, rejects unsupported fields, uses same-origin cockpit requests, and returns bounded error messages. Sensitive provider responses, credentials, raw PromQL/LogQL, arbitrary targets, and infrastructure endpoints are not accepted through this API surface.
 
 ## Related design documents
 
