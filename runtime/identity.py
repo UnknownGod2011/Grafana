@@ -37,6 +37,27 @@ def _contains_control_characters(value: str) -> bool:
     return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
 
+def _header_values(handler: BaseHTTPRequestHandler, name: str) -> tuple[str, ...]:
+    """Return every instance of one HTTP header without silently picking a duplicate.
+
+    ``BaseHTTPRequestHandler.headers`` is an ``HTTPMessage`` and therefore
+    preserves repeated field instances through ``get_all``. Authentication
+    material must never depend on first/last-header behavior because reverse
+    proxies and application servers can disagree about which duplicate wins.
+    """
+
+    headers = handler.headers
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        raw_values = get_all(name, [])
+    else:  # defensive seam for small custom/test handler implementations
+        value = headers.get(name)
+        raw_values = [] if value is None else [value]
+    if not isinstance(raw_values, list):
+        raw_values = list(raw_values)
+    return tuple(value for value in raw_values if isinstance(value, str))
+
+
 @dataclass(frozen=True)
 class OperatorIdentity:
     subject: str
@@ -149,7 +170,12 @@ class StaticBearerIdentityProvider:
         self._configured = tuple(configured)
 
     def authenticate(self, handler: BaseHTTPRequestHandler) -> OperatorIdentity:
-        authorization = handler.headers.get("Authorization", "")
+        authorization_values = _header_values(handler, "Authorization")
+        if not authorization_values:
+            raise AuthenticationError("bearer authentication required")
+        if len(authorization_values) != 1:
+            raise AuthenticationError("invalid bearer credential")
+        authorization = authorization_values[0]
         scheme, separator, candidate = authorization.partition(" ")
         if not separator or scheme.lower() != "bearer" or not candidate:
             raise AuthenticationError("bearer authentication required")
@@ -211,9 +237,12 @@ class GoogleIapIdentityProvider:
         return self._audience
 
     def authenticate(self, handler: BaseHTTPRequestHandler) -> OperatorIdentity:
-        assertion = handler.headers.get("X-Goog-IAP-JWT-Assertion", "")
-        if not assertion:
+        assertion_values = _header_values(handler, "X-Goog-IAP-JWT-Assertion")
+        if not assertion_values:
             raise AuthenticationError("verified IAP authentication required")
+        if len(assertion_values) != 1:
+            raise AuthenticationError("invalid IAP assertion")
+        assertion = assertion_values[0]
         if len(assertion.encode("utf-8")) > MAX_IAP_ASSERTION_BYTES:
             raise AuthenticationError("IAP assertion is too large")
 
