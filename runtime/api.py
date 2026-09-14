@@ -42,8 +42,29 @@ _LIFECYCLE_SAFETY_STATES = (
 )
 
 
+def _header_values(handler: BaseHTTPRequestHandler, name: str) -> list[str]:
+    """Return every received field-value for a security-sensitive header."""
+
+    get_all = getattr(handler.headers, "get_all", None)
+    if callable(get_all):
+        values = get_all(name, [])
+        return [str(value) for value in values]
+    value = handler.headers.get(name)
+    return [] if value is None else [str(value)]
+
+
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    raw_length = handler.headers.get("Content-Length", "0")
+    # StageGuard's minimal HTTP server does not implement transfer coding. More
+    # importantly, accepting TE together with a Content-Length creates a
+    # request-smuggling/parser-differential boundary between proxies and this
+    # origin. Fail closed before consuming any body bytes.
+    if _header_values(handler, "Transfer-Encoding"):
+        raise ValueError("Transfer-Encoding is not supported")
+
+    length_values = _header_values(handler, "Content-Length")
+    if len(length_values) > 1:
+        raise ValueError("Content-Length must be supplied at most once")
+    raw_length = length_values[0] if length_values else "0"
     try:
         length = int(raw_length)
     except ValueError as exc:
