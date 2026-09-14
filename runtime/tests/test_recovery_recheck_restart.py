@@ -133,7 +133,7 @@ class RecoveryRecheckRestartTests(unittest.TestCase):
             self.assertTrue(recovered_view["recovery"]["verified"])
             self.assertFalse(recovered_view["recovery"]["recheck_eligible"])
             self.assertTrue(recovered_view["recovery"]["checkpoint_phase_consistent"])
-            with self.assertRaisesRegex(RuntimeError, "recovery recheck is only available"):
+            with self.assertRaisesRegex(RuntimeError, "only allowed while recovery remains unverified"):
                 restarted.recheck_recovery(actor="operator@example.com")
             with self.assertRaises(RuntimeError):
                 restarted.execute_approved(actor="operator@example.com")
