@@ -73,16 +73,60 @@
       "targets": [{"editorMode": "code", "expr": "min(up{job=\"stageguard-runtime-watchdog\"})", "legendFormat": "scrape health", "range": true, "refId": "A"}],
       "title": "Watchdog scrape health",
       "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Fresh Grafana telemetry has proven the accepted remediation recovered the live workflow. A zero means recovery is not yet proven or no recovery outcome exists.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "not verified"}, "1": {"text": "RECOVERED"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 20},
+      "id": 7,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_recovery_verified", "legendFormat": "verified", "range": true, "refId": "A"}],
+      "title": "Recovery verification",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "1 means the remediation provider has already accepted the action and only the no-replay Grafana recovery-recheck path is allowed.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "not eligible"}, "1": {"text": "RECHECK ONLY"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 20},
+      "id": 8,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_recovery_recheck_eligible", "legendFormat": "no-replay recheck", "range": true, "refId": "A"}],
+      "title": "Recovery recheck eligibility",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Integrity guard for durable recovery state. Zero means the recovery outcome and execution checkpoint phase disagree; StageGuard readiness fails closed.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "INCONSISTENT"}, "1": {"text": "consistent"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 20},
+      "id": 9,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_recovery_checkpoint_phase_consistent", "legendFormat": "checkpoint phase", "range": true, "refId": "A"}],
+      "title": "Recovery checkpoint consistency",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Bounded number of recovery evidence samples retained in the durable outcome. This metric carries no incident, provider, query, target, or revision labels.",
+      "fieldConfig": {"defaults": {"min": 0, "max": 100}, "overrides": []},
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 20},
+      "id": 10,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_recovery_sample_count", "legendFormat": "samples", "range": true, "refId": "A"}],
+      "title": "Recovery evidence samples",
+      "type": "stat"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": ["stageguard", "runtime", "remediation", "safety", "telemetry"],
+  "tags": ["stageguard", "runtime", "remediation", "recovery", "safety", "telemetry"],
   "templating": {"list": []},
   "time": {"from": "now-30m", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
   "title": "StageGuard Runtime Safety",
   "uid": "stageguard-runtime-safety",
-  "version": 3
+  "version": 4
 }
