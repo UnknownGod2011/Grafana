@@ -2,20 +2,20 @@
 """Authenticated atomic local checkpoint storage for StageGuard."""
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
-from incident_checkpoint import IncidentCheckpoint, _decode, _encode
+from checkpoint_file_security import atomic_write_private_bytes, read_private_bytes
+from incident_checkpoint import IncidentCheckpoint, _MAX_BYTES, _decode, _encode
 
 
 class SignedJsonCheckpointStore:
-    """HMAC-authenticated local checkpoint store with owner-only atomic writes.
+    """HMAC-authenticated local checkpoint store with hardened filesystem access.
 
     This is the local counterpart to the authenticated GCS store. It deliberately
     requires a signing key and rejects unsigned, wrongly signed, or tampered
-    checkpoint documents on load so retention tooling can consume runtime-created
-    local checkpoints without an out-of-band signing step.
+    checkpoint documents on load. Filesystem access is delegated to the same
+    descriptor-bound primitive used by ``JsonCheckpointStore`` so symlinks,
+    hard-link aliases, and post-open path substitution fail closed.
     """
 
     supports_execution_phase = True
@@ -28,30 +28,18 @@ class SignedJsonCheckpointStore:
         self._signing_key = signing_key
 
     def load(self) -> IncidentCheckpoint | None:
-        if not self.path.exists():
+        try:
+            raw = read_private_bytes(self.path, max_bytes=_MAX_BYTES)
+        except FileNotFoundError:
             return None
-        if self.path.is_symlink():
-            raise ValueError("incident checkpoint path must not be a symlink")
         return _decode(
-            self.path.read_bytes(),
+            raw,
             signing_key=self._signing_key,
             require_signature=True,
         )
 
     def save(self, checkpoint: IncidentCheckpoint) -> None:
-        encoded = _encode(checkpoint, signing_key=self._signing_key)
-        fd, tmp_name = tempfile.mkstemp(prefix=".checkpoint-", dir=self.path.parent)
-        try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb", closefd=True) as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if not hasattr(os, "fchmod"):
-                os.chmod(tmp_name, 0o600)
-            os.replace(tmp_name, self.path)
-            os.chmod(self.path, 0o600)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+        atomic_write_private_bytes(
+            self.path,
+            _encode(checkpoint, signing_key=self._signing_key),
+        )
