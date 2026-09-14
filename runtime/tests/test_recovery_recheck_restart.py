@@ -6,6 +6,7 @@ from pathlib import Path
 
 from anchored_execution_safety import AnchoredExecutionSafeIncidentService
 from anchored_incident_service import AnchoredJsonlAuditLog
+from api import _lifecycle_view, _service_metrics, _service_readiness
 from incident_checkpoint import JsonCheckpointStore
 from remediation import ActionResult
 
@@ -21,6 +22,14 @@ class SequenceMetrics:
         value = self.values[self.index]
         self.index += 1
         return value
+
+
+class ConstantMetrics:
+    def __init__(self, value=0.1):
+        self.value = value
+
+    def instant(self, _query):
+        return self.value
 
 
 class CountingRemediation:
@@ -68,7 +77,7 @@ class RecoveryRecheckRestartTests(unittest.TestCase):
             self.assertEqual(1, first_remediation.calls)
 
             restarted = AnchoredExecutionSafeIncidentService(
-                SequenceMetrics([0.2, 0.2, 0.1, 0.1]),
+                ConstantMetrics(),
                 ForbiddenRemediation(),
                 AnchoredJsonlAuditLog(audit_path),
                 checkpoint_store=store,
@@ -86,6 +95,31 @@ class RecoveryRecheckRestartTests(unittest.TestCase):
             self.assertEqual("clear", restarted.execution_reconciliation_state())
             self.assertEqual("synchronized", restarted.checkpoint_state())
 
+            lifecycle = _lifecycle_view(restarted, restored)
+            self.assertEqual(
+                {
+                    "state": "recovery_unverified",
+                    "action_accepted": True,
+                    "recheck_eligible": True,
+                    "verified": False,
+                    "sample_count": 6,
+                    "checkpoint_phase_consistent": True,
+                },
+                lifecycle["recovery"],
+            )
+            metrics = _service_metrics(restarted)
+            self.assertIn('stageguard_recovery_state{state="recovery_unverified"} 1', metrics)
+            self.assertIn("stageguard_recovery_recheck_eligible 1", metrics)
+            self.assertIn("stageguard_recovery_verified 0", metrics)
+            self.assertIn("stageguard_recovery_checkpoint_phase_consistent 1", metrics)
+            self.assertNotIn(restored.incident_id, metrics)
+            self.assertNotIn(restored.revision, metrics)
+            readiness = _service_readiness(restarted)
+            self.assertEqual("recovery_unverified", readiness["checks"]["recovery_state"])
+            self.assertEqual("yes", readiness["checks"]["recovery_recheck_eligible"])
+            self.assertEqual("no", readiness["checks"]["recovery_verified"])
+            self.assertEqual("consistent", readiness["checks"]["recovery_checkpoint_phase"])
+
             final = restarted.recheck_recovery(actor="operator@example.com")
             self.assertEqual("recovered", final.outcome.status)
             self.assertEqual(initial.incident_id, final.incident_id)
@@ -93,6 +127,16 @@ class RecoveryRecheckRestartTests(unittest.TestCase):
             timeline = restarted.audit_timeline(incident_id=final.incident_id, limit=20)
             self.assertEqual("recovery_rechecked", timeline["events"][-1]["event_type"])
             self.assertEqual(False, timeline["events"][-1]["payload"]["provider_replayed"])
+
+            recovered_view = _lifecycle_view(restarted, final)
+            self.assertEqual("recovered", recovered_view["recovery"]["state"])
+            self.assertTrue(recovered_view["recovery"]["verified"])
+            self.assertFalse(recovered_view["recovery"]["recheck_eligible"])
+            self.assertTrue(recovered_view["recovery"]["checkpoint_phase_consistent"])
+            with self.assertRaisesRegex(RuntimeError, "recovery recheck is only available"):
+                restarted.recheck_recovery(actor="operator@example.com")
+            with self.assertRaises(RuntimeError):
+                restarted.execute_approved(actor="operator@example.com")
 
 
 if __name__ == "__main__":
