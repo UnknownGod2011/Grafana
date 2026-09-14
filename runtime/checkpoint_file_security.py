@@ -133,17 +133,55 @@ def _assert_private_regular_file_at_parent(
     return fd_stat
 
 
+def _open_private_regular_file_via_parent_fd(
+    state_path: Path,
+    flags: int,
+    mode: int,
+) -> int:
+    """Open a checkpoint basename relative to one validated parent descriptor."""
+    parent_fd = _open_parent_directory(state_path.parent)
+    fd = -1
+    try:
+        _assert_directory_identity(parent_fd, state_path.parent)
+        effective_flags = flags | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(state_path.name, effective_flags, mode, dir_fd=parent_fd)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise RuntimeError("checkpoint file could not be opened safely") from exc
+        _assert_private_regular_file_at_parent(fd, state_path, parent_fd)
+        try:
+            os.fchmod(fd, 0o600)
+        except AttributeError:
+            pass
+        _assert_private_regular_file_at_parent(fd, state_path, parent_fd)
+        result_fd = fd
+        fd = -1
+        return result_fd
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent_fd)
+
+
 def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -> int:
     """Open an existing/created checkpoint file without following symlinks.
 
     ``O_TRUNC`` is prohibited because truncation could mutate an attacker-selected
     target before post-open validation on platforms that lack ``O_NOFOLLOW``.
     A genuinely absent path preserves ``FileNotFoundError`` so callers can retain
-    normal empty-store semantics without a check/open race.
+    normal empty-store semantics without a check/open race. On supported POSIX
+    systems the basename is opened relative to one validated parent-directory
+    descriptor so parent-path substitution cannot redirect the open or creation.
     """
     state_path = Path(path)
     if flags & getattr(os, "O_TRUNC", 0):
         raise ValueError("secure checkpoint open does not permit O_TRUNC")
+
+    if _supports_directory_relative_open():
+        return _open_private_regular_file_via_parent_fd(state_path, flags, mode)
+
     try:
         if state_path.is_symlink():
             raise RuntimeError("checkpoint file must not be a symbolic link")
@@ -163,6 +201,7 @@ def open_private_regular_file(path: str | Path, flags: int, mode: int = 0o600) -
             os.fchmod(fd, 0o600)
         except AttributeError:
             pass
+        assert_private_regular_file_identity(fd, state_path)
         return fd
     except Exception:
         os.close(fd)
