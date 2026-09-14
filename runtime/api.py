@@ -22,6 +22,15 @@ from recovery_observability import prometheus_recovery_metrics, recovery_observa
 
 
 MAX_BODY_BYTES = 16 * 1024
+_POST_PATHS = {
+    "/v1/investigate",
+    "/v1/briefing",
+    "/v1/approve",
+    "/v1/execute",
+    "/v1/recovery/recheck",
+    "/v1/checkpoint/reload",
+    "/v1/execution/reconcile",
+}
 _EXECUTION_RECONCILIATION_STATES = {"clear", "reload_required", "reloaded"}
 _EXECUTION_PHASES = ("none", "approved", "dispatching", "resolved", "legacy_unknown", "unknown")
 _EXECUTION_RECONCILIATION_REASONS = (
@@ -454,6 +463,15 @@ class StageGuardHandler(BaseHTTPRequestHandler):
     def _identity(self) -> OperatorIdentity:
         return self.identity_provider.authenticate(self)
 
+    def handle_expect_100(self) -> bool:
+        # The current server deliberately speaks HTTP/1.0 responses, so the
+        # stdlib does not normally enter this hook. Keep an explicit fail-closed
+        # override so a future HTTP/1.1 protocol-version change cannot start
+        # emitting provisional 100 responses before StageGuard preflight.
+        self.close_connection = True
+        self._error(417, "expectation_failed", "Expect is not supported")
+        return False
+
     def _serve_operator_console(self) -> bool:
         path = urlsplit(self.path).path
         assets = {
@@ -549,17 +567,31 @@ class StageGuardHandler(BaseHTTPRequestHandler):
             self._error(500, "internal_error", "request failed")
 
     def do_POST(self) -> None:  # noqa: N802
+        parsed = urlsplit(self.path)
+        # Reject unknown/query-bearing mutation routes before authentication or
+        # body consumption. Besides reducing parser ambiguity, this prevents an
+        # unsupported POST with a declared-but-unsent body from tying up a
+        # worker while StageGuard waits for bytes it will never use.
+        if parsed.path not in _POST_PATHS or parsed.query:
+            self.close_connection = True
+            self._error(404, "not_found", "unknown endpoint")
+            return
+        if _header_values(self, "Expect"):
+            self.close_connection = True
+            self._error(417, "expectation_failed", "Expect is not supported")
+            return
+
         try:
             identity = self._identity()
             payload = _read_json(self)
 
-            if self.path == "/v1/investigate":
+            if parsed.path == "/v1/investigate":
                 _only(payload, set())
                 snapshot = self.service.investigate(actor=identity.subject)
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
-            if self.path == "/v1/briefing":
+            if parsed.path == "/v1/briefing":
                 _only(payload, {"incident_id", "revision"})
                 required = ("incident_id", "revision")
                 if any(not isinstance(payload.get(name), str) for name in required):
@@ -572,7 +604,7 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 self._send(200, {"briefing": briefing.to_dict(), "revision": payload["revision"]})
                 return
 
-            if self.path == "/v1/approve":
+            if parsed.path == "/v1/approve":
                 _only(payload, {"incident_id", "revision"})
                 required = ("incident_id", "revision")
                 if any(not isinstance(payload.get(name), str) for name in required):
@@ -585,25 +617,25 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
-            if self.path == "/v1/execute":
+            if parsed.path == "/v1/execute":
                 _only(payload, set())
                 snapshot = self.service.execute_approved(actor=identity.subject)
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
-            if self.path == "/v1/recovery/recheck":
+            if parsed.path == "/v1/recovery/recheck":
                 _only(payload, set())
                 snapshot = self.service.recheck_recovery(actor=identity.subject)
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
-            if self.path == "/v1/checkpoint/reload":
+            if parsed.path == "/v1/checkpoint/reload":
                 _only(payload, set())
                 snapshot = self.service.reload_checkpoint_after_conflict()
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
-            if self.path == "/v1/execution/reconcile":
+            if parsed.path == "/v1/execution/reconcile":
                 _only(payload, set())
                 reconcile = getattr(self.service, "reconcile_execution_uncertainty", None)
                 if not callable(reconcile):
@@ -612,7 +644,9 @@ class StageGuardHandler(BaseHTTPRequestHandler):
                 self._send(200, _lifecycle_view(self.service, snapshot))
                 return
 
-            self._error(404, "not_found", "unknown endpoint")
+            # _POST_PATHS and the dispatch table above intentionally move
+            # together. Fail closed if a future edit ever lets them drift.
+            self._error(500, "internal_error", "mutation route is not implemented")
         except AuthenticationError as exc:
             self._error(401, "unauthorized", str(exc), authenticate=True)
         except ValueError as exc:
