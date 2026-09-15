@@ -47,3 +47,14 @@ def test_reconciliation_projection_rejects_noncanonical_names():
         "remediation_reconciliation_attempt.accepted.durable_dispatching.extra",
         {"result": "accepted", "reason": "durable_dispatching"},
     ) == {}
+
+
+def test_reconciliation_projection_rejects_oversized_event_name_before_parsing():
+    event_type = (
+        "remediation_reconciliation_attempt.accepted.durable_dispatching"
+        + "." + ("x" * 4096)
+    )
+    assert reconciliation_timeline_payload(
+        event_type,
+        {"result": "accepted", "reason": "durable_dispatching"},
+    ) == {}
