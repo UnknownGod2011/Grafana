@@ -32,13 +32,7 @@ class McpError(RuntimeError):
 
 
 def _configured_command(raw: str | None = None) -> list[str]:
-    """Return a validated stdio-only MCP launcher for the release smoke path.
-
-    The smoke test is part of StageGuard's acceptance boundary, so custom launcher
-    overrides must obey the same transport policy as production evidence adapters.
-    Keep parsing and policy enforcement centralized in ``command_line.split_command``
-    rather than letting this diagnostic path become a network-transport escape hatch.
-    """
+    """Return a validated stdio-only MCP launcher for the release smoke path."""
     command = os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND) if raw is None else raw
     try:
         return split_command(command)
@@ -61,40 +55,45 @@ def _request_timeout_seconds(raw: str | None) -> float:
     return value
 
 
+def _assert_initialize_result(result: dict[str, Any], requested_protocol: str) -> None:
+    """Fail closed when the MCP peer negotiates an unexpected protocol contract."""
+    negotiated = result.get("protocolVersion")
+    if not isinstance(negotiated, str) or not negotiated.strip():
+        raise McpError("initialize returned no valid protocolVersion")
+    if negotiated != requested_protocol:
+        raise McpError(
+            "MCP protocol negotiation mismatch: "
+            f"requested={requested_protocol!r}, negotiated={negotiated!r}"
+        )
+    capabilities = result.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise McpError("initialize returned malformed capabilities")
+    server_info = result.get("serverInfo")
+    if not isinstance(server_info, dict):
+        raise McpError("initialize returned malformed serverInfo")
+    name = server_info.get("name")
+    version = server_info.get("version")
+    if not isinstance(name, str) or not name.strip() or not isinstance(version, str) or not version.strip():
+        raise McpError("initialize returned incomplete serverInfo")
+
+
 class StdioClient:
     def __init__(self, command: list[str], *, request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> None:
         if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be a positive finite number")
         self.request_timeout_seconds = min(request_timeout_seconds, MAX_REQUEST_TIMEOUT_SECONDS)
-        self.proc = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
-            bufsize=1,
-        )
+        self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, text=True, bufsize=1)
         self._next_id = 1
-        self._stdout_queue: queue.Queue[str | McpError | None] = queue.Queue(
-            maxsize=MAX_STDOUT_QUEUE_FRAMES
-        )
+        self._stdout_queue: queue.Queue[str | McpError | None] = queue.Queue(maxsize=MAX_STDOUT_QUEUE_FRAMES)
         self._stdout_overflow = threading.Event()
-        self._stdout_thread = threading.Thread(
-            target=self._read_stdout,
-            name="stageguard-mcp-stdout",
-            daemon=True,
-        )
+        self._stdout_thread = threading.Thread(target=self._read_stdout, name="stageguard-mcp-stdout", daemon=True)
         self._stdout_thread.start()
 
     def _offer_stdout(self, item: str | McpError | None) -> bool:
-        """Offer one stdout event without ever letting the reader block on queue growth."""
         try:
             self._stdout_queue.put_nowait(item)
             return True
         except queue.Full:
-            # A producer that can outrun the single sequential consumer is not a
-            # trustworthy release-smoke peer. Stop reading and make the request path
-            # fail closed rather than converting the queue into an unbounded buffer.
             self._stdout_overflow.set()
             return False
 
@@ -105,19 +104,11 @@ class StdioClient:
             return
         try:
             while True:
-                # readline(size) caps memory consumed by one newline-delimited protocol
-                # frame. Without a size bound, a broken or compromised subprocess can
-                # force the client to buffer an arbitrarily large line before the
-                # request timeout is able to protect the caller.
                 line = stdout.readline(MAX_STDIO_LINE_CHARS + 1)
                 if not line:
                     break
                 if len(line) > MAX_STDIO_LINE_CHARS:
-                    self._offer_stdout(
-                        McpError(
-                            "MCP stdio response exceeded the maximum allowed JSON-RPC frame size"
-                        )
-                    )
+                    self._offer_stdout(McpError("MCP stdio response exceeded the maximum allowed JSON-RPC frame size"))
                     return
                 if not self._offer_stdout(line):
                     return
@@ -135,9 +126,7 @@ class StdioClient:
 
     def _raise_if_stdout_overflowed(self) -> None:
         if self._stdout_overflow.is_set():
-            raise McpError(
-                "MCP stdio stdout exceeded the bounded pending-frame queue capacity"
-            )
+            raise McpError("MCP stdio stdout exceeded the bounded pending-frame queue capacity")
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._next_id
@@ -148,15 +137,11 @@ class StdioClient:
             self._raise_if_stdout_overflowed()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise McpError(
-                    f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response"
-                )
+                raise McpError(f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response")
             try:
                 line = self._stdout_queue.get(timeout=remaining)
             except queue.Empty as exc:
-                raise McpError(
-                    f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response"
-                ) from exc
+                raise McpError(f"{method} timed out after {self.request_timeout_seconds:g}s waiting for MCP response") from exc
             self._raise_if_stdout_overflowed()
             if isinstance(line, McpError):
                 raise line
@@ -166,24 +151,17 @@ class StdioClient:
             try:
                 message = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise McpError(
-                    "MCP stdio stdout contained non-JSON data; stdout is reserved for JSON-RPC"
-                ) from exc
+                raise McpError("MCP stdio stdout contained non-JSON data; stdout is reserved for JSON-RPC") from exc
             if not isinstance(message, dict):
                 raise McpError("MCP stdio stdout contained a non-object JSON-RPC message")
             if message.get("jsonrpc") != "2.0":
                 raise McpError("MCP stdio message did not declare jsonrpc=2.0")
-
-            # Notifications are valid while a request is outstanding and have no id.
             if "id" not in message:
                 if isinstance(message.get("method"), str):
                     continue
                 raise McpError("MCP stdio message had neither a response id nor notification method")
-
             if message.get("id") != request_id:
-                raise McpError(
-                    f"MCP returned unexpected response id while waiting for {method}"
-                )
+                raise McpError(f"MCP returned unexpected response id while waiting for {method}")
             if "error" in message:
                 raise McpError(f"{method} failed: {message['error']}")
             result = message.get("result")
@@ -215,7 +193,6 @@ def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     tools = result.get("tools", [])
     if not isinstance(tools, list):
         raise McpError("tools/list returned a non-list tools field")
-
     mapped: dict[str, dict[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, dict):
@@ -233,18 +210,13 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
     missing = sorted(REQUIRED_READ_TOOLS - tools.keys())
     if missing:
         raise McpError(f"Required read tools are missing: {missing}; available={sorted(tools)}")
-
-    not_explicitly_read_only: list[str] = []
+    not_explicitly_read_only = []
     for name, tool in tools.items():
         annotations = tool.get("annotations")
         if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
             not_explicitly_read_only.append(name)
-
     if not_explicitly_read_only:
-        raise McpError(
-            "MCP advertised tools without readOnlyHint=true while StageGuard is configured "
-            f"as an evidence-only plane: {sorted(not_explicitly_read_only)}"
-        )
+        raise McpError("MCP advertised tools without readOnlyHint=true while StageGuard is configured as an evidence-only plane: " f"{sorted(not_explicitly_read_only)}")
 
 
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
@@ -255,46 +227,21 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
 def main() -> None:
     command = _configured_command()
     request_timeout = _request_timeout_seconds(os.getenv("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS"))
+    requested_protocol = os.getenv("STAGEGUARD_MCP_PROTOCOL_VERSION", "2025-06-18")
     print("Launching official Grafana MCP smoke test:", " ".join(command))
     client = StdioClient(command, request_timeout_seconds=request_timeout)
     try:
-        initialized = client.request(
-            "initialize",
-            {
-                "protocolVersion": os.getenv("STAGEGUARD_MCP_PROTOCOL_VERSION", "2025-06-18"),
-                "capabilities": {},
-                "clientInfo": {"name": "stageguard-mcp-smoke", "version": "0.1.0"},
-            },
-        )
+        initialized = client.request("initialize", {"protocolVersion": requested_protocol, "capabilities": {}, "clientInfo": {"name": "stageguard-mcp-smoke", "version": "0.1.0"}})
+        _assert_initialize_result(initialized, requested_protocol)
         client.send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-
         tools = _tool_map(client.request("tools/list"))
         _assert_read_only_tool_surface(tools)
-
         datasources = client.request("tools/call", {"name": "list_datasources", "arguments": {}})
         _assert_tool_result("list_datasources", datasources)
-
-        query = client.request(
-            "tools/call",
-            {
-                "name": "query_prometheus",
-                "arguments": {
-                    "datasourceUid": DATASOURCE_UID,
-                    "expr": QUERY,
-                    "queryType": "instant",
-                    "endTime": "now",
-                },
-            },
-        )
+        query = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": DATASOURCE_UID, "expr": QUERY, "queryType": "instant", "endTime": "now"}})
         _assert_tool_result("query_prometheus", query)
-        print(json.dumps({
-            "server": initialized.get("serverInfo"),
-            "advertised_read_only_tools": sorted(tools),
-            "datasource_uid": DATASOURCE_UID,
-            "query": QUERY,
-            "result": query.get("content"),
-        }, indent=2))
-        print("PASS: official Grafana MCP exposed only explicit read-only tools and executed a Prometheus query through Grafana.")
+        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": DATASOURCE_UID, "query": QUERY, "result": query.get("content")}, indent=2))
+        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, and executed a Prometheus query through Grafana.")
     finally:
         client.close()
 
