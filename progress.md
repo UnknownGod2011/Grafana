@@ -35,43 +35,42 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — Grafana MCP evidence-surface contract
+## Run log — 2026-09-16 — Grafana MCP smoke fail-closed regression contract
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected the current repository tree, `docker-compose.yml`, `runtime/mcp_smoke.py`, `runtime/tests/test_observability_image_pins.py`, and the existing Grafana MCP security document. Confirmed the compose MCP service is pinned to `grafana/mcp-grafana:1.4.1`, stdio-only, `--disable-write`, `--disable-proxied`, and explicitly limited to `datasource,prometheus,loki`.
+Read `progress.md` completely first. Attempted a fresh repository checkout, then inspected `runtime/mcp_smoke.py` through the repository connector when runner DNS again prevented `git clone`. Confirmed the live acceptance client already bounds request timeouts and stdout frames, rejects malformed JSON-RPC, requires `list_datasources` and `query_prometheus`, and rejects every advertised MCP tool that lacks an explicit `readOnlyHint=true` annotation.
 
 ### Changes / actions
 
-- Re-checked current official Grafana MCP documentation for tool gating and read-only semantics.
-- Confirmed upstream documents `--disable-write` as the global write-tool gate and `--enabled-tools` as a replacement for the default category list. Upstream also documents that raw SQL query tools are removed under `--disable-write` unless deliberately restored with `--enable-query`.
-- Strengthened `runtime/tests/test_observability_image_pins.py` with a credential-free compose contract that locks the StageGuard MCP transport to stdio, locks the enabled categories to `datasource,prometheus,loki`, requires `--disable-write` and `--disable-proxied`, rejects `--enable-query`, and guards against accidental network-transport widening.
-- The contract also names high-risk/unneeded categories so future compose expansion is an explicit reviewed change rather than a silent capability increase.
-- Attempted a fresh executable checkout before editing; the runner still failed DNS resolution for `github.com`, so no repository pytest execution was possible.
+- Added `runtime/tests/test_mcp_smoke_contract.py` as a credential-free regression suite for the release-smoke trust boundary.
+- Added coverage that duplicate MCP tool names fail closed instead of allowing last-write-wins shadowing.
+- Added malformed `tools/list` advertisement coverage for non-list collections, non-object entries, empty names, and non-string names.
+- Added coverage requiring both StageGuard evidence tools (`list_datasources`, `query_prometheus`).
+- Added a future-capability regression: any newly advertised tool without explicit `readOnlyHint=true` must fail the smoke even if required read tools are present.
+- Added bounded timeout regressions for zero, negative, NaN, infinity, and values above the 120-second maximum, plus a normal finite acceptance case.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub repository reads and connector write succeeded.
-- Fresh `git clone` attempt failed before checkout with `Could not resolve host: github.com`; this is treated as a transient runner/network blocker, not a project failure.
-- Current official Grafana docs support the compose policy: `--disable-write` disables writes and `--enabled-tools` replaces the default category set; `--enable-query` is intentionally absent from StageGuard.
-- No green pytest claim is made for the newly committed contract because repository execution remains unavailable.
+- Fresh `git clone` failed before checkout with `Could not resolve host: github.com`; this remains a transient runner/network blocker.
+- GitHub repository reads and connector commits succeeded.
+- The new tests were not executed in a repository checkout, so no green pytest claim is made.
 - No GitHub Actions workflow was created or triggered.
 
 ### Decisions
 
-1. Make the narrow MCP capability set executable policy, not documentation alone: compose changes that widen transport or tool categories should break a local unit test.
-2. Keep `--disable-write` even with a least-privilege Grafana identity; process-level capability gating and Grafana RBAC are independent defense layers.
-3. Keep `--enable-query` forbidden. StageGuard needs Prometheus/Loki evidence queries, not raw SQL query restoration.
-4. Continue to treat `datasource,prometheus,loki` as the complete supported MCP category surface until a concrete production requirement justifies expansion.
+1. Treat the MCP server's advertised capability metadata as hostile/incompatible input at the release boundary; duplicate or malformed tool advertisements fail closed.
+2. Keep explicit `readOnlyHint=true` mandatory for every advertised tool, not only the two tools StageGuard currently calls. This makes an upstream/category expansion visible during acceptance rather than silently widening the evidence process.
+3. Keep acceptance request timeouts finite and capped so a wedged MCP subprocess cannot stall deployment validation indefinitely.
 
 ### Blockers / unknowns
 
-- The latest timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and new MCP compose contract still require execution in a real checkout.
+- The latest timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, MCP compose contract, and new MCP smoke contract still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run `runtime/tests/test_observability_image_pins.py`, the focused timeline projection/public audit tests, and execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only smoke, then classify the historical full-suite failures.
+Run `runtime/tests/test_mcp_smoke_contract.py`, `runtime/tests/test_observability_image_pins.py`, the focused timeline/public-audit tests, and execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
