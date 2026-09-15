@@ -9,7 +9,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 ## Core invariants
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
-- StageGuard's supported MCP deployment is stdio-only. Upstream network transports are not enabled merely because upstream supports them.
+- StageGuard's supported MCP deployment is stdio-only and its compose evidence surface is restricted to `datasource,prometheus,loki` with writes and proxied tools disabled.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -35,41 +35,43 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-15 — Grafana MCP production security review
+## Run log — 2026-09-16 — Grafana MCP evidence-surface contract
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected the current `README.md`, `runtime/timeline_projection.py`, `runtime/incident_service.py`, and runtime test inventory. Confirmed the repository still intentionally treats Grafana MCP as a read-only evidence boundary and uses stdio-only launchers.
+Read `progress.md` completely first. Inspected the current repository tree, `docker-compose.yml`, `runtime/mcp_smoke.py`, `runtime/tests/test_observability_image_pins.py`, and the existing Grafana MCP security document. Confirmed the compose MCP service is pinned to `grafana/mcp-grafana:1.4.1`, stdio-only, `--disable-write`, `--disable-proxied`, and explicitly limited to `datasource,prometheus,loki`.
 
 ### Changes / actions
 
-- Researched current official Grafana MCP documentation for server capabilities, transports, Docker setup, RBAC, and caller authentication.
-- Added `docs/GRAFANA_MCP_SECURITY.md` with an explicit production threat boundary, credential isolation rules, least-privilege guidance, read-only evidence policy, transport policy, production checklist, and dated upstream references.
-- Recorded that upstream now documents `--server-auth-token` / `MCP_GRAFANA_SERVER_TOKEN` for authenticating network-transport callers. StageGuard deliberately remains stdio-only because it does not need a remotely callable MCP service and should not add an unnecessary network trust boundary.
-- Documented minimum requirements if remote MCP ever becomes an explicit future StageGuard mode: caller auth, network policy, TLS when appropriate, least-privilege Grafana RBAC, fixed query/tool policy, bounded timeouts, and negative authentication tests.
+- Re-checked current official Grafana MCP documentation for tool gating and read-only semantics.
+- Confirmed upstream documents `--disable-write` as the global write-tool gate and `--enabled-tools` as a replacement for the default category list. Upstream also documents that raw SQL query tools are removed under `--disable-write` unless deliberately restored with `--enable-query`.
+- Strengthened `runtime/tests/test_observability_image_pins.py` with a credential-free compose contract that locks the StageGuard MCP transport to stdio, locks the enabled categories to `datasource,prometheus,loki`, requires `--disable-write` and `--disable-proxied`, rejects `--enable-query`, and guards against accidental network-transport widening.
+- The contract also names high-risk/unneeded categories so future compose expansion is an explicit reviewed change rather than a silent capability increase.
+- Attempted a fresh executable checkout before editing; the runner still failed DNS resolution for `github.com`, so no repository pytest execution was possible.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub repository inspection and connector writes succeeded.
-- Current official Grafana docs confirm stdio remains supported and document authenticated SSE/Streamable HTTP options; this does not change StageGuard's narrower supported policy.
-- No repository pytest execution was available in this connector-only run, and no green test claim is made.
+- GitHub repository reads and connector write succeeded.
+- Fresh `git clone` attempt failed before checkout with `Could not resolve host: github.com`; this is treated as a transient runner/network blocker, not a project failure.
+- Current official Grafana docs support the compose policy: `--disable-write` disables writes and `--enabled-tools` replaces the default category set; `--enable-query` is intentionally absent from StageGuard.
+- No green pytest claim is made for the newly committed contract because repository execution remains unavailable.
 - No GitHub Actions workflow was created or triggered.
 
 ### Decisions
 
-1. Keep StageGuard's production MCP path stdio-only despite upstream adding/clarifying authenticated network transports; fewer exposed services is the safer architecture for this use case.
-2. Treat upstream tool availability as capability, not StageGuard authorization: runtime queries remain policy-owned and remediation remains outside Grafana MCP.
-3. Require a dedicated least-privilege Grafana identity and independent credential rotation; remediation credentials must never enter the MCP process environment.
-4. Preserve the pinned-release live-smoke requirement before calling the current MCP integration production-validated.
+1. Make the narrow MCP capability set executable policy, not documentation alone: compose changes that widen transport or tool categories should break a local unit test.
+2. Keep `--disable-write` even with a least-privilege Grafana identity; process-level capability gating and Grafana RBAC are independent defense layers.
+3. Keep `--enable-query` forbidden. StageGuard needs Prometheus/Loki evidence queries, not raw SQL query restoration.
+4. Continue to treat `datasource,prometheus,loki` as the complete supported MCP category surface until a concrete production requirement justifies expansion.
 
 ### Blockers / unknowns
 
-- The latest timeline scalar/integer hardening and public `audit_timeline()` reconciliation tests still require execution in a real checkout.
+- The latest timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and new MCP compose contract still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run the focused timeline projection/public audit tests plus execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only smoke using the newly documented least-privilege/stdio boundary, then classify the historical full-suite failures.
+Run `runtime/tests/test_observability_image_pins.py`, the focused timeline projection/public audit tests, and execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only smoke, then classify the historical full-suite failures.
