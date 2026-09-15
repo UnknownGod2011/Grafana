@@ -23,6 +23,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
 - Operator timeline disclosure is allowlist-based. Canonical remediation reconciliation may expose only bounded `result` and `reason`; operation IDs, provider bodies, targets, credentials, arbitrary audit metadata, and raw actor identities must never be exposed.
 - Reconciliation timeline parsing rejects oversized durable event names before splitting/parsing them.
+- Static timeline fields expose only bounded JSON scalars; nested objects/arrays, oversized strings, and non-finite numbers fail closed even when their field name is allowlisted.
 
 ## Retained validation baseline
 
@@ -32,41 +33,43 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical live Docker rehearsal: PASS twice consecutively, predating latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
-- The exact committed `runtime/timeline_projection.py` logic was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15; canonical reconciliation projection returned only `result`/`reason`. This is not a substitute for repository-level tests.
+- The earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest static-value hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-15 — isolated projection validation
+## Run log — 2026-09-15 — static timeline value hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read `runtime/timeline_projection.py`, `runtime/tests/test_timeline_projection_contract.py`, the public `runtime/tests/test_audit_timeline_reconciliation_projection.py`, and the import section of `runtime/incident_service.py`. Confirmed the public integration remains present and the focused disclosure tests target the intended operator-facing path.
+Read `progress.md` completely first. Re-read the public reconciliation audit regression, the relevant `incident_service.py` import/projection path, `runtime/timeline_projection.py`, and its focused contract tests. Confirmed `_timeline_event()` delegates to centralized `timeline_payload(...)` and the remaining disclosure gap was value shape: an allowlisted static field could still carry a nested object or pathological scalar if a durable audit record were corrupted or produced by an incompatible writer.
 
 ### Changes / actions
 
-- Retried a fresh repository clone before doing anything else; DNS still fails with `Could not resolve host: github.com`.
-- Independently reconstructed the exact committed `timeline_projection.py` logic in the local runner, compiled it with Python, and executed a canonical reconciliation projection smoke containing an extra secret field.
-- The smoke returned only `result=accepted` and `reason=durable_dispatching`; the extra field was not projected.
-- No runtime source was changed because the highest-value remaining work is repository-level validation, not additional unvalidated feature surface.
+- Retried a fresh repository clone first; the execution runner still fails DNS resolution with `Could not resolve host: github.com`.
+- Hardened `runtime/timeline_projection.py` so static allowlisted values are restricted to bounded JSON scalars: `None`, booleans, integers, finite floats, and strings up to 512 characters.
+- Nested mappings/sequences, oversized strings, NaN, and infinities are omitted from the operator-visible payload even when the key itself is allowlisted.
+- Kept canonical remediation reconciliation on its stricter semantic projector; its result/reason behavior is unchanged.
+- Added contract regressions covering nested secret-bearing values, oversized strings, NaN, and infinity while preserving ordinary static scalar projection.
 
 ### Checks / results
 
-- `timeline_projection.py` isolated syntax compile: PASS.
-- Canonical reconciliation projection disclosure smoke: PASS.
-- Full repository/focused pytest execution remains unavailable because a checkout cannot currently be obtained in this runner.
+- Fresh repository clone: BLOCKED by transient GitHub DNS failure in the execution runner.
+- Repository pytest execution: not available in this runner; no green claim is made for the new commits.
+- GitHub connector writes succeeded for the helper and focused tests.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Do not treat isolated helper validation as equivalent to repository integration validation.
-2. Avoid adding more production surface until the newly wired public timeline path can be exercised together with execution-safety reconciliation tests.
-3. Preserve the no-noisy-CI constraint rather than using Actions merely to compensate for transient runner DNS.
+1. Treat durable audit payloads as untrusted at the disclosure boundary even for historically trusted event names.
+2. Preserve valid scalar lifecycle fields while preventing nested provider/credential data from crossing the operator API via an allowlisted key.
+3. Keep the 512-character static string bound deliberately generous for current hashes/revisions/status/action/next-step fields while preventing pathological durable values.
+4. Do not use noisy CI merely to compensate for the runner's transient DNS failure.
 
 ### Blockers / unknowns
 
-- Public `audit_timeline()` reconciliation tests and consolidated execution-safety/remediation/recovery regressions still require execution in a real checkout.
+- The new static-value hardening and public `audit_timeline()` reconciliation tests still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Retry an executable checkout; once available, run the focused timeline projection/public audit tests plus execution-safety reconciliation suite and fix any integration/import failure. If green, immediately move to the pinned Grafana MCP 1.4.1 read-only smoke, then classify the historical full-suite failures.
+Retry an executable checkout and run the focused timeline projection/public audit tests plus execution-safety reconciliation suite. Fix any compatibility issue introduced by scalar bounding; if green, immediately run the pinned Grafana MCP 1.4.1 read-only smoke and then classify the historical full-suite failures.
