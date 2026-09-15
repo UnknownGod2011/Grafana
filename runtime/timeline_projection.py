@@ -9,6 +9,7 @@ arbitrary audit metadata.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Mapping
 
 _RECONCILIATION_PREFIX = "remediation_reconciliation_"
@@ -58,3 +59,31 @@ def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, objec
     if result != encoded_result or reason != encoded_reason:
         return {}
     return {"result": encoded_result, "reason": encoded_reason}
+
+
+def timeline_payload(
+    event_type: str,
+    payload: Mapping[str, object],
+    static_fields: Mapping[str, Iterable[str]],
+) -> dict[str, object]:
+    """Project one audit payload through StageGuard's operator disclosure policy.
+
+    Known lifecycle events use their explicit field allowlist. Unknown events get
+    no payload by default, except canonical remediation-reconciliation events,
+    which are delegated to the stricter semantic projector above. Keeping the
+    fallback here makes it difficult for the public timeline path to accidentally
+    expose arbitrary durable audit metadata when new event types are introduced.
+    """
+    if not isinstance(event_type, str) or not isinstance(payload, Mapping):
+        return {}
+    if not isinstance(static_fields, Mapping):
+        return {}
+
+    allowed = static_fields.get(event_type)
+    if allowed is not None:
+        try:
+            return {key: payload[key] for key in allowed if isinstance(key, str) and key in payload}
+        except (TypeError, ValueError):
+            return {}
+
+    return reconciliation_timeline_payload(event_type, payload)
