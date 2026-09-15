@@ -33,38 +33,36 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — centralized operator timeline disclosure policy
+## Run log — 2026-09-15 — timeline integration validation boundary
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read the current `runtime/incident_service.py` timeline projection, `runtime/timeline_projection.py`, and focused timeline projection contract tests. Confirmed `_timeline_event()` still owns the public `audit_timeline()` projection and currently uses only its local static allowlist.
+Read `progress.md` completely first. Re-read `runtime/incident_service.py` around `_timeline_event()` and `audit_timeline()`, and re-read the complete centralized `runtime/timeline_projection.py`. Confirmed the production gap is exactly as recorded: public timeline projection still constructs payloads from `_TIMELINE_PAYLOAD_FIELDS` locally, while `timeline_payload()` already contains the intended fail-closed static policy plus canonical reconciliation fallback.
 
-### Changes made
+### Changes / actions
 
-- Added `timeline_payload()` to `runtime/timeline_projection.py` as the single fail-closed payload disclosure policy intended for the public timeline path.
-- Existing lifecycle events preserve explicit static field allowlists; unknown events expose no payload by default.
-- Canonical remediation reconciliation events are the sole dynamic fallback and still pass through strict stage/result/reason validation.
-- Added tests proving static allowlist behavior, canonical reconciliation delegation, unknown-event non-disclosure, credential/provider metadata non-disclosure, and invalid-input fail-closed behavior.
-- Retained the existing bounded reconciliation event-name parser and semantic event-name/payload consistency checks.
+- Reconfirmed the minimal production edit required: import `timeline_payload` and replace the two local `_timeline_event()` payload-construction lines with `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`.
+- Retried a fresh repository clone specifically to obtain a patch-capable, executable checkout before touching lifecycle-critical code. The clone failed before checkout because the runner still cannot resolve `github.com`.
+- Checked the current head commit status through the authenticated GitHub connector. No commit status checks are attached, so there is no existing CI result that can substitute for local validation and no CI workflow was triggered.
+- Deliberately made no runtime-code mutation through the connector's whole-file replacement operation: `incident_service.py` is large and the full-file connector response is truncated, so reconstructing/replacing it would create a material corruption risk for a two-line lifecycle edit.
 
 ### Checks / results
 
-- Authenticated GitHub connector reads and writes succeeded.
-- Central projector committed as `284355fc86ccccb381ca8210c4ef113aeaf6a762`.
-- Contract tests committed as `43d97dbc4e6755af70b6a7dcca4101bbc6c10f4c`.
-- A fresh local checkout was attempted and still failed with `Could not resolve host: github.com`; tests therefore were not executed and no new green claim is made.
+- Authenticated GitHub connector reads succeeded.
+- Direct clone result: `fatal: unable to access 'https://github.com/UnknownGod2011/grafana.git/': Could not resolve host: github.com`.
+- Current head has no attached commit-status checks.
+- No tests were executed and no new green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Centralize all operator timeline payload disclosure in one helper rather than adding a reconciliation-only special case directly to lifecycle code.
-2. Preserve fail-closed behavior for unknown/future event types.
-3. Keep dynamic reconciliation projection strictly narrower than durable audit payloads.
-4. Do not rewrite lifecycle-critical `incident_service.py` from a large connector payload without executable checkout validation; the remaining integration is now a minimal import plus helper call.
+1. Preserve the production lifecycle file rather than perform an unverifiable whole-file reconstruction from truncated connector output.
+2. Do not add another helper, speculative test, or duplicate projection layer merely to create activity; the implementation helper and contract coverage already exist and the remaining defect is the public integration itself.
+3. Treat DNS failure as a transient execution-environment blocker rather than a project blocker; continue attempting the minimal validated integration on subsequent runs.
 
 ### Blockers / unknowns
 
-- `incident_service._timeline_event()` still needs to call `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`, followed by a public `audit_timeline()` non-disclosure regression.
+- `incident_service._timeline_event()` still needs the one-call delegation to `timeline_payload(...)`, followed by a public `audit_timeline()` non-disclosure regression.
 - Consolidated execution of recent execution-safety/remediation/recovery regressions is still required.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -72,4 +70,4 @@ Read `progress.md` completely first. Re-read the current `runtime/incident_servi
 
 ## Single best next step
 
-Wire `timeline_payload()` into `incident_service._timeline_event()` through a safely validated edit path, add an end-to-end public `audit_timeline()` reconciliation non-disclosure regression, and execute the focused timeline suite before further lifecycle changes.
+As soon as a patch-capable checkout is available, wire `timeline_payload()` into `_timeline_event()`, add the end-to-end public `audit_timeline()` reconciliation disclosure/non-disclosure regression, run that focused suite, and only then continue lifecycle changes.
