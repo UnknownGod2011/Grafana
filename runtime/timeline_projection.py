@@ -26,6 +26,7 @@ _RECONCILIATION_REASONS = frozenset({
 # parser work before splitting attacker- or corruption-controlled event names.
 _MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
 _MAX_STATIC_STRING_LENGTH = 512
+_MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
 
 
 def _safe_static_value(value: object) -> bool:
@@ -34,14 +35,17 @@ def _safe_static_value(value: object) -> bool:
     Field allowlists prevent accidental key disclosure, but durable audit records
     can still be corrupted or supplied by older writers. Restrict public timeline
     values to bounded JSON scalars so a trusted field name cannot smuggle nested
-    provider bodies/credentials or pathological strings into operator responses.
+    provider bodies/credentials or pathological strings or integers into operator
+    responses.
     """
     if value is None or isinstance(value, bool):
         return True
     if isinstance(value, str):
         return len(value) <= _MAX_STATIC_STRING_LENGTH
     if isinstance(value, int):
-        return not isinstance(value, bool)
+        # Python integers are arbitrary precision. Bound them explicitly so a
+        # corrupted durable record cannot create pathological JSON output.
+        return -_MAX_STATIC_INTEGER_ABS <= value <= _MAX_STATIC_INTEGER_ABS
     if isinstance(value, float):
         return math.isfinite(value)
     return False
