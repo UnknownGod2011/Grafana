@@ -73,6 +73,25 @@ def test_central_projection_preserves_static_allowlist_and_drops_extra_fields():
     ) == {"revision": "r1", "status": "diagnosed"}
 
 
+def test_static_projection_rejects_nested_or_oversized_allowlisted_values():
+    assert timeline_payload(
+        "investigation_completed",
+        {"revision": {"credential": "must-not-leak"}, "status": "diagnosed"},
+        STATIC_FIELDS,
+    ) == {"status": "diagnosed"}
+    assert timeline_payload(
+        "investigation_completed",
+        {"revision": "r" * 513, "status": "diagnosed"},
+        STATIC_FIELDS,
+    ) == {"status": "diagnosed"}
+
+
+def test_static_projection_rejects_non_finite_numbers():
+    fields = {"event": ("sample", "ratio")}
+    assert timeline_payload("event", {"sample": 3, "ratio": float("nan")}, fields) == {"sample": 3}
+    assert timeline_payload("event", {"sample": 3, "ratio": float("inf")}, fields) == {"sample": 3}
+
+
 def test_central_projection_delegates_only_canonical_reconciliation_events():
     payload = {
         "result": "accepted",
