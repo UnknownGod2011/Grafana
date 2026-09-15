@@ -23,7 +23,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
 - Operator timeline disclosure is allowlist-based. Canonical remediation reconciliation may expose only bounded `result` and `reason`; operation IDs, provider bodies, targets, credentials, arbitrary audit metadata, and raw actor identities must never be exposed.
 - Reconciliation timeline parsing rejects oversized durable event names before splitting/parsing them.
-- Static timeline fields expose only bounded JSON scalars; nested objects/arrays, oversized strings, and non-finite numbers fail closed even when their field name is allowlisted.
+- Static timeline fields expose only bounded JSON scalars; nested objects/arrays, oversized strings, arbitrary-precision integers outside signed 63-bit magnitude, and non-finite numbers fail closed even when their field name is allowlisted.
 
 ## Retained validation baseline
 
@@ -33,43 +33,41 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical live Docker rehearsal: PASS twice consecutively, predating latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
-- The earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest static-value hardening has not yet received repository-level execution.
+- The earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-15 — static timeline value hardening
+## Run log — 2026-09-15 — bounded timeline integer hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read the public reconciliation audit regression, the relevant `incident_service.py` import/projection path, `runtime/timeline_projection.py`, and its focused contract tests. Confirmed `_timeline_event()` delegates to centralized `timeline_payload(...)` and the remaining disclosure gap was value shape: an allowlisted static field could still carry a nested object or pathological scalar if a durable audit record were corrupted or produced by an incompatible writer.
+Read `progress.md` completely first. Re-read `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection_contract.py`. Confirmed the previous value-shape hardening bounded strings and rejected nested/non-finite values, but still accepted arbitrary-precision Python integers under allowlisted static fields.
 
 ### Changes / actions
 
-- Retried a fresh repository clone first; the execution runner still fails DNS resolution with `Could not resolve host: github.com`.
-- Hardened `runtime/timeline_projection.py` so static allowlisted values are restricted to bounded JSON scalars: `None`, booleans, integers, finite floats, and strings up to 512 characters.
-- Nested mappings/sequences, oversized strings, NaN, and infinities are omitted from the operator-visible payload even when the key itself is allowlisted.
-- Kept canonical remediation reconciliation on its stricter semantic projector; its result/reason behavior is unchanged.
-- Added contract regressions covering nested secret-bearing values, oversized strings, NaN, and infinity while preserving ordinary static scalar projection.
+- Hardened `runtime/timeline_projection.py` so allowlisted integer values must fit within signed 63-bit magnitude (`-(2^63-1)` through `2^63-1`). This prevents corrupted durable audit data from producing pathological arbitrary-precision JSON output while preserving normal lifecycle counters/identifiers represented as integers.
+- Added a focused contract regression that preserves boundary integers and drops positive/negative 4096-bit integers.
+- Kept boolean handling explicit and unchanged; booleans remain valid JSON scalars and are evaluated before Python's `bool`/`int` subtype relationship.
+- No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Fresh repository clone: BLOCKED by transient GitHub DNS failure in the execution runner.
-- Repository pytest execution: not available in this runner; no green claim is made for the new commits.
-- GitHub connector writes succeeded for the helper and focused tests.
-- No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
+- GitHub connector reads/writes succeeded and the implementation/test commits landed on `main`.
+- Repository pytest execution remains unavailable from the connector-only path; no green claim is made for the new regression.
+- No GitHub Actions workflow was created or triggered.
 
 ### Decisions
 
-1. Treat durable audit payloads as untrusted at the disclosure boundary even for historically trusted event names.
-2. Preserve valid scalar lifecycle fields while preventing nested provider/credential data from crossing the operator API via an allowlisted key.
-3. Keep the 512-character static string bound deliberately generous for current hashes/revisions/status/action/next-step fields while preventing pathological durable values.
-4. Do not use noisy CI merely to compensate for the runner's transient DNS failure.
+1. Treat numeric magnitude as part of the operator disclosure boundary, not merely numeric type.
+2. Use a conservative signed 63-bit magnitude compatible with ordinary JSON consumers and well beyond StageGuard's expected timeline numeric fields.
+3. Continue failing closed on malformed durable audit values rather than coercing or truncating them.
+4. Avoid noisy CI solely to compensate for the runner's checkout limitations.
 
 ### Blockers / unknowns
 
-- The new static-value hardening and public `audit_timeline()` reconciliation tests still require execution in a real checkout.
+- The latest timeline scalar/integer hardening and public `audit_timeline()` reconciliation tests still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Retry an executable checkout and run the focused timeline projection/public audit tests plus execution-safety reconciliation suite. Fix any compatibility issue introduced by scalar bounding; if green, immediately run the pinned Grafana MCP 1.4.1 read-only smoke and then classify the historical full-suite failures.
+Run the focused timeline projection/public audit tests plus execution-safety reconciliation suite in an executable checkout. Fix any compatibility issue introduced by scalar/integer bounding; if green, immediately run the pinned Grafana MCP 1.4.1 read-only smoke and then classify the historical full-suite failures.
