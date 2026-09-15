@@ -14,7 +14,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
 - Fresh Grafana telemetry is required to verify recovery.
 - `recovery_unverified` can only use the recovery-only verification path and cannot replay provider remediation.
-- Any remediation side effect followed by ambiguous checkpoint persistence remains behind the execution-uncertainty barrier, including local/non-reconciling adapters.
+- Any remediation side effect followed by ambiguous checkpoint persistence remains behind the execution-uncertainty barrier, including local/non-reconciling adapters and process restarts during reconciliation.
 - Execution uncertainty is resolved only through durable reload/reconciliation and fresh Grafana evidence; `/v1/execute` is never the recovery mechanism.
 - Production adapters that support provider reconciliation must additionally resolve their server-owned operation ID before fresh evidence can release uncertainty.
 - Durable checkpoint/audit failures fail closed; ambiguous provider execution blocks replay.
@@ -31,43 +31,42 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in the automation runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — local remediation no-replay barrier repair
+## Run log — 2026-09-15 — local reconciliation restart barrier repair
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected `runtime/execution_safety.py` and `runtime/tests/test_execution_safety.py` through authenticated GitHub reads, focusing on the prior next step: concrete lifecycle defects around execution uncertainty and reconciliation.
+Read `progress.md` completely first. Inspected `runtime/execution_safety.py`, `runtime/tests/test_execution_safety.py`, `runtime/tests/test_execution_reconciliation_gate.py`, `runtime/tests/test_local_execution_uncertainty_barrier.py`, and the checkpoint execution-phase contract.
 
 ### Defect found
 
-A local/non-reconciling remediation adapter could perform its side effect and then lose the checkpoint CAS. `execute_approved()` correctly marked execution uncertain. However, `reload_checkpoint_after_conflict()` immediately cleared that uncertainty when `requires_operation_reconciliation` was false. This released the no-replay barrier solely because the adapter lacked a provider lookup API, even though the side effect had already occurred and the durable winner still contained the stale approval.
-
-The existing `test_local_adapter_can_resolve_via_fresh_grafana_evidence_without_provider_lookup` already encoded the safer intended behavior: local adapters should use the reconciliation entry point and fresh Grafana evidence, without a provider lookup and without replaying remediation. The implementation contradicted that contract.
+The previous run correctly preserved local/non-reconciling remediation uncertainty after a post-side-effect checkpoint CAS loss. A second crash window remained: explicit local reconciliation persists a `dispatching` checkpoint before collecting fresh Grafana evidence. If the process crashed in that gap, restart ignored the durable `dispatching` phase solely because the adapter was local/non-reconciling. The stale approval could therefore become executable again even though the original local side effect may already have happened. This violated the no-replay invariant across process restart.
 
 ### Exact changes made
 
-1. Updated `reload_checkpoint_after_conflict()` in `runtime/execution_safety.py` to preserve the prior server-owned operation ID before clearing in-memory uncertainty.
-2. For local/non-reconciling adapters with a still-pending durable approval, reload now restores `execution_uncertain`, marks the durable winner as reloaded, and records `phase_unavailable` rather than silently returning to synchronized state.
-3. The existing `_provider_reconciliation()` behavior for local adapters remains intentionally `not_found`; this means the explicit reconciliation path can proceed directly to fresh Grafana investigation without pretending a provider lookup exists.
-4. Added `runtime/tests/test_local_execution_uncertainty_barrier.py`. It proves that after a local side effect + checkpoint CAS loss, durable reload does not permit `/execute` replay, remediation call count stays exactly one, and only explicit reconciliation plus fresh evidence releases uncertainty and clears the stale approval.
+1. Hardened restored-approval guarding in `runtime/execution_safety.py`.
+2. Production/reconciling adapters retain the existing fail-closed legacy behavior when execution-phase metadata is unavailable.
+3. Local adapters retain historical semantics for legacy/non-phase-capable stores and for durable `approved` checkpoints, where no side effect is proven to have started.
+4. Local adapters backed by a phase-capable store now treat durable `dispatching`/ambiguous pending approvals as execution-uncertain on restart, derive the stable operation reference, and require explicit reconciliation plus fresh Grafana evidence before the barrier can clear.
+5. Added a restart regression to `runtime/tests/test_local_execution_uncertainty_barrier.py` that models a crash after a local reconciliation attempt persisted `dispatching`; it proves `/execute` remains blocked, no local remediation is replayed, and reconciliation is the only release path.
 
 Commits:
-- `26a7eb4e1143545c2be885ac9520f4dfed5702ed` — fix local remediation uncertainty reload barrier
-- `51055719e7ad1cc7a1a11cd470ac32271141776a` — add local no-replay reload regression
+- `b44bd0188c229dc7c73f22ac73a1e83500b2c59e` — preserve local reconciliation barrier across restart
+- `4f3d5ed9d3b998ddde75a89b2ff472f33cb2ee93` — test local reconciliation crash restart barrier
 
 ### Checks / results
 
 - Authenticated GitHub reads/writes succeeded against `UnknownGod2011/Grafana`.
-- Statically cross-checked the repaired path against the existing local-adapter reconciliation test and the production-adapter path.
-- The change is deliberately limited to the case where execution was already uncertain, durable reload still has a pending approval, and the adapter does not expose provider reconciliation.
+- Statically cross-checked the change against the existing restored-local-pending-approval test: non-phase-capable local stores remain synchronized, preserving that contract.
+- Statically cross-checked production behavior: reconciling adapters still fail closed when phase metadata is absent and still accept a durable `approved` phase as safe to execute.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, real remediation provider, or unrelated repository was touched.
-- This run did not obtain an executable checkout, so the new regression and consolidated suite are not claimed green.
+- This run still did not have an executable repository checkout, so the new regression and consolidated suite are not claimed green.
 
 ### Decisions
 
-1. Lack of a provider reconciliation API is not evidence that an already-dispatched side effect did not happen.
-2. Local adapters resolve post-dispatch persistence ambiguity through explicit reconciliation + fresh Grafana evidence, never by replaying remediation.
-3. Keep the stricter provider-state requirement for production adapters that declare operation reconciliation support.
-4. Continue prioritizing historical-suite defect triage over speculative hardening.
+1. A durable `dispatching` phase is safety evidence independent of whether the remediation adapter offers a provider lookup API.
+2. Local adapters may skip provider reconciliation, but they may not skip the no-replay barrier or fresh Grafana evidence after a persisted ambiguous dispatch phase.
+3. Legacy local pending approvals remain executable because local ordinary execution does not persist a pre-dispatch barrier; changing that behavior without durable evidence would be speculative and backward-incompatible.
+4. Continue prioritizing concrete lifecycle contradictions and historical-suite triage over additional protocol hardening.
 
 ### Blockers / unknowns
 
@@ -78,4 +77,4 @@ Commits:
 
 ## Single best next step
 
-Run `runtime.tests.test_local_execution_uncertainty_barrier`, `runtime.tests.test_execution_reconciliation_gate`, and `runtime.tests.test_execution_safety` first from an executable checkout. If green, run remediation transport/receiver and recovery/no-replay suites, then the full unittest suite and fix the highest-severity genuine remaining defect. If checkout remains unavailable, statically triage the next concrete lifecycle inconsistency rather than adding speculative hardening.
+Run `runtime.tests.test_local_execution_uncertainty_barrier`, `runtime.tests.test_execution_reconciliation_gate`, and `runtime.tests.test_execution_safety` first from an executable checkout. If green, run remediation transport/receiver and recovery/no-replay suites, then the full unittest suite and fix the highest-severity genuine remaining defect. If checkout remains unavailable, inspect the persisted reconciliation/audit transition for another concrete crash-consistency contradiction rather than adding speculative hardening.
