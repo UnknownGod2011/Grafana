@@ -32,42 +32,41 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical live Docker rehearsal: PASS twice consecutively, predating latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
+- The exact committed `runtime/timeline_projection.py` logic was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15; canonical reconciliation projection returned only `result`/`reason`. This is not a substitute for repository-level tests.
 
-## Run log — 2026-09-15 — public reconciliation timeline integration
+## Run log — 2026-09-15 — isolated projection validation
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read the complete exact blob for `runtime/incident_service.py`, the centralized `runtime/timeline_projection.py` contract from prior work, and the focused timeline projection tests. Confirmed the remaining production gap was exactly the `_timeline_event()` delegation previously identified.
+Read `progress.md` completely first. Re-read `runtime/timeline_projection.py`, `runtime/tests/test_timeline_projection_contract.py`, the public `runtime/tests/test_audit_timeline_reconciliation_projection.py`, and the import section of `runtime/incident_service.py`. Confirmed the public integration remains present and the focused disclosure tests target the intended operator-facing path.
 
 ### Changes / actions
 
-- Retried a fresh repository clone before mutation; DNS still fails with `Could not resolve host: github.com`, so no executable checkout was obtained.
-- Replaced `runtime/incident_service.py` from its complete exact blob, making only the intended production integration: import `timeline_payload` and delegate `_timeline_event()` payload construction to `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`.
-- Verified the repository compare reports exactly 2 additions and 2 deletions in `runtime/incident_service.py`; no unrelated lifecycle code changed.
-- Added `runtime/tests/test_audit_timeline_reconciliation_projection.py` exercising the public `IncidentService.audit_timeline()` path. The regressions require canonical reconciliation events to expose only `result`/`reason`, require actor identity to remain fingerprinted, and assert operation IDs, provider bodies, targets, and credential-like values are absent. A contradictory event/payload pair must fail closed to an empty payload.
+- Retried a fresh repository clone before doing anything else; DNS still fails with `Could not resolve host: github.com`.
+- Independently reconstructed the exact committed `timeline_projection.py` logic in the local runner, compiled it with Python, and executed a canonical reconciliation projection smoke containing an extra secret field.
+- The smoke returned only `result=accepted` and `reason=durable_dispatching`; the extra field was not projected.
+- No runtime source was changed because the highest-value remaining work is repository-level validation, not additional unvalidated feature surface.
 
 ### Checks / results
 
-- Exact-blob read and GitHub connector writes succeeded.
-- Repository diff verification confirmed the lifecycle edit is minimal (2 additions, 2 deletions).
-- Direct clone still fails on DNS before checkout, so the new public regressions were not executed and no new green claim is made.
+- `timeline_projection.py` isolated syntax compile: PASS.
+- Canonical reconciliation projection disclosure smoke: PASS.
+- Full repository/focused pytest execution remains unavailable because a checkout cannot currently be obtained in this runner.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Public timeline projection now has one centralized disclosure policy rather than separate static and reconciliation paths.
-2. Reconciliation audit metadata remains durable internally but operator-visible projection is fail-closed and intentionally lossy.
-3. Keep actor disclosure pseudonymous through the existing SHA-256-derived `actor_ref`; never surface raw actor identity in timeline responses.
-4. Preserve the no-noisy-CI constraint; validation remains local/focused when an executable checkout becomes available.
+1. Do not treat isolated helper validation as equivalent to repository integration validation.
+2. Avoid adding more production surface until the newly wired public timeline path can be exercised together with execution-safety reconciliation tests.
+3. Preserve the no-noisy-CI constraint rather than using Actions merely to compensate for transient runner DNS.
 
 ### Blockers / unknowns
 
-- The newly integrated public reconciliation timeline tests still require execution in a real checkout.
-- Consolidated execution of recent execution-safety/remediation/recovery regressions is still required.
+- Public `audit_timeline()` reconciliation tests and consolidated execution-safety/remediation/recovery regressions still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-As soon as an executable checkout is available, run the focused timeline projection/public audit tests plus the execution-safety reconciliation suite and fix any integration/import failure found; if they pass, move to the pinned Grafana MCP 1.4.1 read-only smoke and classify the historical full-suite failures.
+Retry an executable checkout; once available, run the focused timeline projection/public audit tests plus execution-safety reconciliation suite and fix any integration/import failure. If green, immediately move to the pinned Grafana MCP 1.4.1 read-only smoke, then classify the historical full-suite failures.
