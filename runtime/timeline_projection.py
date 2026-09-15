@@ -9,6 +9,7 @@ arbitrary audit metadata.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from typing import Mapping
 
@@ -24,6 +25,26 @@ _RECONCILIATION_REASONS = frozenset({
 # Audit data is durable and may originate outside the current process. Bound
 # parser work before splitting attacker- or corruption-controlled event names.
 _MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
+_MAX_STATIC_STRING_LENGTH = 512
+
+
+def _safe_static_value(value: object) -> bool:
+    """Return whether an allowlisted lifecycle value is safe to disclose.
+
+    Field allowlists prevent accidental key disclosure, but durable audit records
+    can still be corrupted or supplied by older writers. Restrict public timeline
+    values to bounded JSON scalars so a trusted field name cannot smuggle nested
+    provider bodies/credentials or pathological strings into operator responses.
+    """
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return len(value) <= _MAX_STATIC_STRING_LENGTH
+    if isinstance(value, int):
+        return not isinstance(value, bool)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
 
 
 def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, object]) -> dict[str, str]:
@@ -68,11 +89,12 @@ def timeline_payload(
 ) -> dict[str, object]:
     """Project one audit payload through StageGuard's operator disclosure policy.
 
-    Known lifecycle events use their explicit field allowlist. Unknown events get
-    no payload by default, except canonical remediation-reconciliation events,
-    which are delegated to the stricter semantic projector above. Keeping the
-    fallback here makes it difficult for the public timeline path to accidentally
-    expose arbitrary durable audit metadata when new event types are introduced.
+    Known lifecycle events use their explicit field allowlist and bounded scalar
+    values. Unknown events get no payload by default, except canonical remediation-
+    reconciliation events, which are delegated to the stricter semantic projector
+    above. Keeping the fallback here makes it difficult for the public timeline
+    path to accidentally expose arbitrary durable audit metadata when new event
+    types are introduced.
     """
     if not isinstance(event_type, str) or not isinstance(payload, Mapping):
         return {}
@@ -82,7 +104,11 @@ def timeline_payload(
     allowed = static_fields.get(event_type)
     if allowed is not None:
         try:
-            return {key: payload[key] for key in allowed if isinstance(key, str) and key in payload}
+            return {
+                key: payload[key]
+                for key in allowed
+                if isinstance(key, str) and key in payload and _safe_static_value(payload[key])
+            }
         except (TypeError, ValueError):
             return {}
 
