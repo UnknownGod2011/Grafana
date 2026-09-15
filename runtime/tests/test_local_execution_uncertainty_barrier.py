@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from execution_safety import ExecutionSafeIncidentService
 from incident_checkpoint import CheckpointConflictError, IncidentCheckpoint
@@ -32,6 +33,10 @@ class ConflictStore:
         self.current = checkpoint
 
 
+class PhaseConflictStore(ConflictStore):
+    supports_execution_phase = True
+
+
 class LocalRemediation:
     def __init__(self):
         self.calls = []
@@ -50,11 +55,9 @@ def recovery():
 
 
 class LocalExecutionUncertaintyBarrierTests(unittest.TestCase):
-    def test_reload_does_not_release_local_side_effect_uncertainty(self):
-        store = ConflictStore()
-        remediation = LocalRemediation()
-        service = ExecutionSafeIncidentService(
-            SequenceMetrics(diagnosed() + recovery() + diagnosed()),
+    def _service(self, store, remediation, values):
+        return ExecutionSafeIncidentService(
+            SequenceMetrics(values),
             remediation,
             MemoryAuditLog(),
             checkpoint_store=store,
@@ -62,6 +65,11 @@ class LocalExecutionUncertaintyBarrierTests(unittest.TestCase):
             id_factory=lambda: "incident-local-001",
             recovery_sleep=lambda _: None,
         )
+
+    def test_reload_does_not_release_local_side_effect_uncertainty(self):
+        store = ConflictStore()
+        remediation = LocalRemediation()
+        service = self._service(store, remediation, diagnosed() + recovery() + diagnosed())
         investigated = service.investigate()
         service.approve(
             incident_id=investigated.incident_id,
@@ -90,6 +98,38 @@ class LocalExecutionUncertaintyBarrierTests(unittest.TestCase):
         self.assertIsNone(refreshed.outcome)
         self.assertEqual("clear", service.execution_reconciliation_state())
         self.assertEqual(1, len(remediation.calls), "fresh Grafana evidence resolves uncertainty without replay")
+
+    def test_restart_preserves_local_dispatching_reconciliation_barrier(self):
+        store = PhaseConflictStore()
+        first_remediation = LocalRemediation()
+        first = self._service(store, first_remediation, diagnosed())
+        investigated = first.investigate()
+        first.approve(
+            incident_id=investigated.incident_id,
+            revision=investigated.revision,
+            approved_by="operator@example.com",
+        )
+
+        # A local uncertainty reconciliation persists ``dispatching`` before its
+        # fresh Grafana investigation. Model a process crash in that exact gap:
+        # the durable approval is still present, but its phase proves that a
+        # previous local side effect may already have happened.
+        store.current = replace(store.current, execution_phase="dispatching")
+
+        restarted_remediation = LocalRemediation()
+        restarted = self._service(store, restarted_remediation, diagnosed())
+        self.assertEqual("execution_uncertain", restarted.checkpoint_state())
+        self.assertEqual("reloaded", restarted.execution_reconciliation_state())
+        self.assertEqual("durable_dispatching", restarted.execution_reconciliation_reason())
+
+        with self.assertRaisesRegex(RuntimeError, "uncertain"):
+            restarted.execute_approved()
+        self.assertEqual([], restarted_remediation.calls, "restart must not replay the possibly completed local side effect")
+
+        refreshed = restarted.reconcile_execution_uncertainty(actor="operator@example.com")
+        self.assertIsNone(refreshed.approval)
+        self.assertEqual("clear", restarted.execution_reconciliation_state())
+        self.assertEqual([], restarted_remediation.calls)
 
 
 if __name__ == "__main__":
