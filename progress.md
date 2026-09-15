@@ -11,6 +11,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - StageGuard's supported MCP deployment is stdio-only and its compose evidence surface is restricted to `datasource,prometheus,loki` with writes and proxied tools disabled.
 - The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
+- MCP peer-advertised tool names are untrusted input and must be non-empty, bounded, and free of ASCII control/DEL characters before they are stored, compared, or rendered in release evidence/errors.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -36,35 +37,35 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — Grafana MCP server-metadata hardening
+## Run log — 2026-09-16 — Grafana MCP advertised-tool hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py` through the GitHub connector. The prior run correctly added exact MCP protocol negotiation and structural `serverInfo` checks, but accepted unbounded/control-character-bearing server name/version values and later emitted the peer-supplied metadata in release-smoke JSON output.
+Read `progress.md` completely first. Inspected repository metadata, `runtime/mcp_smoke.py`, and `runtime/tests/test_mcp_smoke_contract.py` through the GitHub connector. The release smoke already bounded MCP server identity but accepted arbitrary-length/control-character-bearing peer-advertised tool names before using them in maps, errors, sorting, and release output.
 
 ### Changes / actions
 
-- Added `MAX_SERVER_INFO_FIELD_CHARS = 128` and centralized `_bounded_server_info_field()` validation.
-- MCP initialize now fails closed when `serverInfo.name` or `serverInfo.version` is empty, exceeds 128 characters, or contains ASCII control/DEL characters.
-- This bounds peer-controlled metadata before it is trusted or printed into release evidence, reducing malformed-peer/log-forging and pathological-output risk.
-- Expanded `runtime/tests/test_mcp_smoke_contract.py` with oversized-name/version, newline/control-character, DEL-character, and exact-boundary regressions.
+- Added `MAX_TOOL_NAME_CHARS = 128` to the MCP release smoke.
+- `_tool_map()` now fails closed when an advertised tool name exceeds 128 characters or contains ASCII control/DEL characters, before duplicate checks or downstream rendering.
+- Added regressions for oversized tool names, newline/log-injection names, DEL-bearing names, and exact-boundary acceptance.
+- Preserved the existing exact protocol negotiation, required evidence-tool checks, and `readOnlyHint=true` enforcement.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub connector reads and source/test commits succeeded.
-- This runner still does not provide a materialized executable repository checkout, so the new tests were not executed and no green pytest claim is made.
+- GitHub connector repository/file reads and source/test commits succeeded.
+- This runner does not provide a materialized executable repository checkout, so the new tests were not executed and no green pytest claim is made.
 - No GitHub Actions workflow was created or triggered.
 
 ### Decisions
 
-1. Treat MCP peer identity as untrusted input even in a pinned-container release smoke; validate it before rendering it into operator/release output.
-2. Keep server identity validation structural rather than pinning the reported name/version string. The Docker image pin remains the artifact identity control, while bounded metadata avoids coupling to harmless upstream naming changes.
-3. Preserve the exact protocol-agreement gate and read-only tool-surface gate added in prior runs.
+1. Treat MCP tool metadata as untrusted peer input, not merely capability metadata, because names are persisted in in-memory maps and emitted in diagnostics/release evidence.
+2. Bound names without pinning the complete upstream tool set; StageGuard still permits future explicitly read-only tools while requiring its evidence-critical tools.
+3. Keep the release path stdio-only and evidence-only; this change does not broaden MCP capabilities.
 
 ### Blockers / unknowns
 
-- The latest MCP negotiation/metadata/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- Latest MCP negotiation/metadata/tool-name/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
