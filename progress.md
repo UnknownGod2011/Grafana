@@ -22,6 +22,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
 - Reconciliation timeline projection is bounded to canonical event names whose encoded stage/result/reason agree with validated payload values; operation IDs, provider bodies, targets, credentials, and arbitrary audit metadata must never be exposed.
+- Reconciliation timeline parsing rejects oversized durable event names before splitting/parsing them.
 
 ## Retained validation baseline
 
@@ -32,31 +33,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — reconciliation projection contract coverage
+## Run log — 2026-09-15 — bounded reconciliation timeline parser
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read the current `runtime/incident_service.py` timeline projection and public `audit_timeline()` path in bounded line ranges, plus the complete `runtime/timeline_projection.py` helper. Confirmed the integration point has not moved: unknown event types still receive an empty payload in `_timeline_event()`, while reconciliation projection remains a separate fail-closed helper.
+Read `progress.md` completely first. Re-read the current `runtime/incident_service.py` timeline projection in a bounded range, the complete `runtime/timeline_projection.py` helper, and the focused timeline projection contract tests. Confirmed the public integration point remains unchanged: `_timeline_event()` still uses only the static allowlist, while reconciliation projection remains a separate fail-closed helper.
 
 ### Changes made
 
-- Added `runtime/tests/test_timeline_projection_contract.py`.
-- Added focused contract coverage proving a canonical reconciliation event exposes only bounded `result` and `reason` fields even when the durable audit payload contains an operation ID, provider body, target, or credential-like field.
-- Added negative coverage for event/payload contradictions, unknown future result/stage values, and malformed event names.
-- No lifecycle behavior was changed in this run; the public `audit_timeline()` wiring remains pending.
+- Hardened `runtime/timeline_projection.py` with an explicit maximum reconciliation event-type length before suffix splitting/parsing. Durable audit data may be corrupted or externally supplied, so the operator projection no longer performs parser work on arbitrarily large reconciliation-looking names.
+- Updated the helper contract documentation to include oversized input in its fail-closed semantics.
+- Added a focused regression in `runtime/tests/test_timeline_projection_contract.py` proving a 4 KiB reconciliation-looking event name is rejected with an empty projection.
+- No lifecycle or remediation behavior was changed. Public `audit_timeline()` wiring remains pending.
 
 ### Checks / results
 
-- Authenticated GitHub connector reads and commit writes succeeded.
-- The new test file was committed as `e2c91919f5f9fc1130b0ef3d52dd2eef64331bdd`.
+- Authenticated GitHub connector reads and writes succeeded.
+- Parser hardening committed as `0633847f20eb8d7bbc631dd4437ae30bed30316e`.
+- Oversized-input regression committed as `dcdf5bc8b015759616374c55a1b5711ca2bc27bf`.
 - Tests were not executed in this runner, so no new green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Keep the reconciliation disclosure boundary independently regression-tested before wiring it into the public timeline path.
-2. Continue to avoid replacing the complete lifecycle-critical `incident_service.py` through a whole-file contents write solely for a two-line integration while a patch-capable checkout is unavailable.
-3. Preserve existing static timeline projections as authoritative; reconciliation projection should be fallback-only.
+1. Treat durable audit event names as untrusted bounded input at the operator projection boundary.
+2. Keep reconciliation disclosure fail-closed and limited to canonical `result`/`reason` values.
+3. Continue avoiding a complete replacement of lifecycle-critical `incident_service.py` solely for the small projector fallback while a safe patch-capable edit path is unavailable.
 
 ### Blockers / unknowns
 
