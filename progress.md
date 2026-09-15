@@ -21,6 +21,7 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Grafana MCP production and smoke launchers are stdio-only; network transports fail closed.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
+- Reconciliation timeline projection is bounded to validated `result` and `reason` values; operation IDs, provider bodies, targets, credentials, and arbitrary audit metadata must never be exposed.
 
 ## Retained validation baseline
 
@@ -31,34 +32,37 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in the automation runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — reconciliation audit observability triage
+## Run log — 2026-09-15 — bounded reconciliation timeline projection
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected `runtime/execution_safety.py` and the audit/checkpoint implementation in `runtime/incident_service.py`, with particular attention to reconciliation attempt persistence, append-before-CAS audit lineage, restart behavior, and operator timeline projection.
+Read `progress.md` completely first. Inspected `runtime/incident_service.py` timeline projection and `runtime/execution_safety.py` reconciliation event construction. Confirmed reconciliation events intentionally contain only bounded `result`/`reason` payloads internally, while the generic timeline projector currently drops those fields because reconciliation event types are dynamic.
 
-### Findings
+### Changes made
 
-1. The reconciliation attempt intentionally appends audit evidence before checkpoint CAS, matching StageGuard's authenticated candidate-lineage design; this is not itself a defect.
-2. The persisted `dispatching` reconciliation barrier remains correctly bound to the checkpoint/audit head when the audit chain is available.
-3. A concrete observability gap remains: reconciliation events carry bounded `result` and `reason` payloads internally, but `_timeline_event()` currently exposes no payload fields for the dynamic `remediation_reconciliation_*` event types. Operators can see the encoded event type but not the structured reconciliation state/reason through the normal timeline projection. This should be repaired with an explicit bounded allowlist and regression coverage; operation IDs and provider details must remain excluded.
+1. Added `runtime/timeline_projection.py` with a fail-closed `reconciliation_timeline_payload()` helper.
+2. The helper recognizes only `remediation_reconciliation_*` events and exposes only validated current reconciliation results (`accepted`, `not_found`, `unknown`) and reasons (`durable_dispatching`, `legacy_unknown`, `post_dispatch_checkpoint_regression`, `phase_unavailable`).
+3. Unknown event types, missing fields, and future/unbounded values project to `{}` rather than becoming an arbitrary-data disclosure channel.
+4. Added `runtime/tests/test_timeline_projection.py` covering the complete current result/reason matrix and proving operation IDs, provider bodies, targets, and arbitrary metadata are excluded.
+5. The helper is intentionally not yet wired into `incident_service._timeline_event`: the repository cannot be checked out in this runner, and the GitHub connector only provides whole-file replacement for the large service module. I did not risk another incomplete replacement after the prior run's connector truncation incident.
 
 ### Checks / results
 
-- Attempted the requested executable checkout and focused suite with `git clone` followed by `python -m unittest runtime.tests.test_local_execution_uncertainty_barrier runtime.tests.test_execution_reconciliation_gate runtime.tests.test_execution_safety`.
-- Checkout failed before tests could run because the runner still cannot resolve `github.com`; no test-green claim is made.
-- Authenticated GitHub connector reads/writes remain functional.
+- Attempted a fresh repository checkout before implementation; `git clone https://github.com/UnknownGod2011/Grafana.git` still failed with `Could not resolve host: github.com`.
+- Therefore the new unit test has not been executed and no green claim is made.
+- Authenticated GitHub connector reads/writes succeeded.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
-- During this run an incomplete connector file replacement was detected immediately and the branch was restored to the exact prior commit `ee26a9c9706556093037d0f59f28397d530b4d99` before any further repository work. The repository implementation was therefore not left in the transient broken state.
 
 ### Decisions
 
-1. Do not alter append-before-CAS audit ordering without evidence of an authenticated-lineage defect; it is an intentional concurrency design.
-2. Reconciliation timeline payloads should expose only the already-bounded `result` and `reason` fields. Never expose operation IDs, provider response bodies, targets, credentials, or arbitrary metadata.
-3. Continue prioritizing executable suite triage as soon as checkout works; avoid speculative lifecycle changes while the consolidated regressions remain unexecuted.
+1. Keep reconciliation timeline exposure in a dedicated fail-closed helper rather than teaching the generic allowlist to accept arbitrary dynamic event names.
+2. Validate payload values independently of the event-type suffix; the audit event name is not authorization to disclose arbitrary payload data.
+3. Do not replace the large `incident_service.py` through a truncated connector response. Integration should be a tiny import/call patch once an executable checkout or safe patch-capable path is available.
+4. Continue prioritizing executable suite triage over speculative lifecycle changes.
 
 ### Blockers / unknowns
 
+- `reconciliation_timeline_payload()` still needs to be integrated into `incident_service._timeline_event` and covered through the public timeline projection path.
 - Consolidated execution of recent execution-safety/remediation/recovery regressions is still required.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -66,4 +70,4 @@ Read `progress.md` completely first. Inspected `runtime/execution_safety.py` and
 
 ## Single best next step
 
-Implement the bounded reconciliation timeline projection (`result` + `reason` only) with a focused regression, then execute the local uncertainty, reconciliation-gate, and execution-safety suites as soon as repository checkout is available. If those are green, proceed to remediation transport/receiver and recovery/no-replay suites, then classify the historical full-suite failures.
+Wire `reconciliation_timeline_payload()` into `incident_service._timeline_event` with a public timeline regression as soon as a safe patch-capable checkout is available; then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
