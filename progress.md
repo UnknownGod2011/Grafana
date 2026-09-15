@@ -21,7 +21,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Grafana MCP production and smoke launchers are stdio-only; network transports fail closed.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
-- Operator timeline disclosure is allowlist-based. Canonical remediation reconciliation may expose only bounded `result` and `reason`; operation IDs, provider bodies, targets, credentials, and arbitrary audit metadata must never be exposed.
+- Operator timeline disclosure is allowlist-based. Canonical remediation reconciliation may expose only bounded `result` and `reason`; operation IDs, provider bodies, targets, credentials, arbitrary audit metadata, and raw actor identities must never be exposed.
 - Reconciliation timeline parsing rejects oversized durable event names before splitting/parsing them.
 
 ## Retained validation baseline
@@ -33,35 +33,36 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — blob-safe timeline integration path
+## Run log — 2026-09-15 — public reconciliation timeline integration
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read `runtime/incident_service.py` and confirmed `_timeline_event()` still constructs public payloads directly from `_TIMELINE_PAYLOAD_FIELDS`; the centralized `timeline_payload()` integration therefore remains the exact production gap.
+Read `progress.md` completely first. Re-read the complete exact blob for `runtime/incident_service.py`, the centralized `runtime/timeline_projection.py` contract from prior work, and the focused timeline projection tests. Confirmed the remaining production gap was exactly the `_timeline_event()` delegation previously identified.
 
 ### Changes / actions
 
-- Retried a fresh repository clone; DNS still fails with `Could not resolve host: github.com`, so no executable checkout was obtained.
-- Identified and validated a safer connector path that was not available in prior runs: fetching the exact `incident_service.py` blob by SHA returns the complete source rather than the truncated whole-file contents response. This removes the previous uncertainty about reconstructing lifecycle-critical source from incomplete connector output.
-- Confirmed the current `incident_service.py` blob SHA is `36e59ee38228d761be5a3e3117afa041f9cd202f`, current main head is `b4f76a9977573bb9438b5c9414cb00beb51ae4fe`, and the base tree is `90433d5f57738df2fea38fcb3836e94f7ad4005b`.
-- Did not mutate `incident_service.py` in this run because the connector still exposes replacement/Git-data writes rather than a line patch, and the edit must preserve the complete fetched blob exactly except for the import and projector call. The complete blob is now obtainable, so this is no longer blocked on source truncation.
+- Retried a fresh repository clone before mutation; DNS still fails with `Could not resolve host: github.com`, so no executable checkout was obtained.
+- Replaced `runtime/incident_service.py` from its complete exact blob, making only the intended production integration: import `timeline_payload` and delegate `_timeline_event()` payload construction to `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`.
+- Verified the repository compare reports exactly 2 additions and 2 deletions in `runtime/incident_service.py`; no unrelated lifecycle code changed.
+- Added `runtime/tests/test_audit_timeline_reconciliation_projection.py` exercising the public `IncidentService.audit_timeline()` path. The regressions require canonical reconciliation events to expose only `result`/`reason`, require actor identity to remain fingerprinted, and assert operation IDs, provider bodies, targets, and credential-like values are absent. A contradictory event/payload pair must fail closed to an empty payload.
 
 ### Checks / results
 
-- Authenticated GitHub repository, ref, commit, and exact blob reads succeeded.
-- Direct clone still fails on DNS before checkout.
-- No tests were executed and no new green claim is made.
+- Exact-blob read and GitHub connector writes succeeded.
+- Repository diff verification confirmed the lifecycle edit is minimal (2 additions, 2 deletions).
+- Direct clone still fails on DNS before checkout, so the new public regressions were not executed and no new green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Use exact-blob retrieval as the source of truth for any connector-based lifecycle-file replacement; never reconstruct a large source file from a truncated contents response.
-2. Keep the required production change minimal: import `timeline_payload` and delegate `_timeline_event()` payload construction to `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`.
-3. Preserve the no-noisy-CI constraint; validation remains local/focused when an executable checkout becomes available.
+1. Public timeline projection now has one centralized disclosure policy rather than separate static and reconciliation paths.
+2. Reconciliation audit metadata remains durable internally but operator-visible projection is fail-closed and intentionally lossy.
+3. Keep actor disclosure pseudonymous through the existing SHA-256-derived `actor_ref`; never surface raw actor identity in timeline responses.
+4. Preserve the no-noisy-CI constraint; validation remains local/focused when an executable checkout becomes available.
 
 ### Blockers / unknowns
 
-- `incident_service._timeline_event()` still needs the one-call delegation to `timeline_payload(...)`, followed by a public `audit_timeline()` non-disclosure regression.
+- The newly integrated public reconciliation timeline tests still require execution in a real checkout.
 - Consolidated execution of recent execution-safety/remediation/recovery regressions is still required.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -69,4 +70,4 @@ Read `progress.md` completely first. Re-read `runtime/incident_service.py` and c
 
 ## Single best next step
 
-Use the complete exact blob as the basis for a minimal connector replacement of `runtime/incident_service.py`, wiring `timeline_payload()` into `_timeline_event()` without altering unrelated lifecycle code; then add the public `audit_timeline()` disclosure/non-disclosure regression and execute it as soon as a local checkout is available.
+As soon as an executable checkout is available, run the focused timeline projection/public audit tests plus the execution-safety reconciliation suite and fix any integration/import failure found; if they pass, move to the pinned Grafana MCP 1.4.1 read-only smoke and classify the historical full-suite failures.
