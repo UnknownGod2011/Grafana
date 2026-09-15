@@ -32,30 +32,30 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — integration blocked safely
+## Run log — 2026-09-15 — timeline integration tooling discovery
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-inspected `runtime/incident_service.py` around `_timeline_event()` and `audit_timeline()`, plus `runtime/timeline_projection.py`. Confirmed the remaining integration is exactly as previously recorded: `_timeline_event()` still uses only `_TIMELINE_PAYLOAD_FIELDS`, while `reconciliation_timeline_payload()` contains the canonical fail-closed reconciliation projection logic.
+Read `progress.md` completely first. Re-inspected `runtime/incident_service.py` and `runtime/timeline_projection.py`. Confirmed `_timeline_event()` still projects only `_TIMELINE_PAYLOAD_FIELDS`, while `reconciliation_timeline_payload()` already provides the intended canonical fail-closed reconciliation projection.
 
 ### Changes made
 
-No runtime code was changed in this run. A fresh patch-capable checkout was attempted first so the small integration could be made and tested safely; the runner again failed DNS resolution for `github.com`. I deliberately did not replace the entire large `incident_service.py` through the connector for a two-line import/projection change, because that write primitive requires complete-file replacement and an accidental truncation would be a materially worse production defect than the current bounded observability omission.
+No runtime behavior was changed. I discovered that the GitHub connector's blob reader can retrieve the complete lifecycle-critical `incident_service.py` even though normal file/API reads truncate it. This removes the previous information-access blocker, but the available write primitives still replace an entire blob/file rather than applying a textual patch. I did not manually reconstruct and replace a large lifecycle-critical file from tool output because that remains an unnecessary corruption risk for a two-line integration.
 
 ### Checks / results
 
 - Authenticated GitHub connector reads succeeded.
-- Fresh `git clone https://github.com/UnknownGod2011/grafana.git` failed with `Could not resolve host: github.com`.
-- Confirmed `_timeline_event()` still projects static allowlisted payload fields only.
-- Confirmed `reconciliation_timeline_payload()` remains present and fail-closed on noncanonical stage/result/reason or event/payload disagreement.
+- `runtime/incident_service.py` blob was retrieved completely and the exact integration point was reconfirmed.
+- `runtime/timeline_projection.py` was retrieved completely; its canonical reconciliation projector remains intact.
+- Fresh `git clone https://github.com/UnknownGod2011/grafana.git` again failed with `Could not resolve host: github.com`.
 - No tests were executed and no green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Do not trade a bounded operator-observability omission for a high-risk whole-file replacement of lifecycle-critical code.
-2. Keep the already-reviewed projector unchanged until it can be integrated through a patch-capable checkout or another minimal-edit mechanism.
-3. Do not add unrelated speculative hardening merely to manufacture activity while the highest-value next edit is blocked.
+1. Preserve lifecycle code rather than perform a risky whole-file replacement for a tiny observability integration.
+2. Treat complete blob retrieval as useful inspection capability, not as evidence that whole-file mutation is safe.
+3. Resume the planned integration immediately when a patch-capable checkout/edit path is available.
 
 ### Blockers / unknowns
 
@@ -67,4 +67,4 @@ No runtime code was changed in this run. A fresh patch-capable checkout was atte
 
 ## Single best next step
 
-Retry a patch-capable repository checkout; when available, wire `reconciliation_timeline_payload()` into `_timeline_event()`, add the public `audit_timeline()` disclosure/integrity regression, run the focused timeline tests, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
+Retry a patch-capable repository checkout/edit path; when available, import `reconciliation_timeline_payload` in `incident_service.py`, have `_timeline_event()` use it for canonical reconciliation events while retaining the static allowlist for existing events, add a public `audit_timeline()` disclosure/integrity regression, run focused timeline tests, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
