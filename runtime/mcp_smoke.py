@@ -20,6 +20,7 @@ MAX_REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_STDIO_LINE_CHARS = 1_048_576
 MAX_STDOUT_QUEUE_FRAMES = 16
 MAX_SERVER_INFO_FIELD_CHARS = 128
+MAX_TOOL_NAME_CHARS = 128
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -209,6 +210,8 @@ def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
         name = tool.get("name")
         if not isinstance(name, str) or not name.strip():
             raise McpError("tools/list returned a tool without a valid name")
+        if len(name) > MAX_TOOL_NAME_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in name):
+            raise McpError("tools/list returned a tool with an unsafe name")
         if name in mapped:
             raise McpError(f"tools/list returned duplicate tool name: {name}")
         mapped[name] = tool
