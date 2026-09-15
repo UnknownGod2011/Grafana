@@ -9,25 +9,18 @@ Detailed older run history remains in Git history; this file keeps the current i
 ## Core invariants
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
-- StageGuard's production Grafana MCP adapters and smoke client are local stdio-only subprocess clients; network MCP transports fail closed.
-- Investigation and recovery accept only finite non-boolean numeric metric evidence; malformed samples become unavailable and can never prove diagnosis/recovery.
-- Loki corroboration validates bounded evidence envelopes, windows, shapes, scope, and event identity.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
 - Fresh Grafana telemetry is required to verify recovery.
 - `recovery_unverified` can only use the recovery-only verification path and cannot replay provider remediation.
+- Any remediation side effect followed by ambiguous checkpoint persistence remains behind the execution-uncertainty barrier, including local/non-reconciling adapters.
 - Execution uncertainty is resolved only through durable reload/reconciliation and fresh Grafana evidence; `/v1/execute` is never the recovery mechanism.
-- Reconciliation is the sole intentional escape from the execution-uncertainty mutation barrier after durable reload; ordinary lifecycle mutations remain blocked.
+- Production adapters that support provider reconciliation must additionally resolve their server-owned operation ID before fresh evidence can release uncertainty.
 - Durable checkpoint/audit failures fail closed; ambiguous provider execution blocks replay.
-- Provider reconciliation is read-only, keyed only by the server-owned StageGuard operation ID, and never returns mutation action/production/target detail.
-- Provider `not_found` is trusted only when the exact requested lookup URL returns the exact bounded `{operation_id, state:not_found}` contract; generic/malformed/proxy 404s remain `unknown`.
-- Operator-API credentials are bounded and duplicate credential-bearing headers fail closed.
-- Mutating operator requests reject every `Transfer-Encoding`, duplicate `Content-Length`, unknown/query-bearing mutation routes, and every `Expect` header before body mutation.
-- The loopback reference remediation provider rejects duplicate `Authorization` and `Idempotency-Key` headers, duplicate/ambiguous `Content-Length`, every `Transfer-Encoding`, and non-JSON media types before touching its idempotency registry.
+- Grafana MCP production and smoke launchers are stdio-only; network transports fail closed.
+- Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
-- Recovery observability remains fixed-cardinality and provider-detail-free.
-- The browser cockpit trusts the authenticated server-produced recovery contract and fails closed on malformed/inconsistent lifecycle state.
 
 ## Retained validation baseline
 
@@ -36,69 +29,53 @@ Detailed older run history remains in Git history; this file keeps the current i
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating the latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
-- Identity focused tests were previously reconstructed and executed independently: 14/14 passed.
-- Operator request-framing and protocol-preflight boundaries were previously exercised through real `BaseHTTPRequestHandler`/raw-socket paths and behaved fail-closed.
-- Reference remediation reconciliation was previously reconstructed and exercised over real loopback HTTP: missing -> 404/not_found, POST -> accepted, GET -> accepted, bad bearer -> 401, conflicting reuse -> 409.
-- Authoritative reconciliation-404 parsing was independently exercised with real `urllib.error.HTTPError` objects; only the exact same-URL provider contract resolved to `not_found`.
-- Current committed consolidated tests remain blocked from repository execution because this runner cannot resolve `github.com` for a fresh checkout. Connector commits are not treated as passing tests.
+- Current committed consolidated tests remain blocked from repository execution in the automation runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — execution-uncertainty reconciliation gate repair
+## Run log — 2026-09-15 — local remediation no-replay barrier repair
 
 ### Inspected at start
 
-Read this `progress.md` completely before selecting work. Inspected repository metadata and then statically triaged the no-replay/restart lifecycle seam through authenticated GitHub reads, including:
-
-- `runtime/execution_safety.py`
-- `runtime/anchored_execution_safety.py`
-- `runtime/incident_service.py`
-- `runtime/tests/test_execution_safety.py`
-- the runtime/test directory inventory relevant to execution safety
-
-Attempted a fresh shallow checkout and the focused remediation tests first, as required by the prior next step. Checkout still fails before test execution with `Could not resolve host: github.com`.
+Read `progress.md` completely first. Inspected `runtime/execution_safety.py` and `runtime/tests/test_execution_safety.py` through authenticated GitHub reads, focusing on the prior next step: concrete lifecycle defects around execution uncertainty and reconciliation.
 
 ### Defect found
 
-`ExecutionSafeIncidentService.reconcile_execution_uncertainty()` required `_execution_uncertain == True` and `_execution_reloaded == True`, then immediately called `_require_checkpoint_consistency()`. That same consistency gate intentionally raises whenever execution is uncertain unless `_allow_uncertainty_investigation` is set. As a result, the reconciliation path deadlocked itself after reload and could fail before provider reconciliation was attempted.
+A local/non-reconciling remediation adapter could perform its side effect and then lose the checkpoint CAS. `execute_approved()` correctly marked execution uncertain. However, `reload_checkpoint_after_conflict()` immediately cleared that uncertainty when `requires_operation_reconciliation` was false. This released the no-replay barrier solely because the adapter lacked a provider lookup API, even though the side effect had already occurred and the durable winner still contained the stale approval.
 
-This contradicted the existing intended contract already encoded in `runtime/tests/test_execution_safety.py`: after durable reload, reconciliation should query the provider exactly once, collect fresh Grafana evidence, clear the stale approval, and release the uncertainty barrier without replaying the provider action.
+The existing `test_local_adapter_can_resolve_via_fresh_grafana_evidence_without_provider_lookup` already encoded the safer intended behavior: local adapters should use the reconciliation entry point and fresh Grafana evidence, without a provider lookup and without replaying remediation. The implementation contradicted that contract.
 
 ### Exact changes made
 
-1. Added `_require_reconciliation_checkpoint_consistency()` in `runtime/execution_safety.py`.
-2. The helper temporarily bypasses only the local execution-uncertainty guard while still invoking the complete cooperative `_require_checkpoint_consistency()` chain, so anchored/in-flight checks, audit-integrity checks, and checkpoint-conflict checks still run.
-3. The bypass flag is restored in `finally` before provider lookup or investigation begins; it does not globally weaken ordinary lifecycle mutation blocking.
-4. Changed `reconcile_execution_uncertainty()` to use this reconciliation-specific consistency gate after durable reload.
-5. Added `runtime/tests/test_execution_reconciliation_gate.py`, covering the exact invariant: reconciliation is blocked before reload, ordinary execution remains blocked after reload, provider dispatch is not replayed, then reconciliation is allowed exactly once and clears stale approval/uncertainty after fresh evidence.
+1. Updated `reload_checkpoint_after_conflict()` in `runtime/execution_safety.py` to preserve the prior server-owned operation ID before clearing in-memory uncertainty.
+2. For local/non-reconciling adapters with a still-pending durable approval, reload now restores `execution_uncertain`, marks the durable winner as reloaded, and records `phase_unavailable` rather than silently returning to synchronized state.
+3. The existing `_provider_reconciliation()` behavior for local adapters remains intentionally `not_found`; this means the explicit reconciliation path can proceed directly to fresh Grafana investigation without pretending a provider lookup exists.
+4. Added `runtime/tests/test_local_execution_uncertainty_barrier.py`. It proves that after a local side effect + checkpoint CAS loss, durable reload does not permit `/execute` replay, remediation call count stays exactly one, and only explicit reconciliation plus fresh evidence releases uncertainty and clears the stale approval.
 
 Commits:
-- `412a55f8910cb0792aaff8472dd5efdf4f222762` — fix execution uncertainty reconciliation gate
-- `93c63475cf8a7b62697c991dbac2721c2359b95d` — add reconciliation gate regression
+- `26a7eb4e1143545c2be885ac9520f4dfed5702ed` — fix local remediation uncertainty reload barrier
+- `51055719e7ad1cc7a1a11cd470ac32271141776a` — add local no-replay reload regression
 
 ### Checks / results
 
-- Authenticated GitHub connector reads/writes succeeded against `UnknownGod2011/Grafana`.
-- Re-read the committed reconciliation section and confirmed the new helper restores `_allow_uncertainty_investigation` with `finally`, then reconciliation separately enables it only for the fresh investigation.
-- Cross-checked the base `IncidentService._require_checkpoint_consistency()` contract: audit-integrity failure and unresolved checkpoint conflicts remain fail-closed.
-- Cross-checked the anchored override: an active provider/recovery operation still blocks reconciliation through the cooperative consistency chain.
-- Existing `test_execution_safety.py` already contains multiple success expectations that exercise the repaired path, in addition to the new focused regression.
-- Fresh local checkout remains blocked by DNS (`Could not resolve host: github.com`), so neither the new regression nor the existing execution-safety suite executed from the committed repository. No green claim is made.
-- No GitHub Actions workflow was created or triggered, and no Grafana Cloud, Gemini, Google Cloud, real remediation provider, credentials, or unrelated repositories were touched.
+- Authenticated GitHub reads/writes succeeded against `UnknownGod2011/Grafana`.
+- Statically cross-checked the repaired path against the existing local-adapter reconciliation test and the production-adapter path.
+- The change is deliberately limited to the case where execution was already uncertain, durable reload still has a pending approval, and the adapter does not expose provider reconciliation.
+- No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, real remediation provider, or unrelated repository was touched.
+- This run did not obtain an executable checkout, so the new regression and consolidated suite are not claimed green.
 
 ### Decisions
 
-1. Treat reconciliation as a narrowly privileged lifecycle operation, not as a general weakening of the execution-uncertainty barrier.
-2. Preserve dynamic/cooperative consistency checks rather than directly calling `IncidentService._require_checkpoint_consistency()`, so production anchored compositions retain their additional in-flight safety guard.
-3. Keep provider lookup and fresh Grafana investigation under the existing no-replay flow; this change only repairs reachability of that flow.
-4. Do not add or trigger GitHub Actions merely to compensate for this runner's transient DNS limitation.
+1. Lack of a provider reconciliation API is not evidence that an already-dispatched side effect did not happen.
+2. Local adapters resolve post-dispatch persistence ambiguity through explicit reconciliation + fresh Grafana evidence, never by replaying remediation.
+3. Keep the stricter provider-state requirement for production adapters that declare operation reconciliation support.
+4. Continue prioritizing historical-suite defect triage over speculative hardening.
 
 ### Blockers / unknowns
 
-- This runner still cannot resolve `github.com` for a fresh checkout, so committed execution-safety/remediation/recovery suites cannot execute here.
-- The historical full-suite failures/errors still need consolidated execution; this run identified one concrete defect likely contributing to those failures.
-- Recent audit/checkpoint/recovery/Grafana/MCP/auth/framing/provider-reconciliation regressions still require consolidated execution.
+- Consolidated execution of recent execution-safety/remediation/recovery regressions is still required.
+- Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
-- The real disposable private Cloud Run acceptance still requires a private StageGuard service, least-privilege invoker identity, and Docker.
+- Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-**When checkout becomes executable, run `runtime.tests.test_execution_reconciliation_gate` and `runtime.tests.test_execution_safety` first, then `runtime.tests.test_remediation_receiver`, `runtime.tests.test_http_remediation_transport`, and `runtime.tests.test_execution_safety_http_transport`. If those are green, run the focused recovery/no-replay suite and then the full unittest suite, classifying every remaining historical failure/error. If checkout remains unavailable, continue connector-level static triage for another concrete lifecycle defect rather than adding speculative hardening.**
+Run `runtime.tests.test_local_execution_uncertainty_barrier`, `runtime.tests.test_execution_reconciliation_gate`, and `runtime.tests.test_execution_safety` first from an executable checkout. If green, run remediation transport/receiver and recovery/no-replay suites, then the full unittest suite and fix the highest-severity genuine remaining defect. If checkout remains unavailable, statically triage the next concrete lifecycle inconsistency rather than adding speculative hardening.
