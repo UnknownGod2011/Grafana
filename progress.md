@@ -32,34 +32,35 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — reconciliation integration edit path revalidated
+## Run log — 2026-09-15 — reconciliation projection contract coverage
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read the relevant import section and `_timeline_event()`/`audit_timeline()` region of `runtime/incident_service.py`, and re-read `runtime/timeline_projection.py`. Retrieved the complete current `incident_service.py` blob through the authenticated GitHub connector to verify that the previously identified integration point has not moved.
+Read `progress.md` completely first. Re-read the current `runtime/incident_service.py` timeline projection and public `audit_timeline()` path in bounded line ranges, plus the complete `runtime/timeline_projection.py` helper. Confirmed the integration point has not moved: unknown event types still receive an empty payload in `_timeline_event()`, while reconciliation projection remains a separate fail-closed helper.
 
 ### Changes made
 
-No runtime behavior was changed. The intended runtime patch remains exactly two semantic changes: import `reconciliation_timeline_payload` in `incident_service.py`, then use it only as the fallback when `_TIMELINE_PAYLOAD_FIELDS` has no static projection for the event. Existing static projections remain authoritative.
+- Added `runtime/tests/test_timeline_projection_contract.py`.
+- Added focused contract coverage proving a canonical reconciliation event exposes only bounded `result` and `reason` fields even when the durable audit payload contains an operation ID, provider body, target, or credential-like field.
+- Added negative coverage for event/payload contradictions, unknown future result/stage values, and malformed event names.
+- No lifecycle behavior was changed in this run; the public `audit_timeline()` wiring remains pending.
 
 ### Checks / results
 
-- Authenticated GitHub connector reads succeeded for the current repository and complete lifecycle-service blob.
-- Confirmed `_timeline_event()` still projects unknown event types to an empty payload, so reconciliation result/reason are not yet operator-visible.
-- Confirmed `reconciliation_timeline_payload()` remains fail-closed: canonical stage/result/reason must agree between event name and payload, otherwise it returns `{}`.
-- Retried a patch-capable local checkout; `git clone` still failed with `Could not resolve host: github.com`.
-- No tests were executed and no green claim is made.
+- Authenticated GitHub connector reads and commit writes succeeded.
+- The new test file was committed as `e2c91919f5f9fc1130b0ef3d52dd2eef64331bdd`.
+- Tests were not executed in this runner, so no new green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Do not replace the complete lifecycle-critical `incident_service.py` through a whole-file contents write merely to land a two-line patch while the checkout cannot run tests.
-2. Do not add a regression that is known to fail until the integration can be landed in the same validated edit path.
-3. Treat the checkout DNS failure as transient; preserve the recurring task because useful implementation work resumes as soon as patch-capable repository access is restored.
+1. Keep the reconciliation disclosure boundary independently regression-tested before wiring it into the public timeline path.
+2. Continue to avoid replacing the complete lifecycle-critical `incident_service.py` through a whole-file contents write solely for a two-line integration while a patch-capable checkout is unavailable.
+3. Preserve existing static timeline projections as authoritative; reconciliation projection should be fallback-only.
 
 ### Blockers / unknowns
 
-- The reconciliation projector still needs to be wired into `incident_service._timeline_event` and covered through the public `audit_timeline()` path.
+- `incident_service._timeline_event()` still needs the reconciliation projector fallback, followed by a public `audit_timeline()` regression proving the same non-disclosure contract end-to-end.
 - Consolidated execution of recent execution-safety/remediation/recovery regressions is still required.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -67,4 +68,4 @@ No runtime behavior was changed. The intended runtime patch remains exactly two 
 
 ## Single best next step
 
-As soon as a patch-capable checkout succeeds, land the minimal `incident_service.py` reconciliation projector fallback and its public `audit_timeline()` non-disclosure regression in the same change, run focused timeline tests, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
+Land the minimal `incident_service.py` reconciliation projector fallback through a patch-capable edit path and add a public `audit_timeline()` non-disclosure regression; then run the focused timeline tests and the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
