@@ -32,30 +32,30 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — timeline integration tooling discovery
+## Run log — 2026-09-15 — reconciliation integration ownership verified
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-inspected `runtime/incident_service.py` and `runtime/timeline_projection.py`. Confirmed `_timeline_event()` still projects only `_TIMELINE_PAYLOAD_FIELDS`, while `reconciliation_timeline_payload()` already provides the intended canonical fail-closed reconciliation projection.
+Read `progress.md` completely first. Re-inspected the complete `runtime/incident_service.py` blob, `runtime/timeline_projection.py`, and the execution-safety layer that owns provider reconciliation. Confirmed the public `audit_timeline()` implementation and `_timeline_event()` projector live in the base `IncidentService`, while reconciliation lifecycle state/events are implemented by `ExecutionSafeIncidentService` in `runtime/execution_safety.py`.
 
 ### Changes made
 
-No runtime behavior was changed. I discovered that the GitHub connector's blob reader can retrieve the complete lifecycle-critical `incident_service.py` even though normal file/API reads truncate it. This removes the previous information-access blocker, but the available write primitives still replace an entire blob/file rather than applying a textual patch. I did not manually reconstruct and replace a large lifecycle-critical file from tool output because that remains an unnecessary corruption risk for a two-line integration.
+No runtime behavior was changed. The inspection resolved an important ownership ambiguity before editing lifecycle code: reconciliation is intentionally layered above the base service, but operator timeline projection is centralized in the base service. Therefore the correct minimal integration remains to import `reconciliation_timeline_payload` into `incident_service.py` and invoke it from `_timeline_event()` only when the static allowlist does not own the event. This preserves existing event projections and lets canonical reconciliation events expose only validated `result`/`reason`.
 
 ### Checks / results
 
-- Authenticated GitHub connector reads succeeded.
-- `runtime/incident_service.py` blob was retrieved completely and the exact integration point was reconfirmed.
-- `runtime/timeline_projection.py` was retrieved completely; its canonical reconciliation projector remains intact.
-- Fresh `git clone https://github.com/UnknownGod2011/grafana.git` again failed with `Could not resolve host: github.com`.
+- Authenticated GitHub connector reads succeeded, including complete blob retrieval for `runtime/incident_service.py`.
+- Confirmed `IncidentService.audit_timeline()` funnels every selected audit record through `_timeline_event()`.
+- Confirmed `ExecutionSafeIncidentService` is the reconciliation-owning subclass and imports the base service rather than replacing its timeline projector.
+- Confirmed `runtime/timeline_projection.py` still fails closed unless reconciliation event stage/result/reason are canonical and agree with payload values.
 - No tests were executed and no green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Preserve lifecycle code rather than perform a risky whole-file replacement for a tiny observability integration.
-2. Treat complete blob retrieval as useful inspection capability, not as evidence that whole-file mutation is safe.
-3. Resume the planned integration immediately when a patch-capable checkout/edit path is available.
+1. Integrate at the base `_timeline_event()` boundary rather than duplicating `audit_timeline()` in the execution-safety subclass; one projection boundary avoids divergent disclosure policy.
+2. Static event allowlists remain authoritative for existing event types; reconciliation projection is a narrow fallback, not a general dynamic-payload mechanism.
+3. Do not perform a manual whole-file replacement of lifecycle-critical `incident_service.py` through the connector for a two-line change when no executable checkout is available to verify the reconstructed file.
 
 ### Blockers / unknowns
 
@@ -67,4 +67,4 @@ No runtime behavior was changed. I discovered that the GitHub connector's blob r
 
 ## Single best next step
 
-Retry a patch-capable repository checkout/edit path; when available, import `reconciliation_timeline_payload` in `incident_service.py`, have `_timeline_event()` use it for canonical reconciliation events while retaining the static allowlist for existing events, add a public `audit_timeline()` disclosure/integrity regression, run focused timeline tests, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
+Use the first available patch-capable checkout/edit path to make the now-verified minimal base-service integration: import `reconciliation_timeline_payload`, use it as the fail-closed fallback in `_timeline_event()`, add a public `audit_timeline()` regression proving canonical reconciliation visibility plus operation/provider/target/credential non-disclosure, run focused timeline tests, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
