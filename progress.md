@@ -32,33 +32,30 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — canonical reconciliation timeline validation
+## Run log — 2026-09-15 — integration blocked safely
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected `runtime/incident_service.py`, `runtime/timeline_projection.py`, `runtime/execution_safety.py`, and the focused timeline projection tests. Confirmed reconciliation audit event names are generated canonically as `remediation_reconciliation_<stage>.<result>.<reason>` with bounded stages `attempt`/`recovered`, while the new projector previously trusted only the prefix and independently bounded payload values.
+Read `progress.md` completely first. Re-inspected `runtime/incident_service.py` around `_timeline_event()` and `audit_timeline()`, plus `runtime/timeline_projection.py`. Confirmed the remaining integration is exactly as previously recorded: `_timeline_event()` still uses only `_TIMELINE_PAYLOAD_FIELDS`, while `reconciliation_timeline_payload()` contains the canonical fail-closed reconciliation projection logic.
 
 ### Changes made
 
-1. Hardened `runtime/timeline_projection.py` so reconciliation projection now requires exactly three canonical suffix components: stage, result, and reason.
-2. Added an explicit bounded stage set (`attempt`, `recovered`).
-3. Required the result/reason encoded in the audit event name to exactly equal the validated payload values. Contradictory or malformed audit records now fail closed to `{}` rather than projecting potentially misleading operator semantics.
-4. Kept the disclosure boundary unchanged: only `result` and `reason` can be returned; provider operation IDs, bodies, targets, credentials, and arbitrary metadata remain excluded.
-5. Expanded `runtime/tests/test_timeline_projection.py` across both stages, the complete current result/reason matrix, future values, unknown stages, contradictory event/payload pairs, and malformed/noncanonical event names.
+No runtime code was changed in this run. A fresh patch-capable checkout was attempted first so the small integration could be made and tested safely; the runner again failed DNS resolution for `github.com`. I deliberately did not replace the entire large `incident_service.py` through the connector for a two-line import/projection change, because that write primitive requires complete-file replacement and an accidental truncation would be a materially worse production defect than the current bounded observability omission.
 
 ### Checks / results
 
-- Authenticated GitHub connector reads/writes succeeded.
-- The large `incident_service.py` blob can now be read completely through the connector, but the available write primitive still replaces the entire file rather than applying a minimal patch. I did not perform a risky whole-file replacement solely to add the two-line projector integration.
-- Current tests were not executed in a repository checkout, so no new green claim is made.
+- Authenticated GitHub connector reads succeeded.
+- Fresh `git clone https://github.com/UnknownGod2011/grafana.git` failed with `Could not resolve host: github.com`.
+- Confirmed `_timeline_event()` still projects static allowlisted payload fields only.
+- Confirmed `reconciliation_timeline_payload()` remains present and fail-closed on noncanonical stage/result/reason or event/payload disagreement.
+- No tests were executed and no green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Treat reconciliation audit event names as part of the integrity contract, not merely a prefix marker.
-2. Require event-name/payload agreement before operator-visible projection; this makes corruption and future schema drift fail closed.
-3. Do not risk a whole-file replacement of `incident_service.py` for a tiny integration while a safe patch-capable checkout is unavailable.
-4. Continue prioritizing executable suite triage over speculative lifecycle changes.
+1. Do not trade a bounded operator-observability omission for a high-risk whole-file replacement of lifecycle-critical code.
+2. Keep the already-reviewed projector unchanged until it can be integrated through a patch-capable checkout or another minimal-edit mechanism.
+3. Do not add unrelated speculative hardening merely to manufacture activity while the highest-value next edit is blocked.
 
 ### Blockers / unknowns
 
@@ -70,4 +67,4 @@ Read `progress.md` completely first. Inspected `runtime/incident_service.py`, `r
 
 ## Single best next step
 
-Wire `reconciliation_timeline_payload()` into `incident_service._timeline_event` using a safe patch-capable checkout or equivalent minimal-edit path, add a public `audit_timeline()` regression, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
+Retry a patch-capable repository checkout; when available, wire `reconciliation_timeline_payload()` into `_timeline_event()`, add the public `audit_timeline()` disclosure/integrity regression, run the focused timeline tests, then execute the local uncertainty, reconciliation-gate, execution-safety, remediation transport/receiver, and recovery/no-replay suites before further lifecycle changes.
