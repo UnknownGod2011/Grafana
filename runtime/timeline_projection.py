@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Mapping
 
 _RECONCILIATION_PREFIX = "remediation_reconciliation_"
+_RECONCILIATION_STAGES = frozenset({"attempt", "recovered"})
 _RECONCILIATION_RESULTS = frozenset({"accepted", "not_found", "unknown"})
 _RECONCILIATION_REASONS = frozenset({
     "durable_dispatching",
@@ -24,16 +25,29 @@ _RECONCILIATION_REASONS = frozenset({
 def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, object]) -> dict[str, str]:
     """Return the bounded operator projection for a reconciliation audit event.
 
-    Unknown event types or unexpected values fail closed to an empty projection.
-    Values are validated independently of the event-type suffix so a malformed or
-    future audit payload cannot turn the timeline endpoint into an arbitrary-data
-    disclosure channel.
+    Projection is accepted only when the event name is canonical and its encoded
+    result/reason exactly match the bounded payload. This prevents a malformed,
+    corrupted, or future audit event from using a trusted prefix to expose data
+    under contradictory semantics. Unknown inputs fail closed to an empty
+    projection.
     """
     if not isinstance(event_type, str) or not event_type.startswith(_RECONCILIATION_PREFIX):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+
+    suffix = event_type[len(_RECONCILIATION_PREFIX):]
+    parts = suffix.split(".")
+    if len(parts) != 3:
+        return {}
+    stage, encoded_result, encoded_reason = parts
+    if stage not in _RECONCILIATION_STAGES:
+        return {}
+    if encoded_result not in _RECONCILIATION_RESULTS or encoded_reason not in _RECONCILIATION_REASONS:
         return {}
 
     result = payload.get("result")
     reason = payload.get("reason")
-    if result not in _RECONCILIATION_RESULTS or reason not in _RECONCILIATION_REASONS:
+    if result != encoded_result or reason != encoded_reason:
         return {}
-    return {"result": str(result), "reason": str(reason)}
+    return {"result": encoded_result, "reason": encoded_reason}
