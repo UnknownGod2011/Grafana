@@ -88,13 +88,6 @@ class ExecutionSafeIncidentService(IncidentService):
             return reason if reason in _RECONCILIATION_REASONS else "phase_unavailable"
 
     def execution_reconciliation_reference(self) -> str | None:
-        """Return the stable StageGuard idempotency reference for operator reconciliation.
-
-        The value is a deterministic ``sg-`` hash, not provider response detail or
-        credentials. It is exposed only while execution remains ambiguous so an
-        authenticated operator can correlate StageGuard state with the provider's
-        idempotency/reconciliation record without reconstructing the approved action.
-        """
         with self._lock:
             if not self._execution_uncertain:
                 return None
@@ -127,34 +120,23 @@ class ExecutionSafeIncidentService(IncidentService):
         return "phase_unavailable"
 
     @staticmethod
-    def _reconciliation_audit_event_type(
-        stage: str, result: ReconciliationState, reason: ReconciliationReason
-    ) -> str:
+    def _reconciliation_audit_event_type(stage: str, result: ReconciliationState, reason: ReconciliationReason) -> str:
         safe_stage = stage if stage in _RECONCILIATION_AUDIT_STAGES else "attempt"
         safe_result = result if result in _RECONCILIATION_RESULTS else "unknown"
         safe_reason = reason if reason in _RECONCILIATION_REASONS - {"clear"} else "phase_unavailable"
         return f"remediation_reconciliation_{safe_stage}.{safe_result}.{safe_reason}"
 
-    def _record_reconciliation_attempt(
-        self,
-        *,
-        actor: str,
-        result: ReconciliationState,
-        reason: ReconciliationReason,
-    ) -> None:
-        """Append an attempt while preserving both dispatch and audit barriers."""
+    def _record_reconciliation_attempt(self, *, actor: str, result: ReconciliationState, reason: ReconciliationReason) -> None:
         snapshot = self._snapshot
         if snapshot is None:
             raise RuntimeError("reconciliation audit requires an incident snapshot")
         normalized_actor = actor.strip() or "stageguard"
         event_type = self._reconciliation_audit_event_type("attempt", result, reason)
         payload = {"result": result, "reason": reason}
-
         store = self._phase_capable_store()
         if store is None:
             self._record(snapshot.incident_id, event_type, normalized_actor, payload)
             return
-
         self._sequence += 1
         event = AuditEvent(self._sequence, self._clock_ms(), snapshot.incident_id, event_type, normalized_actor, payload)
         self._audit.append(event)
@@ -172,9 +154,6 @@ class ExecutionSafeIncidentService(IncidentService):
             self._checkpoint_conflicted = True
             self._execution_reloaded = False
             raise
-        # Only the checkpoint winner is operator-visible committed history. The
-        # append-before-CAS record remains durable forensic residue for lineage
-        # verification if this writer loses the checkpoint race.
         self._timeline.append(event)
         self._committed_audit_history.append(event)
         if len(self._timeline) > _MAX_TIMELINE_EVENTS:
@@ -209,9 +188,6 @@ class ExecutionSafeIncidentService(IncidentService):
 
     def checkpoint_state(self) -> str:
         with self._lock:
-            # Once provider dispatch may have happened, the no-replay barrier is
-            # the most safety-critical checkpoint state. Audit integrity remains
-            # separately visible and the API combines both into one safety state.
             if self._execution_uncertain:
                 return "execution_uncertain"
             if self.audit_integrity_state() == "failed":
@@ -220,20 +196,10 @@ class ExecutionSafeIncidentService(IncidentService):
 
     def _require_checkpoint_consistency(self) -> None:
         if self._execution_uncertain and not self._allow_uncertainty_investigation:
-            raise RuntimeError(
-                "remediation execution is uncertain; reload durable state and reconcile before lifecycle changes"
-            )
+            raise RuntimeError("remediation execution is uncertain; reload durable state and reconcile before lifecycle changes")
         super()._require_checkpoint_consistency()
 
     def _require_reconciliation_checkpoint_consistency(self) -> None:
-        """Validate durable consistency without disabling the uncertainty barrier.
-
-        Reconciliation is the one lifecycle operation that must be allowed to run
-        while ``_execution_uncertain`` is true. Temporarily bypass only that local
-        uncertainty guard while still executing the full cooperative consistency
-        chain (including anchored/in-flight, audit-integrity, and checkpoint-conflict
-        checks). The flag is restored before any provider lookup or investigation.
-        """
         previous = self._allow_uncertainty_investigation
         self._allow_uncertainty_investigation = True
         try:
@@ -242,7 +208,6 @@ class ExecutionSafeIncidentService(IncidentService):
             self._allow_uncertainty_investigation = previous
 
     def _persist_dispatching_barrier(self, snapshot: IncidentSnapshot) -> bool:
-        """Persist ``dispatching`` and the current audit head before provider contact."""
         requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
         store = self._phase_capable_store()
         if not requires or store is None:
@@ -269,18 +234,14 @@ class ExecutionSafeIncidentService(IncidentService):
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = operation_id
                 self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
-                self._execution_reconciliation_reason = (
-                    "durable_dispatching" if dispatch_barrier else "phase_unavailable"
-                )
+                self._execution_reconciliation_reason = "durable_dispatching" if dispatch_barrier else "phase_unavailable"
                 self._execution_reloaded = False
                 raise
             except Exception:
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = operation_id
                 self._uncertain_execution_phase = "dispatching" if dispatch_barrier else "unknown"
-                self._execution_reconciliation_reason = (
-                    "durable_dispatching" if dispatch_barrier else "phase_unavailable"
-                )
+                self._execution_reconciliation_reason = "durable_dispatching" if dispatch_barrier else "phase_unavailable"
                 self._execution_reloaded = True
                 raise
 
@@ -288,6 +249,7 @@ class ExecutionSafeIncidentService(IncidentService):
         with self._lock:
             was_uncertain = self._execution_uncertain
             prior_phase = self._uncertain_execution_phase
+            prior_operation_id = self._execution_uncertain_operation_id
             snapshot = super().reload_checkpoint_after_conflict()
             if not was_uncertain:
                 return snapshot
@@ -299,6 +261,17 @@ class ExecutionSafeIncidentService(IncidentService):
 
             requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
             if not requires:
+                # A local/non-reconciling adapter can still have performed its side
+                # effect before the checkpoint CAS failed. Reloading the durable
+                # winner must therefore not release the no-replay barrier. Retain
+                # uncertainty and require the same explicit reconciliation entry
+                # point, whose provider state is intentionally treated as not_found
+                # and whose fresh Grafana investigation is the only recovery proof.
+                self._execution_uncertain = True
+                self._execution_uncertain_operation_id = prior_operation_id
+                self._uncertain_execution_phase = "unknown"
+                self._execution_reconciliation_reason = "phase_unavailable"
+                self._execution_reloaded = True
                 return snapshot
 
             if phase == "approved":
@@ -338,31 +311,21 @@ class ExecutionSafeIncidentService(IncidentService):
         return result if result in {"accepted", "not_found"} else "unknown"
 
     def reconcile_execution_uncertainty(self, *, actor: str = "stageguard") -> IncidentSnapshot:
-        """Resolve uncertain execution without replaying the approved action."""
         with self._lock:
             if not self._execution_uncertain:
                 raise RuntimeError("no uncertain remediation execution requires reconciliation")
             if not self._execution_reloaded:
                 raise RuntimeError("durable checkpoint winner must be reloaded before reconciliation")
             self._require_reconciliation_checkpoint_consistency()
-
             reason = self.execution_reconciliation_reason()
             provider_state = self._provider_reconciliation()
             self._record_reconciliation_attempt(actor=actor, result=provider_state, reason=reason)
             if provider_state == "unknown":
                 raise RuntimeError("remediation provider idempotency state is unresolved")
-
             self._allow_uncertainty_investigation = True
             try:
                 snapshot = super().investigate(actor=actor)
-                self._record(
-                    snapshot.incident_id,
-                    self._reconciliation_audit_event_type("recovered", provider_state, reason),
-                    actor.strip() or "stageguard",
-                    {"result": provider_state, "reason": reason},
-                )
-            except Exception:
-                raise
+                self._record(snapshot.incident_id, self._reconciliation_audit_event_type("recovered", provider_state, reason), actor.strip() or "stageguard", {"result": provider_state, "reason": reason})
             else:
                 self._clear_execution_uncertainty()
                 return snapshot
