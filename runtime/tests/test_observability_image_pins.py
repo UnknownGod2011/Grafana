@@ -63,6 +63,43 @@ class ObservabilityImagePinTests(unittest.TestCase):
         self.assertIn("--max-loki-log-limit", block)
         self.assertNotIn("--enable-write-tools", block)
 
+    def test_grafana_mcp_transport_and_tool_surface_are_fail_closed(self) -> None:
+        """Prevent compose edits from silently widening StageGuard's evidence plane.
+
+        Upstream mcp-grafana exposes optional write-capable and open-ended tool
+        categories. StageGuard intentionally needs only datasource discovery plus
+        Prometheus/Loki reads over stdio. Keep this assertion textual so it runs
+        without Docker, credentials, or a live Grafana instance.
+        """
+        block = self._service_block("mcp")
+        self.assertIn("      - -t\n      - stdio", block)
+        self.assertIn("      - --enabled-tools\n      - datasource,prometheus,loki", block)
+        self.assertIn("      - --disable-write", block)
+        self.assertIn("      - --disable-proxied", block)
+        self.assertNotIn("--enable-query", block)
+        self.assertNotIn("streamable-http", block)
+        self.assertNotIn("      - sse", block)
+        for forbidden_category in (
+            "admin",
+            "assistant",
+            "incident",
+            "alerting",
+            "dashboard",
+            "folder",
+            "oncall",
+            "sift",
+            "annotations",
+            "rendering",
+            "snapshot",
+            "sql",
+            "runpanelquery",
+            "proxied",
+        ):
+            with self.subTest(category=forbidden_category):
+                self.assertNotIn(
+                    f"datasource,prometheus,loki,{forbidden_category}", block
+                )
+
     def test_observability_services_never_use_floating_latest_tag(self) -> None:
         for service in ("prometheus", "grafana", "mcp"):
             with self.subTest(service=service):
