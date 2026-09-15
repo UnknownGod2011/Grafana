@@ -4,6 +4,7 @@ import pytest
 
 from runtime.mcp_smoke import (
     MAX_SERVER_INFO_FIELD_CHARS,
+    MAX_TOOL_NAME_CHARS,
     McpError,
     _assert_initialize_result,
     _assert_read_only_tool_surface,
@@ -93,6 +94,24 @@ def test_tool_map_rejects_duplicate_names() -> None:
 def test_tool_map_rejects_malformed_advertisements(payload: dict[str, object]) -> None:
     with pytest.raises(McpError):
         _tool_map(payload)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "x" * (MAX_TOOL_NAME_CHARS + 1),
+        "query_prometheus\nforged-log-line",
+        "list_datasources\x7fhidden",
+    ],
+)
+def test_tool_map_rejects_unsafe_names(name: str) -> None:
+    with pytest.raises(McpError, match="unsafe name"):
+        _tool_map({"tools": [_read_tool(name)]})
+
+
+def test_tool_map_accepts_name_at_bound() -> None:
+    name = "t" * MAX_TOOL_NAME_CHARS
+    assert list(_tool_map({"tools": [_read_tool(name)]})) == [name]
 
 
 def test_read_only_surface_requires_stageguard_evidence_tools() -> None:
