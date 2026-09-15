@@ -33,32 +33,31 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 
-## Run log — 2026-09-15 — timeline integration validation boundary
+## Run log — 2026-09-15 — blob-safe timeline integration path
 
 ### Inspected at start
 
-Read `progress.md` completely first. Re-read `runtime/incident_service.py` around `_timeline_event()` and `audit_timeline()`, and re-read the complete centralized `runtime/timeline_projection.py`. Confirmed the production gap is exactly as recorded: public timeline projection still constructs payloads from `_TIMELINE_PAYLOAD_FIELDS` locally, while `timeline_payload()` already contains the intended fail-closed static policy plus canonical reconciliation fallback.
+Read `progress.md` completely first. Re-read `runtime/incident_service.py` and confirmed `_timeline_event()` still constructs public payloads directly from `_TIMELINE_PAYLOAD_FIELDS`; the centralized `timeline_payload()` integration therefore remains the exact production gap.
 
 ### Changes / actions
 
-- Reconfirmed the minimal production edit required: import `timeline_payload` and replace the two local `_timeline_event()` payload-construction lines with `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`.
-- Retried a fresh repository clone specifically to obtain a patch-capable, executable checkout before touching lifecycle-critical code. The clone failed before checkout because the runner still cannot resolve `github.com`.
-- Checked the current head commit status through the authenticated GitHub connector. No commit status checks are attached, so there is no existing CI result that can substitute for local validation and no CI workflow was triggered.
-- Deliberately made no runtime-code mutation through the connector's whole-file replacement operation: `incident_service.py` is large and the full-file connector response is truncated, so reconstructing/replacing it would create a material corruption risk for a two-line lifecycle edit.
+- Retried a fresh repository clone; DNS still fails with `Could not resolve host: github.com`, so no executable checkout was obtained.
+- Identified and validated a safer connector path that was not available in prior runs: fetching the exact `incident_service.py` blob by SHA returns the complete source rather than the truncated whole-file contents response. This removes the previous uncertainty about reconstructing lifecycle-critical source from incomplete connector output.
+- Confirmed the current `incident_service.py` blob SHA is `36e59ee38228d761be5a3e3117afa041f9cd202f`, current main head is `b4f76a9977573bb9438b5c9414cb00beb51ae4fe`, and the base tree is `90433d5f57738df2fea38fcb3836e94f7ad4005b`.
+- Did not mutate `incident_service.py` in this run because the connector still exposes replacement/Git-data writes rather than a line patch, and the edit must preserve the complete fetched blob exactly except for the import and projector call. The complete blob is now obtainable, so this is no longer blocked on source truncation.
 
 ### Checks / results
 
-- Authenticated GitHub connector reads succeeded.
-- Direct clone result: `fatal: unable to access 'https://github.com/UnknownGod2011/grafana.git/': Could not resolve host: github.com`.
-- Current head has no attached commit-status checks.
+- Authenticated GitHub repository, ref, commit, and exact blob reads succeeded.
+- Direct clone still fails on DNS before checkout.
 - No tests were executed and no new green claim is made.
 - No GitHub Actions workflow was created or triggered. No credentials, Grafana Cloud, Gemini, Google Cloud resources, remediation provider, or unrelated repository was touched.
 
 ### Decisions
 
-1. Preserve the production lifecycle file rather than perform an unverifiable whole-file reconstruction from truncated connector output.
-2. Do not add another helper, speculative test, or duplicate projection layer merely to create activity; the implementation helper and contract coverage already exist and the remaining defect is the public integration itself.
-3. Treat DNS failure as a transient execution-environment blocker rather than a project blocker; continue attempting the minimal validated integration on subsequent runs.
+1. Use exact-blob retrieval as the source of truth for any connector-based lifecycle-file replacement; never reconstruct a large source file from a truncated contents response.
+2. Keep the required production change minimal: import `timeline_payload` and delegate `_timeline_event()` payload construction to `timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)`.
+3. Preserve the no-noisy-CI constraint; validation remains local/focused when an executable checkout becomes available.
 
 ### Blockers / unknowns
 
@@ -70,4 +69,4 @@ Read `progress.md` completely first. Re-read `runtime/incident_service.py` aroun
 
 ## Single best next step
 
-As soon as a patch-capable checkout is available, wire `timeline_payload()` into `_timeline_event()`, add the end-to-end public `audit_timeline()` reconciliation disclosure/non-disclosure regression, run that focused suite, and only then continue lifecycle changes.
+Use the complete exact blob as the basis for a minimal connector replacement of `runtime/incident_service.py`, wiring `timeline_payload()` into `_timeline_event()` without altering unrelated lifecycle code; then add the public `audit_timeline()` disclosure/non-disclosure regression and execute it as soon as a local checkout is available.
