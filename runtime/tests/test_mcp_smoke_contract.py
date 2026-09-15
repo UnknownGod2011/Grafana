@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from runtime.mcp_smoke import (
+    MAX_SERVER_INFO_FIELD_CHARS,
     McpError,
     _assert_initialize_result,
     _assert_read_only_tool_surface,
@@ -46,6 +47,33 @@ def test_initialize_contract_rejects_malformed_negotiation(payload: dict[str, ob
 def test_initialize_contract_rejects_protocol_downgrade_or_mismatch() -> None:
     with pytest.raises(McpError, match="protocol negotiation mismatch"):
         _assert_initialize_result(_initialize_result("2024-11-05"), "2025-06-18")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "x" * (MAX_SERVER_INFO_FIELD_CHARS + 1)),
+        ("version", "x" * (MAX_SERVER_INFO_FIELD_CHARS + 1)),
+        ("name", "mcp-grafana\nforged-log-line"),
+        ("version", "1.4.1\x7fhidden"),
+    ],
+)
+def test_initialize_contract_rejects_unsafe_server_metadata(field: str, value: str) -> None:
+    payload = _initialize_result()
+    server_info = payload["serverInfo"]
+    assert isinstance(server_info, dict)
+    server_info[field] = value
+    with pytest.raises(McpError, match=f"serverInfo.{field}"):
+        _assert_initialize_result(payload, "2025-06-18")
+
+
+def test_initialize_contract_accepts_server_metadata_at_bound() -> None:
+    payload = _initialize_result()
+    server_info = payload["serverInfo"]
+    assert isinstance(server_info, dict)
+    server_info["name"] = "n" * MAX_SERVER_INFO_FIELD_CHARS
+    server_info["version"] = "v" * MAX_SERVER_INFO_FIELD_CHARS
+    _assert_initialize_result(payload, "2025-06-18")
 
 
 def test_tool_map_rejects_duplicate_names() -> None:
