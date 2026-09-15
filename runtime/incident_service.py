@@ -28,6 +28,7 @@ from remediation import (
     verify_recovery,
 )
 from telemetry import DEFAULT_TELEMETRY_PROFILE, TelemetryProfile
+from timeline_projection import timeline_payload
 
 
 class AuditSink(Protocol):
@@ -192,8 +193,7 @@ def _actor_fingerprint(actor: str) -> str:
 
 
 def _timeline_event(event: AuditEvent) -> dict[str, object]:
-    allowed = _TIMELINE_PAYLOAD_FIELDS.get(event.event_type, ())
-    payload = {key: event.payload[key] for key in allowed if key in event.payload}
+    payload = timeline_payload(event.event_type, event.payload, _TIMELINE_PAYLOAD_FIELDS)
     return {
         "sequence": event.sequence,
         "timestamp_unix_ms": event.timestamp_unix_ms,
