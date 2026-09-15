@@ -173,7 +173,17 @@ class ExecutionSafeIncidentService(IncidentService):
     def _guard_restored_production_approval(self) -> None:
         snapshot = self._snapshot
         requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
-        if snapshot is None or snapshot.approval is None or snapshot.outcome is not None or not requires:
+        phase_capable = self._phase_capable_store() is not None
+        if snapshot is None or snapshot.approval is None or snapshot.outcome is not None:
+            return
+        # Production adapters must fail closed even for legacy stores where the
+        # pre-side-effect phase is unavailable. Local adapters historically do
+        # not persist a dispatch barrier during ordinary execution, so a legacy
+        # local pending approval remains safely executable. However, a v2+
+        # phase-capable store can contain ``dispatching`` after a local adapter's
+        # explicit uncertainty-reconciliation attempt. A crash at that point
+        # must preserve the no-replay barrier across restart as well.
+        if not requires and not phase_capable:
             return
         phase = self._restored_execution_phase()
         if phase == "approved":
@@ -261,12 +271,6 @@ class ExecutionSafeIncidentService(IncidentService):
 
             requires = bool(getattr(self._remediation, "requires_operation_reconciliation", False))
             if not requires:
-                # A local/non-reconciling adapter can still have performed its side
-                # effect before the checkpoint CAS failed. Reloading the durable
-                # winner must therefore not release the no-replay barrier. Retain
-                # uncertainty and require the same explicit reconciliation entry
-                # point, whose provider state is intentionally treated as not_found
-                # and whose fresh Grafana investigation is the only recovery proof.
                 self._execution_uncertain = True
                 self._execution_uncertain_operation_id = prior_operation_id
                 self._uncertain_execution_phase = "unknown"
