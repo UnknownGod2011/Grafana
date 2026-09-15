@@ -92,6 +92,21 @@ def test_static_projection_rejects_non_finite_numbers():
     assert timeline_payload("event", {"sample": 3, "ratio": float("inf")}, fields) == {"sample": 3}
 
 
+def test_static_projection_bounds_arbitrary_precision_integers():
+    fields = {"event": ("minimum", "maximum", "too_large", "too_small")}
+    maximum = (1 << 63) - 1
+    assert timeline_payload(
+        "event",
+        {
+            "minimum": -maximum,
+            "maximum": maximum,
+            "too_large": 1 << 4096,
+            "too_small": -(1 << 4096),
+        },
+        fields,
+    ) == {"minimum": -maximum, "maximum": maximum}
+
+
 def test_central_projection_delegates_only_canonical_reconciliation_events():
     payload = {
         "result": "accepted",
