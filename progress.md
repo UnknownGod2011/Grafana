@@ -10,7 +10,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - StageGuard's supported MCP deployment is stdio-only and its compose evidence surface is restricted to `datasource,prometheus,loki` with writes and proxied tools disabled.
-- The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid capabilities/server identity before StageGuard trusts its advertised tool surface.
+- The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -36,37 +36,35 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — Grafana MCP initialize negotiation hardening
+## Run log — 2026-09-16 — Grafana MCP server-metadata hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first. Attempted the requested fresh checkout and focused pytest execution; checkout again failed before repository materialization because the runner could not resolve `github.com`. Inspected `runtime/mcp_smoke.py` and its contract tests through the GitHub connector instead. The existing smoke validated JSON-RPC framing, bounded timeouts/frames, required evidence tools, and explicit read-only annotations, but it accepted the initialize result without validating the negotiated protocol version or basic server metadata.
+Read `progress.md` completely first. Inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py` through the GitHub connector. The prior run correctly added exact MCP protocol negotiation and structural `serverInfo` checks, but accepted unbounded/control-character-bearing server name/version values and later emitted the peer-supplied metadata in release-smoke JSON output.
 
 ### Changes / actions
 
-- Added `_assert_initialize_result()` to the Grafana MCP release smoke.
-- The smoke now fails closed if `protocolVersion` is absent/malformed or differs from the exact protocol StageGuard requested.
-- It also requires initialize `capabilities` to be an object and `serverInfo` to contain non-empty string `name` and `version` fields before sending `notifications/initialized` and trusting the tool advertisement.
-- Added the negotiated protocol to successful smoke output for release evidence.
-- Expanded `runtime/tests/test_mcp_smoke_contract.py` with valid negotiation, malformed initialize payload, incomplete server metadata, and protocol mismatch/downgrade regressions.
+- Added `MAX_SERVER_INFO_FIELD_CHARS = 128` and centralized `_bounded_server_info_field()` validation.
+- MCP initialize now fails closed when `serverInfo.name` or `serverInfo.version` is empty, exceeds 128 characters, or contains ASCII control/DEL characters.
+- This bounds peer-controlled metadata before it is trusted or printed into release evidence, reducing malformed-peer/log-forging and pathological-output risk.
+- Expanded `runtime/tests/test_mcp_smoke_contract.py` with oversized-name/version, newline/control-character, DEL-character, and exact-boundary regressions.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Fresh checkout/test command failed at `git clone` with `Could not resolve host: github.com`; this remains a transient runner/network blocker.
 - GitHub connector reads and source/test commits succeeded.
-- The new tests were not executed in a repository checkout, so no green pytest claim is made.
+- This runner still does not provide a materialized executable repository checkout, so the new tests were not executed and no green pytest claim is made.
 - No GitHub Actions workflow was created or triggered.
 
 ### Decisions
 
-1. Treat MCP initialize negotiation as part of the release trust boundary rather than trusting a peer solely because later `tools/list` looks read-only.
-2. Require exact protocol agreement for this controlled release smoke. A server-side protocol change should become an explicit compatibility event, not an implicit acceptance.
-3. Validate only stable structural server identity (`name`/`version`) rather than pinning a server-reported name/version string in code; the Docker image pin remains the deployment artifact control.
+1. Treat MCP peer identity as untrusted input even in a pinned-container release smoke; validate it before rendering it into operator/release output.
+2. Keep server identity validation structural rather than pinning the reported name/version string. The Docker image pin remains the artifact identity control, while bounded metadata avoids coupling to harmless upstream naming changes.
+3. Preserve the exact protocol-agreement gate and read-only tool-surface gate added in prior runs.
 
 ### Blockers / unknowns
 
-- The latest MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- The latest MCP negotiation/metadata/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
