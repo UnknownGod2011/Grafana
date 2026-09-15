@@ -19,6 +19,7 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_STDIO_LINE_CHARS = 1_048_576
 MAX_STDOUT_QUEUE_FRAMES = 16
+MAX_SERVER_INFO_FIELD_CHARS = 128
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -55,6 +56,16 @@ def _request_timeout_seconds(raw: str | None) -> float:
     return value
 
 
+def _bounded_server_info_field(server_info: dict[str, Any], field: str) -> str:
+    """Return bounded printable MCP server metadata or fail closed."""
+    value = server_info.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise McpError("initialize returned incomplete serverInfo")
+    if len(value) > MAX_SERVER_INFO_FIELD_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise McpError(f"initialize returned unsafe serverInfo.{field}")
+    return value
+
+
 def _assert_initialize_result(result: dict[str, Any], requested_protocol: str) -> None:
     """Fail closed when the MCP peer negotiates an unexpected protocol contract."""
     negotiated = result.get("protocolVersion")
@@ -71,10 +82,8 @@ def _assert_initialize_result(result: dict[str, Any], requested_protocol: str) -
     server_info = result.get("serverInfo")
     if not isinstance(server_info, dict):
         raise McpError("initialize returned malformed serverInfo")
-    name = server_info.get("name")
-    version = server_info.get("version")
-    if not isinstance(name, str) or not name.strip() or not isinstance(version, str) or not version.strip():
-        raise McpError("initialize returned incomplete serverInfo")
+    _bounded_server_info_field(server_info, "name")
+    _bounded_server_info_field(server_info, "version")
 
 
 class StdioClient:
