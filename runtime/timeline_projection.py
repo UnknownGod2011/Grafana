@@ -20,6 +20,9 @@ _RECONCILIATION_REASONS = frozenset({
     "post_dispatch_checkpoint_regression",
     "phase_unavailable",
 })
+# Audit data is durable and may originate outside the current process. Bound
+# parser work before splitting attacker- or corruption-controlled event names.
+_MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
 
 
 def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, object]) -> dict[str, str]:
@@ -27,11 +30,15 @@ def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, objec
 
     Projection is accepted only when the event name is canonical and its encoded
     result/reason exactly match the bounded payload. This prevents a malformed,
-    corrupted, or future audit event from using a trusted prefix to expose data
-    under contradictory semantics. Unknown inputs fail closed to an empty
-    projection.
+    corrupted, oversized, or future audit event from using a trusted prefix to
+    expose data under contradictory semantics. Unknown inputs fail closed to an
+    empty projection.
     """
-    if not isinstance(event_type, str) or not event_type.startswith(_RECONCILIATION_PREFIX):
+    if (
+        not isinstance(event_type, str)
+        or len(event_type) > _MAX_RECONCILIATION_EVENT_TYPE_LENGTH
+        or not event_type.startswith(_RECONCILIATION_PREFIX)
+    ):
         return {}
     if not isinstance(payload, Mapping):
         return {}
