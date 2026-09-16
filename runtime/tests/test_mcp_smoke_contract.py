@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 
 from runtime.mcp_smoke import (
+    MAX_DIAGNOSTIC_CHARS,
     MAX_SERVER_INFO_FIELD_CHARS,
     MAX_TOOL_NAME_CHARS,
     McpError,
     _assert_initialize_result,
     _assert_read_only_tool_surface,
+    _assert_tool_result,
+    _bounded_diagnostic,
     _request_timeout_seconds,
     _tool_map,
 )
@@ -146,3 +149,23 @@ def test_request_timeout_rejects_unsafe_values(raw: str) -> None:
 
 def test_request_timeout_accepts_bounded_finite_value() -> None:
     assert _request_timeout_seconds("2.5") == 2.5
+
+
+def test_bounded_diagnostic_preserves_small_payload_and_escapes_controls() -> None:
+    rendered = _bounded_diagnostic({"message": "bad\nforged"})
+    assert "bad\\nforged" in rendered
+    assert "\n" not in rendered
+    assert "truncated" not in rendered
+
+
+def test_bounded_diagnostic_truncates_large_peer_payload() -> None:
+    rendered = _bounded_diagnostic("x" * (MAX_DIAGNOSTIC_CHARS * 2))
+    assert len(rendered) < MAX_DIAGNOSTIC_CHARS + 100
+    assert "<truncated " in rendered
+
+
+def test_tool_error_diagnostic_is_bounded() -> None:
+    with pytest.raises(McpError) as captured:
+        _assert_tool_result("query_prometheus", {"isError": True, "content": "x" * (MAX_DIAGNOSTIC_CHARS * 4)})
+    assert len(str(captured.value)) < MAX_DIAGNOSTIC_CHARS + 200
+    assert "<truncated " in str(captured.value)
