@@ -21,28 +21,21 @@ def _read_tool(name: str) -> dict[str, object]:
 
 
 def _initialize_result(protocol: str = "2025-06-18") -> dict[str, object]:
-    return {
-        "protocolVersion": protocol,
-        "capabilities": {"tools": {}},
-        "serverInfo": {"name": "mcp-grafana", "version": "1.4.1"},
-    }
+    return {"protocolVersion": protocol, "capabilities": {"tools": {}}, "serverInfo": {"name": "mcp-grafana", "version": "1.4.1"}}
 
 
 def test_initialize_contract_accepts_expected_protocol_and_metadata() -> None:
     _assert_initialize_result(_initialize_result(), "2025-06-18")
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {},
-        {"protocolVersion": None, "capabilities": {}, "serverInfo": {"name": "mcp-grafana", "version": "1.4.1"}},
-        {"protocolVersion": "2025-06-18", "capabilities": [], "serverInfo": {"name": "mcp-grafana", "version": "1.4.1"}},
-        {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": None},
-        {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "", "version": "1.4.1"}},
-        {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "mcp-grafana", "version": ""}},
-    ],
-)
+@pytest.mark.parametrize("payload", [
+    {},
+    {"protocolVersion": None, "capabilities": {}, "serverInfo": {"name": "mcp-grafana", "version": "1.4.1"}},
+    {"protocolVersion": "2025-06-18", "capabilities": [], "serverInfo": {"name": "mcp-grafana", "version": "1.4.1"}},
+    {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": None},
+    {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "", "version": "1.4.1"}},
+    {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "mcp-grafana", "version": ""}},
+])
 def test_initialize_contract_rejects_malformed_negotiation(payload: dict[str, object]) -> None:
     with pytest.raises(McpError):
         _assert_initialize_result(payload, "2025-06-18")
@@ -53,15 +46,16 @@ def test_initialize_contract_rejects_protocol_downgrade_or_mismatch() -> None:
         _assert_initialize_result(_initialize_result("2024-11-05"), "2025-06-18")
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("name", "x" * (MAX_SERVER_INFO_FIELD_CHARS + 1)),
-        ("version", "x" * (MAX_SERVER_INFO_FIELD_CHARS + 1)),
-        ("name", "mcp-grafana\nforged-log-line"),
-        ("version", "1.4.1\x7fhidden"),
-    ],
-)
+@pytest.mark.parametrize(("field", "value"), [
+    ("name", "x" * (MAX_SERVER_INFO_FIELD_CHARS + 1)),
+    ("version", "x" * (MAX_SERVER_INFO_FIELD_CHARS + 1)),
+    ("name", "mcp-grafana\nforged-log-line"),
+    ("version", "1.4.1\x7fhidden"),
+    ("name", "mcp-grafana\x85next-line"),
+    ("version", "1.4.1\u2028forged"),
+    ("name", "mcp-\u202egrafana"),
+    ("version", "1.4.1\u2066hidden\u2069"),
+])
 def test_initialize_contract_rejects_unsafe_server_metadata(field: str, value: str) -> None:
     payload = _initialize_result()
     server_info = payload["serverInfo"]
@@ -80,33 +74,34 @@ def test_initialize_contract_accepts_server_metadata_at_bound() -> None:
     _assert_initialize_result(payload, "2025-06-18")
 
 
+def test_initialize_contract_accepts_printable_unicode_metadata() -> None:
+    payload = _initialize_result()
+    server_info = payload["serverInfo"]
+    assert isinstance(server_info, dict)
+    server_info["name"] = "mcp-grafana-東京"
+    _assert_initialize_result(payload, "2025-06-18")
+
+
 def test_tool_map_rejects_duplicate_names() -> None:
     with pytest.raises(McpError, match="duplicate tool name"):
         _tool_map({"tools": [_read_tool("query_prometheus"), _read_tool("query_prometheus")]})
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"tools": {}},
-        {"tools": [None]},
-        {"tools": [{"name": ""}]},
-        {"tools": [{"name": 42}]},
-    ],
-)
+@pytest.mark.parametrize("payload", [{"tools": {}}, {"tools": [None]}, {"tools": [{"name": ""}]}, {"tools": [{"name": 42}]}])
 def test_tool_map_rejects_malformed_advertisements(payload: dict[str, object]) -> None:
     with pytest.raises(McpError):
         _tool_map(payload)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "x" * (MAX_TOOL_NAME_CHARS + 1),
-        "query_prometheus\nforged-log-line",
-        "list_datasources\x7fhidden",
-    ],
-)
+@pytest.mark.parametrize("name", [
+    "x" * (MAX_TOOL_NAME_CHARS + 1),
+    "query_prometheus\nforged-log-line",
+    "list_datasources\x7fhidden",
+    "query_prometheus\x85next-line",
+    "query_prometheus\u2029forged",
+    "query_\u202eprometheus",
+    "query_\u2067prometheus\u2069",
+])
 def test_tool_map_rejects_unsafe_names(name: str) -> None:
     with pytest.raises(McpError, match="unsafe name"):
         _tool_map({"tools": [_read_tool(name)]})
@@ -117,6 +112,11 @@ def test_tool_map_accepts_name_at_bound() -> None:
     assert list(_tool_map({"tools": [_read_tool(name)]})) == [name]
 
 
+def test_tool_map_accepts_printable_unicode_name() -> None:
+    name = "query_prometheus_東京"
+    assert list(_tool_map({"tools": [_read_tool(name)]})) == [name]
+
+
 def test_read_only_surface_requires_stageguard_evidence_tools() -> None:
     tools = {"list_datasources": _read_tool("list_datasources")}
     with pytest.raises(McpError, match="query_prometheus"):
@@ -124,20 +124,13 @@ def test_read_only_surface_requires_stageguard_evidence_tools() -> None:
 
 
 def test_read_only_surface_rejects_any_tool_without_explicit_read_only_hint() -> None:
-    tools = {
-        "list_datasources": _read_tool("list_datasources"),
-        "query_prometheus": _read_tool("query_prometheus"),
-        "future_tool": {"name": "future_tool", "annotations": {}},
-    }
+    tools = {"list_datasources": _read_tool("list_datasources"), "query_prometheus": _read_tool("query_prometheus"), "future_tool": {"name": "future_tool", "annotations": {}}}
     with pytest.raises(McpError, match="future_tool"):
         _assert_read_only_tool_surface(tools)
 
 
 def test_read_only_surface_accepts_required_tools_when_explicitly_read_only() -> None:
-    tools = {
-        "list_datasources": _read_tool("list_datasources"),
-        "query_prometheus": _read_tool("query_prometheus"),
-    }
+    tools = {"list_datasources": _read_tool("list_datasources"), "query_prometheus": _read_tool("query_prometheus")}
     _assert_read_only_tool_surface(tools)
 
 
