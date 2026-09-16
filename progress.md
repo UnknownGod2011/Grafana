@@ -24,7 +24,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Timeline event identifiers are non-empty, terminal-safe strings bounded to 160 characters before policy lookup or reconciliation parsing.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
 - Static timeline field policy itself is bounded to 64 unique, non-empty, terminal-safe string keys of at most 128 characters; malformed, duplicate, oversized, string-as-iterable, and non-terminating allowlists fail closed.
-- Timeline display strings reject C0/C1 controls, DEL, Unicode line/paragraph separators, and the complete Unicode `Cf` format-control category, preventing invisible zero-width/BOM/bidi presentation manipulation while retaining ordinary printable international text and combining marks.
+- Timeline display strings reject C0/C1 controls, DEL, Unicode line/paragraph separators, the complete Unicode `Cf` format-control category, and Unicode `Cs` surrogate code points. This prevents invisible presentation manipulation and invalid UTF-8 response text while retaining ordinary printable international text, combining marks, and emoji.
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 - Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
 
@@ -37,32 +37,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Unicode format-control timeline hardening
+## Latest run — 2026-09-17 — Unicode surrogate timeline hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the runtime tree, `runtime/timeline_projection.py`, and `runtime/tests/test_timeline_projection.py`. The existing display boundary explicitly rejected known bidi controls but still allowed other invisible Unicode format controls such as ZERO WIDTH SPACE (U+200B), ZWNJ (U+200C), ZWJ (U+200D), and BOM/ZWNBSP (U+FEFF). These can make operator-visible identifiers, field names, or values visually differ from their stored representation.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The central display validator rejected controls and Unicode format characters but still accepted Unicode surrogate code points (`Cs`). Python strings can contain lone surrogates, while normal UTF-8 encoding rejects them; allowing one into an operator timeline could therefore turn malformed durable/plugin data into a JSON/HTTP response-encoding failure.
 
 ### Changes / actions
 
-- Replaced the incomplete explicit bidi-format denylist in `_safe_display_string()` with rejection of the complete Unicode general category `Cf` via Python `unicodedata`, while retaining explicit rejection of U+2028/U+2029 line separators.
-- Added regressions for zero-width space, ZWNJ, ZWJ, and BOM across static values, event identifiers, reconciliation identifiers, and static field names.
-- Added a positive regression proving combining marks remain accepted, alongside the existing multilingual printable-text coverage.
-- Kept the change dependency-free by using Python's standard library Unicode database.
+- Hardened `_safe_display_string()` to reject the complete Unicode `Cs` surrogate category in addition to the existing `Cf` and line/control restrictions.
+- Kept the policy centralized so the protection applies to event identifiers, reconciliation identifiers, static field names, and allowlisted string values.
+- Added regressions for lone high-surrogate injection across reconciliation event types, ordinary event identifiers, static field names, and static values.
+- Preserved printable international Unicode, combining marks, and ordinary emoji.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation committed as `c722b8167fcede22919f400cf317d371d6f8c73d`.
-- Regression tests committed as `daf3f6886d65573af298f4e9829bbf165ebbe5d7`.
+- Implementation committed as `39830ff0323c61c223f4d3517b509378ba951066`.
+- Regression tests committed as `00b469ac5a145d18140c2bbb7e12654636f90d4e`.
 - This connector runner does not expose an executable checkout, so the regressions were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Reject the Unicode `Cf` category at the operator-display trust boundary rather than manually chasing individual invisible/presentation controls as Unicode evolves.
-2. Preserve printable international text and combining marks; this is not an ASCII-only policy.
-3. Apply the central validator consistently to event identifiers, allowlisted field names, and string values.
+1. Reject surrogate code points at the operator-display boundary instead of relying on downstream JSON/HTTP encoders to fail unpredictably.
+2. Use Unicode general category `Cs`, covering both high and low surrogate ranges without maintaining code-point lists.
+3. Preserve valid non-ASCII operator text; this remains a Unicode-safe rather than ASCII-only boundary.
 
 ### Blockers / unknowns
 
