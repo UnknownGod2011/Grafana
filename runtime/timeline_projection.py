@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from itertools import islice
 from typing import Mapping
 
 _RECONCILIATION_PREFIX = "remediation_reconciliation_"
@@ -27,6 +28,10 @@ _RECONCILIATION_REASONS = frozenset({
 _MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
 _MAX_STATIC_STRING_LENGTH = 512
 _MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
+# Static fields are policy configuration, but keeping projection work bounded
+# prevents a malformed plugin/configuration from hanging an operator API request
+# with an infinite iterator or creating an unexpectedly wide response.
+_MAX_STATIC_FIELDS = 64
 
 
 def _safe_display_string(value: str) -> bool:
@@ -71,6 +76,19 @@ def _safe_static_value(value: object) -> bool:
     if isinstance(value, float):
         return math.isfinite(value)
     return False
+
+
+def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
+    """Materialize a small allowlist or fail closed when policy is malformed."""
+    if isinstance(allowed, (str, bytes)):
+        return None
+    try:
+        fields = tuple(islice(iter(allowed), _MAX_STATIC_FIELDS + 1))
+    except (TypeError, ValueError):
+        return None
+    if len(fields) > _MAX_STATIC_FIELDS or any(not isinstance(key, str) for key in fields):
+        return None
+    return fields
 
 
 def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, object]) -> dict[str, str]:
@@ -129,11 +147,14 @@ def timeline_payload(
 
     allowed = static_fields.get(event_type)
     if allowed is not None:
+        fields = _bounded_static_fields(allowed)
+        if fields is None:
+            return {}
         try:
             return {
                 key: payload[key]
-                for key in allowed
-                if isinstance(key, str) and key in payload and _safe_static_value(payload[key])
+                for key in fields
+                if key in payload and _safe_static_value(payload[key])
             }
         except (TypeError, ValueError):
             return {}
