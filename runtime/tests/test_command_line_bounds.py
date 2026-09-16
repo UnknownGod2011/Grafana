@@ -76,3 +76,28 @@ def test_windows_launcher_rejects_bidi_override_after_quote_normalization() -> N
 def test_launcher_still_rejects_network_transport_inside_bounds() -> None:
     with pytest.raises(ValueError, match="network transport is forbidden"):
         split_command("mcp-grafana --transport streamable-http")
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "grafana/mcp-grafana:1.4.1",
+        "docker.io/grafana/mcp-grafana:1.4.1",
+        "index.docker.io/grafana/mcp-grafana:1.4.1",
+        "registry-1.docker.io/grafana/mcp-grafana:1.4.1",
+        "docker.io/Grafana/MCP-Grafana@sha256:deadbeef",
+    ],
+)
+def test_official_docker_hub_image_aliases_require_explicit_stdio(image: str) -> None:
+    with pytest.raises(ValueError, match="explicitly set -t stdio"):
+        split_command(f"docker run --rm {image}")
+
+
+def test_registry_qualified_official_image_accepts_explicit_stdio() -> None:
+    command = "docker run --rm docker.io/grafana/mcp-grafana:1.4.1 -t stdio"
+    assert split_command(command) == command.split()
+
+
+def test_unrelated_registry_namespace_is_not_misidentified_as_official_image() -> None:
+    command = "docker run --rm example.invalid/grafana/mcp-grafana:1.4.1"
+    assert split_command(command) == command.split()
