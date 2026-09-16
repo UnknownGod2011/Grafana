@@ -47,7 +47,7 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
 
     def test_unsafe_reconciliation_event_types_fail_closed(self) -> None:
         payload = {"result": "accepted", "reason": "durable_dispatching"}
-        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "x" * 161):
+        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u061c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200e", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200f", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "x" * 161):
             with self.subTest(event_type=repr(event_type)):
                 self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
 
@@ -65,7 +65,7 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         self.assertEqual(timeline_payload("incident_opened", {"message": "x" * 513, "counter": 1 << 63}, {"incident_opened": ("message", "counter")}), {})
 
     def test_terminal_dangerous_strings_are_rejected(self) -> None:
-        for dangerous in ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue", "c1\x85next", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text"):
+        for dangerous in ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue", "c1\x85next", "arabic-mark\u061cvalue", "left-mark\u200evalue", "right-mark\u200fvalue", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text"):
             with self.subTest(dangerous=repr(dangerous)):
                 self.assertEqual(timeline_payload("incident_opened", {"value": dangerous}, {"incident_opened": ("value",)}), {})
 
@@ -85,7 +85,7 @@ class TimelinePayloadScalarTests(unittest.TestCase):
             def get(self, key, default=None):
                 raise AssertionError("unsafe event type must fail before policy lookup")
         payload = {"severity": "high"}
-        for event_type in ("", "incident\nopened", "incident\u2028opened", "incident\u202eopened", "x" * 161):
+        for event_type in ("", "incident\nopened", "incident\u061copened", "incident\u200eopened", "incident\u200fopened", "incident\u2028opened", "incident\u202eopened", "x" * 161):
             with self.subTest(event_type=repr(event_type)):
                 self.assertEqual(timeline_payload(event_type, payload, NoLookupMapping()), {})
 
@@ -100,7 +100,7 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         self.assertEqual(timeline_payload("incident_opened", NoReadMapping({"severity": "high"}), {"incident_opened": ("severity", "severity")}), {})
 
     def test_static_policy_rejects_unsafe_or_oversized_field_names(self) -> None:
-        for field in ("", "line\nfeed", "c1\x85next", "line\u2028separator", "bidi\u202eoverride", "x" * 129):
+        for field in ("", "line\nfeed", "c1\x85next", "arabic\u061cmark", "left\u200emark", "right\u200fmark", "line\u2028separator", "bidi\u202eoverride", "x" * 129):
             with self.subTest(field=repr(field)):
                 self.assertEqual(timeline_payload("incident_opened", {field: "visible"}, {"incident_opened": (field,)}), {})
 
