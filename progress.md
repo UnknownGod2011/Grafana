@@ -22,7 +22,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Metric/Loki activation is policy-owned and versioned; HTTP callers cannot supply arbitrary Grafana queries or datasource identities.
 - Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
-- Static timeline field policy itself is bounded to 64 non-empty, terminal-safe string keys of at most 128 characters; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed.
+- Static timeline field policy itself is bounded to 64 unique, non-empty, terminal-safe string keys of at most 128 characters; malformed, duplicate, oversized, string-as-iterable, and non-terminating allowlists fail closed.
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 - Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
 
@@ -35,33 +35,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Single-read timeline Mapping projection
+## Latest run — 2026-09-16 — Duplicate timeline policy rejection
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The static projector still used `key in payload` plus repeated `payload[key]` reads inside a comprehension. A custom Mapping can make those operations disagree, mutate between reads, or raise, creating an avoidable TOCTOU/side-effect surface at the persistence/extension trust boundary.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The prior single-read hardening still allowed a malformed static allowlist to repeat the same field name. That caused the projector to call `payload.get()` more than once for one logical field, violating the stated single-read invariant for untrusted custom Mapping implementations.
 
 ### Changes / actions
 
-- Added a private missing-value sentinel and changed static projection to a bounded explicit loop.
-- Each allowlisted Mapping value is now fetched exactly once through `get()` and then validated/projected from that captured value.
-- Removed membership probes and repeated `__getitem__` reads from static projection.
-- Preserved fail-closed behavior: any ordinary Mapping read failure discards the complete projection rather than returning partial operator data.
-- Added a regression Mapping that forbids membership/direct item access and raises if its allowlisted value is read more than once.
+- Hardened `_bounded_static_fields()` to require unique allowlisted field names after existing type, length, terminal-safety, and count validation.
+- Duplicate field policies now fail closed before any payload value is read rather than being silently normalized.
+- Added a regression using a payload Mapping whose `get()` raises immediately, proving duplicate-policy rejection happens before payload access.
+- Updated the core invariant to explicitly state that static timeline field policies require unique keys.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation update committed as `ef3acbd6be8ca1465686b2432ecc8e0c81881178`.
-- Regression-test update committed as `3ce70dbc9a500fc6e64720f149ed8c6ef6a2e718`.
-- This runner does not expose an executable checkout, so the new test was not run and no green-test claim is made.
+- Implementation update committed as `6c0b125352a9f8c4b52f927383722c4f0df128d3`.
+- Regression-test update committed as `11d1e3e28b3af41a058f9400e3c91653d6dbad8b`.
+- This runner does not expose an executable checkout, so the new regression was not run and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat custom Mapping implementations as active trust-boundary code, not passive dictionaries.
-2. Snapshot each allowlisted value once before validation so disclosure decisions cannot be made against a different value than the one emitted.
-3. Preserve all-or-nothing failure for ordinary Mapping exceptions to avoid partial disclosure.
+1. Duplicate disclosure-policy keys are malformed configuration, not harmless redundancy, because custom Mapping reads can have side effects.
+2. Reject duplicates before touching the payload so the single-read invariant remains structurally enforceable.
+3. Prefer fail-closed rejection over deduplication, which could conceal configuration mistakes.
 
 ### Blockers / unknowns
 
