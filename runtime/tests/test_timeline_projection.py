@@ -9,14 +9,10 @@ from runtime.timeline_projection import reconciliation_timeline_payload, timelin
 
 
 class BrokenMapping(Mapping):
-    def __iter__(self):
-        return iter(())
-    def __len__(self):
-        return 0
-    def __getitem__(self, key):
-        raise RuntimeError("malformed mapping")
-    def get(self, key, default=None):
-        raise RuntimeError("malformed mapping")
+    def __iter__(self): return iter(())
+    def __len__(self): return 0
+    def __getitem__(self, key): raise RuntimeError("malformed mapping")
+    def get(self, key, default=None): raise RuntimeError("malformed mapping")
 
 
 class ReconciliationTimelineProjectionTests(unittest.TestCase):
@@ -36,8 +32,7 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
 
     def test_unbounded_or_future_values_fail_closed(self) -> None:
         for event_type, payload in (("remediation_reconciliation_attempt.accepted.future_reason", {"result": "accepted", "reason": "future_reason"}), ("remediation_reconciliation_attempt.future.durable_dispatching", {"result": "future", "reason": "durable_dispatching"}), ("remediation_reconciliation_future.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching"})):
-            with self.subTest(event_type=event_type):
-                self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
+            with self.subTest(event_type=event_type): self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
 
     def test_event_name_and_payload_must_agree(self) -> None:
         self.assertEqual(reconciliation_timeline_payload("remediation_reconciliation_attempt.accepted.durable_dispatching", {"result": "unknown", "reason": "durable_dispatching"}), {})
@@ -47,9 +42,8 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
 
     def test_unsafe_reconciliation_event_types_fail_closed(self) -> None:
         payload = {"result": "accepted", "reason": "durable_dispatching"}
-        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u061c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200e", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200f", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "x" * 161):
-            with self.subTest(event_type=repr(event_type)):
-                self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
+        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u061c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200b", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200d", "remediation_reconciliation_attempt.accepted.durable_dispatching\ufeff", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "x" * 161):
+            with self.subTest(event_type=repr(event_type)): self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
 
 
 class TimelinePayloadScalarTests(unittest.TestCase):
@@ -65,13 +59,17 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         self.assertEqual(timeline_payload("incident_opened", {"message": "x" * 513, "counter": 1 << 63}, {"incident_opened": ("message", "counter")}), {})
 
     def test_terminal_dangerous_strings_are_rejected(self) -> None:
-        for dangerous in ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue", "c1\x85next", "arabic-mark\u061cvalue", "left-mark\u200evalue", "right-mark\u200fvalue", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text"):
-            with self.subTest(dangerous=repr(dangerous)):
-                self.assertEqual(timeline_payload("incident_opened", {"value": dangerous}, {"incident_opened": ("value",)}), {})
+        dangerous_values = ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue", "c1\x85next", "arabic-mark\u061cvalue", "zero-width-space\u200bvalue", "zwnj\u200cvalue", "zwj\u200dvalue", "bom\ufeffvalue", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text")
+        for dangerous in dangerous_values:
+            with self.subTest(dangerous=repr(dangerous)): self.assertEqual(timeline_payload("incident_opened", {"value": dangerous}, {"incident_opened": ("value",)}), {})
 
     def test_printable_unicode_and_scalar_boundaries_remain_allowed(self) -> None:
         value = "直播·ライブ·лайв·بث"
         self.assertEqual(timeline_payload("incident_opened", {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1}, {"incident_opened": ("value", "minimum", "maximum")}), {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1})
+
+    def test_combining_marks_remain_allowed(self) -> None:
+        value = "Cafe\u0301"
+        self.assertEqual(timeline_payload("incident_opened", {"value": value}, {"incident_opened": ("value",)}), {"value": value})
 
     def test_non_finite_floats_are_rejected_but_finite_floats_are_allowed(self) -> None:
         self.assertEqual(timeline_payload("incident_opened", {"good": 1.25, "bad": math.inf}, {"incident_opened": ("good", "bad")}), {"good": 1.25})
@@ -82,27 +80,21 @@ class TimelinePayloadScalarTests(unittest.TestCase):
 
     def test_event_type_is_validated_before_policy_lookup(self) -> None:
         class NoLookupMapping(dict):
-            def get(self, key, default=None):
-                raise AssertionError("unsafe event type must fail before policy lookup")
-        payload = {"severity": "high"}
-        for event_type in ("", "incident\nopened", "incident\u061copened", "incident\u200eopened", "incident\u200fopened", "incident\u2028opened", "incident\u202eopened", "x" * 161):
-            with self.subTest(event_type=repr(event_type)):
-                self.assertEqual(timeline_payload(event_type, payload, NoLookupMapping()), {})
+            def get(self, key, default=None): raise AssertionError("unsafe event type must fail before policy lookup")
+        for event_type in ("", "incident\nopened", "incident\u200bopened", "incident\u200copened", "incident\u200dopened", "incident\ufeffopened", "incident\u2028opened", "incident\u202eopened", "x" * 161):
+            with self.subTest(event_type=repr(event_type)): self.assertEqual(timeline_payload(event_type, {"severity": "high"}, NoLookupMapping()), {})
 
     def test_static_policy_rejects_string_non_string_and_oversized_allowlists(self) -> None:
-        for allowed in ("severity", ("severity", 7), tuple(f"field_{i}" for i in range(65))):
-            self.assertEqual(timeline_payload("incident_opened", {"severity": "high"}, {"incident_opened": allowed}), {})
+        for allowed in ("severity", ("severity", 7), tuple(f"field_{i}" for i in range(65))): self.assertEqual(timeline_payload("incident_opened", {"severity": "high"}, {"incident_opened": allowed}), {})
 
     def test_static_policy_rejects_duplicate_fields_before_payload_reads(self) -> None:
         class NoReadMapping(dict):
-            def get(self, key, default=None):
-                raise AssertionError("duplicate policy must fail before payload access")
+            def get(self, key, default=None): raise AssertionError("duplicate policy must fail before payload access")
         self.assertEqual(timeline_payload("incident_opened", NoReadMapping({"severity": "high"}), {"incident_opened": ("severity", "severity")}), {})
 
     def test_static_policy_rejects_unsafe_or_oversized_field_names(self) -> None:
-        for field in ("", "line\nfeed", "c1\x85next", "arabic\u061cmark", "left\u200emark", "right\u200fmark", "line\u2028separator", "bidi\u202eoverride", "x" * 129):
-            with self.subTest(field=repr(field)):
-                self.assertEqual(timeline_payload("incident_opened", {field: "visible"}, {"incident_opened": (field,)}), {})
+        for field in ("", "line\nfeed", "zero\u200bwidth", "zwnj\u200cfield", "zwj\u200dfield", "bom\ufefffield", "line\u2028separator", "bidi\u202eoverride", "x" * 129):
+            with self.subTest(field=repr(field)): self.assertEqual(timeline_payload("incident_opened", {field: "visible"}, {"incident_opened": (field,)}), {})
 
     def test_static_policy_accepts_printable_unicode_field_names_at_boundary(self) -> None:
         field = "測" * 128
@@ -112,14 +104,12 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         def forever():
             index = 0
             while True:
-                yield f"field_{index}"
-                index += 1
+                yield f"field_{index}"; index += 1
         self.assertEqual(timeline_payload("incident_opened", {"field_0": "visible"}, {"incident_opened": forever()}), {})
 
     def test_static_policy_rejects_iterator_failures(self) -> None:
         class BrokenIterator:
-            def __iter__(self):
-                raise RuntimeError("malformed policy")
+            def __iter__(self): raise RuntimeError("malformed policy")
         self.assertEqual(timeline_payload("incident_opened", {"severity": "high"}, {"incident_opened": BrokenIterator()}), {})
 
     def test_static_policy_mapping_lookup_failures_fail_closed(self) -> None:
@@ -130,18 +120,13 @@ class TimelinePayloadScalarTests(unittest.TestCase):
 
     def test_static_projection_reads_each_mapping_value_once(self) -> None:
         class SingleReadMapping(dict):
-            def __init__(self):
-                super().__init__({"severity": "high"})
-                self.reads = 0
+            def __init__(self): super().__init__({"severity": "high"}); self.reads = 0
             def get(self, key, default=None):
                 self.reads += 1
-                if self.reads > 1:
-                    raise RuntimeError("value was read more than once")
+                if self.reads > 1: raise RuntimeError("value was read more than once")
                 return super().get(key, default)
-            def __contains__(self, key):
-                raise RuntimeError("membership probes are forbidden")
-            def __getitem__(self, key):
-                raise RuntimeError("direct repeated reads are forbidden")
+            def __contains__(self, key): raise RuntimeError("membership probes are forbidden")
+            def __getitem__(self, key): raise RuntimeError("direct repeated reads are forbidden")
         payload = SingleReadMapping()
         self.assertEqual(timeline_payload("incident_opened", payload, {"incident_opened": ("severity",)}), {"severity": "high"})
         self.assertEqual(payload.reads, 1)
