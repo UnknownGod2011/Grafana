@@ -9,28 +9,20 @@ Detailed older run history remains in Git history; this file keeps current invar
 ## Core invariants
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
-- StageGuard's supported MCP deployment is stdio-only and its compose evidence surface is restricted to `datasource,prometheus,loki` with writes and proxied tools disabled.
-- MCP launcher overrides are bounded before subprocess creation: raw command length, argv count, individual argument length, terminal/control characters, Unicode line separators, and bidi formatting controls fail closed outside the supported contract while printable Unicode paths remain valid.
-- Direct official `grafana/mcp-grafana` Docker launches, including explicit Docker Hub registry aliases, must opt into stdio; registry qualification cannot bypass the transport boundary.
-- The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
-- MCP peer-advertised server identity and tool names are untrusted display input: they must be bounded and reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls before storage or rendering; ordinary printable Unicode remains valid.
-- MCP peer error/result diagnostics are bounded and control-safe before they are emitted; the release smoke must not dump near-frame-limit peer payloads into logs.
-- MCP launcher diagnostics must redact inline credential-like argv values before printing the configured command.
-- MCP smoke operator configuration is bounded and printable before entering requests or release output; protocol version, datasource UID, and PromQL query fail closed on empty, oversized, or terminal-dangerous values.
+- Supported MCP deployment is stdio-only; compose exposes only the required read-only datasource/Prometheus/Loki evidence surface.
+- MCP launcher configuration, peer metadata, diagnostics, and smoke configuration are bounded, terminal-safe, and credential-redacted before operator display.
+- Direct official `grafana/mcp-grafana` Docker launches, including recognized Docker Hub aliases, must explicitly use stdio.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
-- Fresh Grafana telemetry is required to verify recovery.
-- `recovery_unverified` can only use the recovery-only verification path and cannot replay provider remediation.
-- Any remediation side effect followed by ambiguous checkpoint persistence remains behind the execution-uncertainty barrier, including local/non-reconciling adapters and process restarts during reconciliation.
-- Execution uncertainty is resolved only through durable reload/reconciliation and fresh Grafana evidence; `/v1/execute` is never the recovery mechanism.
-- Production adapters that support provider reconciliation must additionally resolve their server-owned operation ID before fresh evidence can release uncertainty.
-- Durable checkpoint/audit failures fail closed; ambiguous provider execution blocks replay.
+- Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
+- Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
+- Durable checkpoint/audit failures fail closed; provider operation reconciliation is required where supported.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
-- Operator timeline disclosure is allowlist-based. Canonical remediation reconciliation may expose only bounded `result` and `reason`; operation IDs, provider bodies, targets, credentials, arbitrary audit metadata, and raw actor identities must never be exposed.
-- Reconciliation timeline parsing rejects oversized durable event names before splitting/parsing them.
-- Static timeline fields expose only bounded JSON scalars; nested objects/arrays, oversized strings, terminal-dangerous strings, arbitrary-precision integers outside signed 63-bit magnitude, and non-finite numbers fail closed even when their field name is allowlisted.
+- Metric/Loki activation is policy-owned and versioned; HTTP callers cannot supply arbitrary Grafana queries or datasource identities.
+- Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
+- Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
+- Static timeline field policy itself is bounded to 64 string keys; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed before projection.
 
 ## Retained validation baseline
 
@@ -39,74 +31,43 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
-- Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
-- An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
+- Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Run log — 2026-09-16 — Bounded MCP smoke configuration
+## Latest run — 2026-09-16 — Bounded timeline policy iteration
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py`. The release smoke accepted unbounded or terminal-dangerous environment values for the requested protocol, datasource UID, and PromQL query, and then reused them in JSON-RPC requests and operator output.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Scalar values were bounded, but the static-field policy iterable itself had no width/termination bound. A malformed extension could therefore supply an oversized or infinite iterator and keep an operator timeline request iterating indefinitely.
 
 ### Changes / actions
 
-- Added `MAX_CONFIG_TEXT_CHARS = 512` and `_bounded_config_text()` for non-empty, printable operator configuration.
-- Validated `STAGEGUARD_MCP_PROTOCOL_VERSION`, `STAGEGUARD_DATASOURCE_UID`, and `STAGEGUARD_MCP_SMOKE_QUERY` before the MCP initialize/query requests and release output.
-- Preserved the validated values for the actual request payload; no credentials or external resources were introduced.
-- Added regressions for empty, oversized, newline, Unicode line-separator, and exact-boundary printable-Unicode configuration values.
+- Added `_MAX_STATIC_FIELDS = 64` and `_bounded_static_fields()`.
+- Materialize at most 65 policy entries with `itertools.islice`; fail closed above the 64-field contract.
+- Reject strings/bytes as accidental field iterables and reject any non-string field entry.
+- Preserve exact-limit behavior and existing scalar/display/reconciliation disclosure rules.
+- Added regressions for string allowlists, mixed-type allowlists, 65-field allowlists, infinite generators, and the exact 64-field boundary.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub connector repository inspection and sequential source/test commits succeeded: implementation `f4cbca22aa7b4ce8dee94c06688fa540effd73cc`, tests `89a3873ce39cc2f39f85c0f2478dae66ba209eb9`.
-- This runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
+- GitHub source update succeeded: `33fbdab12347de47fe40e126f5af4c87e1f6109b`.
+- Regression-test update succeeded: `68dd9f5335b17dfd071335ed001b3e7c49b89796`.
+- This runner does not expose an executable checkout, so the new tests were not run and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Bound and terminal-sanitize operator-controlled smoke configuration before both transport and presentation.
-2. Keep the limit deliberately small for a release smoke: enough for realistic PromQL and MCP version strings, while preventing pathological request/log expansion.
-3. Continue treating the configured PromQL as an explicit smoke input only; StageGuard's production HTTP policy remains authoritative for live incident investigations.
+1. Treat disclosure policy configuration as a trust boundary too, even though normal production callers use static in-process policy.
+2. Bound iteration rather than merely checking collection length so generators and non-terminating iterables cannot hang projection.
+3. Fail closed for malformed policy instead of partially projecting fields from it.
 
 ### Blockers / unknowns
 
-- Latest MCP smoke configuration/metadata/diagnostic/redaction tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
-- Historical full-suite failures/errors still need classification from an executable checkout.
-- A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
-- Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
-
-## Run log — 2026-09-16 — Terminal-safe timeline scalar projection
-
-### Inspected at start
-
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The scalar projection already rejected nested payloads, oversized strings, unbounded integers, and non-finite floats, but allowlisted strings could still contain terminal controls, line/paragraph separators, or bidi formatting controls before operator rendering.
-
-### Changes / actions
-
-- Added `_safe_display_string()` to reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls while preserving printable Unicode.
-- Applied the display validator to all allowlisted static timeline string fields; canonical reconciliation values remain exact enum tokens and are unchanged.
-- Added regression coverage for newline, carriage return, tab, NUL, DEL, C1, line/paragraph separators, bidi override/isolate values, and positive multilingual printable-Unicode/boundary cases.
-- No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
-
-### Checks / results
-
-- Sequential GitHub source/test updates succeeded: implementation `0cc7aa386430a0bd739e5574ed30cfeda7a97d36`, tests `2e1a0ef09c32c9396427d37753bc1b98537931c7`.
-- This runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
-- No GitHub Actions workflow was triggered as a substitute for local validation.
-
-### Decisions
-
-1. Treat operator-visible durable strings as display data, not merely JSON-safe data; reject characters that can spoof rows or log boundaries.
-2. Keep printable Unicode allowed for internationalized production metadata.
-3. Keep reconciliation projection strict and semantic rather than applying general string sanitization to its canonical enum outputs.
-
-### Blockers / unknowns
-
-- The latest timeline projection tests, plus the previously listed MCP smoke/launcher/negotiation, public-audit, and execution-safety suites, still require execution in a real checkout.
+- Latest timeline projection/public-audit/execution-safety and MCP smoke/launcher/negotiation/compose tests still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run the consolidated MCP smoke/launcher tests plus the focused timeline/public-audit/execution-safety suites in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+Run the consolidated MCP smoke/launcher tests plus focused timeline/public-audit/execution-safety suites in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
