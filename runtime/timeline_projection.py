@@ -23,24 +23,13 @@ _RECONCILIATION_REASONS = frozenset({
     "post_dispatch_checkpoint_regression",
     "phase_unavailable",
 })
-# Audit data is durable and may originate outside the current process. Bound
-# parser work before splitting attacker- or corruption-controlled event names.
 _MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
 _MAX_STATIC_STRING_LENGTH = 512
 _MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
-# Static fields are policy configuration, but keeping projection work bounded
-# prevents a malformed plugin/configuration from hanging an operator API request
-# with an infinite iterator or creating an unexpectedly wide response.
 _MAX_STATIC_FIELDS = 64
 
 
 def _safe_display_string(value: str) -> bool:
-    """Return whether a string is safe to place in operator-visible output.
-
-    Reject terminal controls, line separators, and bidi formatting controls so a
-    durable audit value cannot spoof timeline rows, split log records, or hide
-    content when rendered in a terminal/UI. Printable Unicode remains valid.
-    """
     if len(value) > _MAX_STATIC_STRING_LENGTH:
         return False
     for char in value:
@@ -57,21 +46,11 @@ def _safe_display_string(value: str) -> bool:
 
 
 def _safe_static_value(value: object) -> bool:
-    """Return whether an allowlisted lifecycle value is safe to disclose.
-
-    Field allowlists prevent accidental key disclosure, but durable audit records
-    can still be corrupted or supplied by older writers. Restrict public timeline
-    values to bounded JSON scalars so a trusted field name cannot smuggle nested
-    provider bodies/credentials or pathological strings or integers into operator
-    responses.
-    """
     if value is None or isinstance(value, bool):
         return True
     if isinstance(value, str):
         return _safe_display_string(value)
     if isinstance(value, int):
-        # Python integers are arbitrary precision. Bound them explicitly so a
-        # corrupted durable record cannot create pathological JSON output.
         return -_MAX_STATIC_INTEGER_ABS <= value <= _MAX_STATIC_INTEGER_ABS
     if isinstance(value, float):
         return math.isfinite(value)
@@ -85,9 +64,6 @@ def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
     try:
         fields = tuple(islice(iter(allowed), _MAX_STATIC_FIELDS + 1))
     except Exception:
-        # A plugin/configuration iterator is outside the trusted durable-data
-        # path. Any runtime failure while materializing it must fail closed rather
-        # than leaking a partial policy or surfacing an operator-facing 500.
         return None
     if len(fields) > _MAX_STATIC_FIELDS or any(not isinstance(key, str) for key in fields):
         return None
@@ -95,14 +71,7 @@ def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
 
 
 def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, object]) -> dict[str, str]:
-    """Return the bounded operator projection for a reconciliation audit event.
-
-    Projection is accepted only when the event name is canonical and its encoded
-    result/reason exactly match the bounded payload. This prevents a malformed,
-    corrupted, oversized, or future audit event from using a trusted prefix to
-    expose data under contradictory semantics. Unknown inputs fail closed to an
-    empty projection.
-    """
+    """Return the bounded operator projection for a reconciliation audit event."""
     if (
         not isinstance(event_type, str)
         or len(event_type) > _MAX_RECONCILIATION_EVENT_TYPE_LENGTH
@@ -122,8 +91,14 @@ def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, objec
     if encoded_result not in _RECONCILIATION_RESULTS or encoded_reason not in _RECONCILIATION_REASONS:
         return {}
 
-    result = payload.get("result")
-    reason = payload.get("reason")
+    # Durable mappings may come from adapters or older persistence layers. Treat
+    # mapping access itself as untrusted: a custom Mapping can raise while reading
+    # an otherwise canonical event and must not turn the public timeline into 500.
+    try:
+        result = payload.get("result")
+        reason = payload.get("reason")
+    except Exception:
+        return {}
     if result != encoded_result or reason != encoded_reason:
         return {}
     return {"result": encoded_result, "reason": encoded_reason}
@@ -134,21 +109,19 @@ def timeline_payload(
     payload: Mapping[str, object],
     static_fields: Mapping[str, Iterable[str]],
 ) -> dict[str, object]:
-    """Project one audit payload through StageGuard's operator disclosure policy.
-
-    Known lifecycle events use their explicit field allowlist and bounded scalar
-    values. Unknown events get no payload by default, except canonical remediation-
-    reconciliation events, which are delegated to the stricter semantic projector
-    above. Keeping the fallback here makes it difficult for the public timeline
-    path to accidentally expose arbitrary durable audit metadata when new event
-    types are introduced.
-    """
+    """Project one audit payload through StageGuard's operator disclosure policy."""
     if not isinstance(event_type, str) or not isinstance(payload, Mapping):
         return {}
     if not isinstance(static_fields, Mapping):
         return {}
 
-    allowed = static_fields.get(event_type)
+    # Policy lookup can itself be implemented by an extension Mapping. Fail
+    # closed on ordinary lookup failures rather than leaking a partial timeline
+    # or surfacing an operator-visible server error.
+    try:
+        allowed = static_fields.get(event_type)
+    except Exception:
+        return {}
     if allowed is not None:
         fields = _bounded_static_fields(allowed)
         if fields is None:
@@ -159,7 +132,7 @@ def timeline_payload(
                 for key in fields
                 if key in payload and _safe_static_value(payload[key])
             }
-        except (TypeError, ValueError):
+        except Exception:
             return {}
 
     return reconciliation_timeline_payload(event_type, payload)
