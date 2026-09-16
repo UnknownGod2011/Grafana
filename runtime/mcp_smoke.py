@@ -28,19 +28,25 @@ QUERY = os.getenv(
     'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}',
 )
 REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
+# Peer metadata is eventually rendered into operator/release output. Reject characters
+# that can alter terminal layout or visual ordering even though they are valid Unicode.
+_UNSAFE_DISPLAY_CODEPOINTS = frozenset({0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069})
 
 
 class McpError(RuntimeError):
     pass
 
 
-def _bounded_diagnostic(value: Any) -> str:
-    """Render untrusted peer data without allowing release diagnostics to explode.
+def _contains_unsafe_display_char(value: str) -> bool:
+    for char in value:
+        codepoint = ord(char)
+        if codepoint < 32 or 0x7F <= codepoint <= 0x9F or codepoint in _UNSAFE_DISPLAY_CODEPOINTS:
+            return True
+    return False
 
-    JSON-RPC frames are already size-bounded, but a near-limit error/result can still
-    make logs and operator terminals unwieldy. Keep diagnostic rendering deterministic
-    and visibly mark truncation. ``repr`` also escapes embedded control characters.
-    """
+
+def _bounded_diagnostic(value: Any) -> str:
+    """Render untrusted peer data without allowing release diagnostics to explode."""
     rendered = repr(value)
     if len(rendered) <= MAX_DIAGNOSTIC_CHARS:
         return rendered
@@ -73,11 +79,11 @@ def _request_timeout_seconds(raw: str | None) -> float:
 
 
 def _bounded_server_info_field(server_info: dict[str, Any], field: str) -> str:
-    """Return bounded printable MCP server metadata or fail closed."""
+    """Return bounded terminal-safe MCP server metadata or fail closed."""
     value = server_info.get(field)
     if not isinstance(value, str) or not value.strip():
         raise McpError("initialize returned incomplete serverInfo")
-    if len(value) > MAX_SERVER_INFO_FIELD_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in value):
+    if len(value) > MAX_SERVER_INFO_FIELD_CHARS or _contains_unsafe_display_char(value):
         raise McpError(f"initialize returned unsafe serverInfo.{field}")
     return value
 
@@ -225,7 +231,7 @@ def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
         name = tool.get("name")
         if not isinstance(name, str) or not name.strip():
             raise McpError("tools/list returned a tool without a valid name")
-        if len(name) > MAX_TOOL_NAME_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in name):
+        if len(name) > MAX_TOOL_NAME_CHARS or _contains_unsafe_display_char(name):
             raise McpError("tools/list returned a tool with an unsafe name")
         if name in mapped:
             raise McpError(f"tools/list returned duplicate tool name: {name}")
