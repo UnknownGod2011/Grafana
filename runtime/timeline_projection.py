@@ -141,10 +141,15 @@ def timeline_payload(
         return {}
 
     try:
-        allowed = static_fields.get(event_type)
+        # Distinguish an absent policy entry from an explicitly malformed/null
+        # entry. Only absence may fall through to the canonical reconciliation
+        # projector; configured entries must validate or fail closed.
+        allowed = static_fields.get(event_type, _MISSING)
     except Exception:
         return {}
-    if allowed is not None:
+    if allowed is not _MISSING:
+        if allowed is None:
+            return {}
         fields = _bounded_static_fields(allowed)
         if fields is None:
             return {}
