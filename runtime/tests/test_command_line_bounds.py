@@ -38,10 +38,17 @@ def test_launcher_accepts_argument_at_bound() -> None:
     assert split_command(f"mcp-grafana {argument}") == ["mcp-grafana", argument]
 
 
-@pytest.mark.parametrize("control", ["\x00", "\x01", "\t", "\n", "\r", "\x1f", "\x7f"])
-def test_launcher_rejects_control_character_inside_quoted_argument(control: str) -> None:
+@pytest.mark.parametrize(
+    "control",
+    [
+        "\x00", "\x01", "\t", "\n", "\r", "\x1f", "\x7f", "\x80", "\x9f",
+        "\u2028", "\u2029", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+        "\u2066", "\u2067", "\u2068", "\u2069",
+    ],
+)
+def test_launcher_rejects_diagnostic_control_inside_quoted_argument(control: str) -> None:
     command = f'mcp-grafana "safe{control}unsafe"'
-    with pytest.raises(ValueError, match="ASCII control characters"):
+    with pytest.raises(ValueError, match="diagnostic control characters"):
         split_command(command)
 
 
@@ -49,9 +56,21 @@ def test_launcher_allows_ordinary_space_inside_quoted_argument() -> None:
     assert split_command('mcp-grafana "safe value"') == ["mcp-grafana", "safe value"]
 
 
+def test_launcher_allows_printable_unicode_path_and_argument() -> None:
+    assert split_command('"/opt/Équipe/mcp-grafana" "média live"') == [
+        "/opt/Équipe/mcp-grafana",
+        "média live",
+    ]
+
+
 def test_windows_launcher_rejects_control_character_after_quote_normalization() -> None:
-    with pytest.raises(ValueError, match="ASCII control characters"):
+    with pytest.raises(ValueError, match="diagnostic control characters"):
         split_command('"C:\\Tools\\mcp-grafana.exe" "safe\x7funsafe"', windows=True)
+
+
+def test_windows_launcher_rejects_bidi_override_after_quote_normalization() -> None:
+    with pytest.raises(ValueError, match="diagnostic control characters"):
+        split_command('"C:\\Tools\\mcp-grafana.exe" "safe\u202eunsafe"', windows=True)
 
 
 def test_launcher_still_rejects_network_transport_inside_bounds() -> None:
