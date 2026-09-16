@@ -22,6 +22,11 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
             with self.subTest(gate=gate.name):
                 self.assertTrue(runner._files(gate))
 
+    def test_validation_harness_gate_owns_runner_regressions(self) -> None:
+        harness = next(gate for gate in runner.GATES if gate.name == "validation harness")
+        names = {path.name for path in runner._files(harness)}
+        self.assertEqual(names, {"test_stageguard_validation_runner.py"})
+
     def test_timeline_gate_includes_audit_timeline_contracts(self) -> None:
         timeline = next(gate for gate in runner.GATES if gate.name == "timeline disclosure")
         names = {path.name for path in runner._files(timeline)}
