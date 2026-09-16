@@ -30,7 +30,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Metric/Loki activation remains policy-owned and versioned; callers cannot supply arbitrary Grafana queries or datasource identities through the HTTP API.
 - Operator timeline disclosure is allowlist-based. Canonical remediation reconciliation may expose only bounded `result` and `reason`; operation IDs, provider bodies, targets, credentials, arbitrary audit metadata, and raw actor identities must never be exposed.
 - Reconciliation timeline parsing rejects oversized durable event names before splitting/parsing them.
-- Static timeline fields expose only bounded JSON scalars; nested objects/arrays, oversized strings, arbitrary-precision integers outside signed 63-bit magnitude, and non-finite numbers fail closed even when their field name is allowlisted.
+- Static timeline fields expose only bounded JSON scalars; nested objects/arrays, oversized strings, terminal-dangerous strings, arbitrary-precision integers outside signed 63-bit magnitude, and non-finite numbers fail closed even when their field name is allowlisted.
 
 ## Retained validation baseline
 
@@ -71,6 +71,38 @@ Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py` and `
 ### Blockers / unknowns
 
 - Latest MCP smoke configuration/metadata/diagnostic/redaction tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- Historical full-suite failures/errors still need classification from an executable checkout.
+- A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
+- Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
+
+## Run log — 2026-09-16 — Terminal-safe timeline scalar projection
+
+### Inspected at start
+
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The scalar projection already rejected nested payloads, oversized strings, unbounded integers, and non-finite floats, but allowlisted strings could still contain terminal controls, line/paragraph separators, or bidi formatting controls before operator rendering.
+
+### Changes / actions
+
+- Added `_safe_display_string()` to reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls while preserving printable Unicode.
+- Applied the display validator to all allowlisted static timeline string fields; canonical reconciliation values remain exact enum tokens and are unchanged.
+- Added regression coverage for newline, carriage return, tab, NUL, DEL, C1, line/paragraph separators, bidi override/isolate values, and positive multilingual printable-Unicode/boundary cases.
+- No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
+
+### Checks / results
+
+- Sequential GitHub source/test updates succeeded: implementation `0cc7aa386430a0bd739e5574ed30cfeda7a97d36`, tests `2e1a0ef09c32c9396427d37753bc1b98537931c7`.
+- This runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
+- No GitHub Actions workflow was triggered as a substitute for local validation.
+
+### Decisions
+
+1. Treat operator-visible durable strings as display data, not merely JSON-safe data; reject characters that can spoof rows or log boundaries.
+2. Keep printable Unicode allowed for internationalized production metadata.
+3. Keep reconciliation projection strict and semantic rather than applying general string sanitization to its canonical enum outputs.
+
+### Blockers / unknowns
+
+- The latest timeline projection tests, plus the previously listed MCP smoke/launcher/negotiation, public-audit, and execution-safety suites, still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
