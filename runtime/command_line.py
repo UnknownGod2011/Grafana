@@ -21,6 +21,11 @@ import shlex
 _MCP_TRANSPORT_FLAGS = frozenset({"-t", "--transport"})
 _MCP_NETWORK_TRANSPORTS = frozenset({"sse", "streamable-http"})
 _OFFICIAL_MCP_DOCKER_IMAGE = "grafana/mcp-grafana"
+_DOCKER_HUB_REGISTRY_PREFIXES = (
+    "docker.io/",
+    "index.docker.io/",
+    "registry-1.docker.io/",
+)
 # Characters that can alter terminal/log rendering without being ordinary printable
 # launcher text. C0/DEL/C1 cover terminal controls; the Unicode set covers explicit
 # line separators and bidi embedding/override/isolate marks commonly involved in
@@ -65,7 +70,18 @@ def _transport_values(parts: list[str]) -> list[str]:
 
 
 def _is_official_mcp_docker_image(part: str) -> bool:
+    """Recognize the official image with or without Docker Hub registry aliases.
+
+    Docker accepts both the familiar ``grafana/mcp-grafana`` spelling and explicit
+    Docker Hub registry-qualified forms. Treat them identically so adding a registry
+    prefix cannot bypass StageGuard's requirement to opt the image into stdio.
+    Other registries are deliberately not assumed to host the official image.
+    """
     normalized = part.strip().lower()
+    for prefix in _DOCKER_HUB_REGISTRY_PREFIXES:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
     return normalized == _OFFICIAL_MCP_DOCKER_IMAGE or normalized.startswith(
         _OFFICIAL_MCP_DOCKER_IMAGE + ":"
     ) or normalized.startswith(_OFFICIAL_MCP_DOCKER_IMAGE + "@")
