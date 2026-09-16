@@ -29,6 +29,28 @@ _MAX_STATIC_STRING_LENGTH = 512
 _MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
 
 
+def _safe_display_string(value: str) -> bool:
+    """Return whether a string is safe to place in operator-visible output.
+
+    Reject terminal controls, line separators, and bidi formatting controls so a
+    durable audit value cannot spoof timeline rows, split log records, or hide
+    content when rendered in a terminal/UI. Printable Unicode remains valid.
+    """
+    if len(value) > _MAX_STATIC_STRING_LENGTH:
+        return False
+    for char in value:
+        codepoint = ord(char)
+        if codepoint < 0x20 or codepoint == 0x7F:
+            return False
+        if 0x80 <= codepoint <= 0x9F:
+            return False
+        if codepoint in {0x2028, 0x2029}:
+            return False
+        if 0x202A <= codepoint <= 0x202E or 0x2066 <= codepoint <= 0x2069:
+            return False
+    return True
+
+
 def _safe_static_value(value: object) -> bool:
     """Return whether an allowlisted lifecycle value is safe to disclose.
 
@@ -41,7 +63,7 @@ def _safe_static_value(value: object) -> bool:
     if value is None or isinstance(value, bool):
         return True
     if isinstance(value, str):
-        return len(value) <= _MAX_STATIC_STRING_LENGTH
+        return _safe_display_string(value)
     if isinstance(value, int):
         # Python integers are arbitrary precision. Bound them explicitly so a
         # corrupted durable record cannot create pathological JSON output.
