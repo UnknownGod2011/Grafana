@@ -84,7 +84,10 @@ def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
         return None
     try:
         fields = tuple(islice(iter(allowed), _MAX_STATIC_FIELDS + 1))
-    except (TypeError, ValueError):
+    except Exception:
+        # A plugin/configuration iterator is outside the trusted durable-data
+        # path. Any runtime failure while materializing it must fail closed rather
+        # than leaking a partial policy or surfacing an operator-facing 500.
         return None
     if len(fields) > _MAX_STATIC_FIELDS or any(not isinstance(key, str) for key in fields):
         return None
