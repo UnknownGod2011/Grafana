@@ -127,6 +127,13 @@ class TimelinePayloadScalarTests(unittest.TestCase):
 
         self.assertEqual(timeline_payload("incident_opened", {"field_0": "visible"}, {"incident_opened": forever()}), {})
 
+    def test_static_policy_rejects_iterator_failures(self) -> None:
+        class BrokenIterator:
+            def __iter__(self):
+                raise RuntimeError("malformed policy")
+
+        self.assertEqual(timeline_payload("incident_opened", {"severity": "high"}, {"incident_opened": BrokenIterator()}), {})
+
     def test_static_policy_accepts_exact_field_limit(self) -> None:
         allowed = tuple(f"field_{i}" for i in range(64))
         payload = {"field_0": "first", "field_63": "last"}
