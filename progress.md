@@ -22,7 +22,8 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Metric/Loki activation is policy-owned and versioned; HTTP callers cannot supply arbitrary Grafana queries or datasource identities.
 - Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
-- Static timeline field policy itself is bounded to 64 string keys; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed before projection.
+- Static timeline field policy itself is bounded to 64 string keys; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed.
+- Static timeline field policy iterator failures fail closed; malformed plugin/configuration iterators cannot surface partial disclosure or operator-facing 500s.
 
 ## Retained validation baseline
 
@@ -33,33 +34,31 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Bounded timeline policy iteration
+## Latest run — 2026-09-16 — Fail-closed policy iterator handling
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Scalar values were bounded, but the static-field policy iterable itself had no width/termination bound. A malformed extension could therefore supply an oversized or infinite iterator and keep an operator timeline request iterating indefinitely.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The static-field policy was bounded, but exceptions raised while materializing a plugin/configuration iterable were only partially covered (`TypeError`/`ValueError`). A malformed iterator could still raise another runtime exception during operator timeline projection.
 
 ### Changes / actions
 
-- Added `_MAX_STATIC_FIELDS = 64` and `_bounded_static_fields()`.
-- Materialize at most 65 policy entries with `itertools.islice`; fail closed above the 64-field contract.
-- Reject strings/bytes as accidental field iterables and reject any non-string field entry.
-- Preserve exact-limit behavior and existing scalar/display/reconciliation disclosure rules.
-- Added regressions for string allowlists, mixed-type allowlists, 65-field allowlists, infinite generators, and the exact 64-field boundary.
+- Hardened `_bounded_static_fields()` to catch any ordinary `Exception` from `iter()`/bounded materialization and return `None`.
+- Preserved `BaseException` semantics so process-control signals are not swallowed.
+- Added a regression with an iterator whose `__iter__` raises `RuntimeError`; projection fails closed with no disclosure.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub source update succeeded: `33fbdab12347de47fe40e126f5af4c87e1f6109b`.
-- Regression-test update succeeded: `68dd9f5335b17dfd071335ed001b3e7c49b89796`.
-- This runner does not expose an executable checkout, so the new tests were not run and no green-test claim is made.
+- GitHub source update succeeded: `4435d56b92454c03fa12ad63c3b814b18f97d6ac`.
+- Regression-test update succeeded: `9e7b9e11bcd8ab5258101f6816e59fa0327f8ce5`.
+- This runner does not expose an executable checkout, so the new test was not run and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat disclosure policy configuration as a trust boundary too, even though normal production callers use static in-process policy.
-2. Bound iteration rather than merely checking collection length so generators and non-terminating iterables cannot hang projection.
-3. Fail closed for malformed policy instead of partially projecting fields from it.
+1. Treat policy iterator execution as untrusted extension/configuration behavior.
+2. Fail closed on ordinary iterator failures rather than expose partial fields or convert malformed policy into a public server error.
+3. Do not catch `BaseException`, preserving cancellation and process-level control semantics.
 
 ### Blockers / unknowns
 
