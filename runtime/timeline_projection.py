@@ -25,12 +25,13 @@ _RECONCILIATION_REASONS = frozenset({
 })
 _MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
 _MAX_STATIC_STRING_LENGTH = 512
+_MAX_STATIC_FIELD_NAME_LENGTH = 128
 _MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
 _MAX_STATIC_FIELDS = 64
 
 
-def _safe_display_string(value: str) -> bool:
-    if len(value) > _MAX_STATIC_STRING_LENGTH:
+def _safe_display_string(value: str, *, max_length: int = _MAX_STATIC_STRING_LENGTH) -> bool:
+    if len(value) > max_length:
         return False
     for char in value:
         codepoint = ord(char)
@@ -58,14 +59,21 @@ def _safe_static_value(value: object) -> bool:
 
 
 def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
-    """Materialize a small allowlist or fail closed when policy is malformed."""
+    """Materialize a small, display-safe allowlist or fail closed when malformed."""
     if isinstance(allowed, (str, bytes)):
         return None
     try:
         fields = tuple(islice(iter(allowed), _MAX_STATIC_FIELDS + 1))
     except Exception:
         return None
-    if len(fields) > _MAX_STATIC_FIELDS or any(not isinstance(key, str) for key in fields):
+    if len(fields) > _MAX_STATIC_FIELDS:
+        return None
+    if any(
+        not isinstance(key, str)
+        or not key
+        or not _safe_display_string(key, max_length=_MAX_STATIC_FIELD_NAME_LENGTH)
+        for key in fields
+    ):
         return None
     return fields
 
