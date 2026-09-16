@@ -38,40 +38,42 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — explicit-null timeline policy fail-closed semantics
+## Latest run — 2026-09-17 — consolidated local validation gate
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py`, `runtime/tests/test_timeline_projection.py`, the runtime directory, and searched the repository for TODO markers. The timeline policy lookup used `Mapping.get(event_type)` with the default `None`, making an absent policy entry indistinguishable from an explicitly configured null entry. For canonical reconciliation event names, an explicit null policy therefore fell through to reconciliation projection instead of being treated as malformed configuration.
+Read `progress.md` completely first, then inspected the current README, timeline projection implementation and policy-presence regression, plus the runtime test inventory. The highest-value unblocked item was to turn the repeatedly documented focused-validation next step into a reproducible local command without using CI or credentials.
 
 ### Changes / actions
 
-- Changed timeline policy lookup to use the private `_MISSING` sentinel, distinguishing absence from an explicit null entry.
-- Only a genuinely absent static policy entry may now delegate to canonical reconciliation projection.
-- Explicit `None` policy entries fail closed before payload projection; valid empty iterables remain an intentional disclose-nothing policy.
-- Added `runtime/tests/test_timeline_policy_presence.py` covering absent-policy reconciliation projection, explicit-null fail-closed behavior, and explicit-empty disclose-nothing behavior.
+- Added `scripts/run_stageguard_validation.py`, a dependency-light consolidated validation runner.
+- The runner executes four separately attributed unittest gates: timeline disclosure (`test_timeline*.py`), public audit (`test_*audit*.py`), execution safety (`test_*execution*.py`), and Grafana MCP (`test_*mcp*.py`).
+- Gates run in separate Python processes so a failure is assigned to a boundary instead of being buried in one monolithic test invocation.
+- Default behavior fails fast; `--keep-going` collects all failing gates and `--list` exposes the selected patterns without running tests.
+- The runner deliberately does not start Docker, contact Grafana, read credentials, or trigger GitHub Actions. Live MCP smoke remains a distinct acceptance gate.
+- Removed unittest's explicit top-level-directory argument after review so discovery does not require `runtime/tests` to be an importable package; execution from repository root still makes `runtime` imports available.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation committed as `58d36cc90070655aa3a133490dbb2dd1c60150cb`.
-- Regression coverage committed as `ca396259fe570aa8075c27e0c5a01ae5d5f99bf1`.
-- This connector runner does not expose an executable checkout, so the new regressions were not executed and no green-test claim is made.
+- Initial runner creation committed as `7d8a0f7766accbb6a3823f7ba8cd0e87c860f4a4`.
+- Discovery-layout correction committed as `b0fd4ded477de251dc596202fb37a6ea06d2b5f2`.
+- This connector runner still does not expose an executable repository checkout, so the new command itself and selected test gates were not executed; no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat policy absence and policy corruption as different states: absence permits the narrow built-in reconciliation projection; explicit malformed configuration must fail closed.
-2. Preserve an empty iterable as a valid explicit policy because it provides a useful intentional disclose-nothing override.
-3. Keep the reconciliation fallback canonical and independent of arbitrary payload metadata.
+1. Make the safety/MCP validation baseline a checked-in executable command rather than relying on an operator to reconstruct several unittest invocations from prose.
+2. Keep live Docker/Grafana checks outside the dependency-light runner so ordinary development validation remains free, deterministic, and credentialless.
+3. Preserve separate process boundaries for each gate to improve failure classification and reduce ambiguity when historical failures are revisited.
 
 ### Blockers / unknowns
 
-- Latest timeline projection/public-audit/execution-safety and MCP smoke/launcher/negotiation/compose tests still require execution in a real checkout.
+- The consolidated runner and latest connector-authored tests still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run the consolidated MCP smoke/launcher tests plus focused timeline/public-audit/execution-safety suites in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
