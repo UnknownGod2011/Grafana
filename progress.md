@@ -21,6 +21,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Metric/Loki activation is policy-owned and versioned; HTTP callers cannot supply arbitrary Grafana queries or datasource identities.
 - Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
+- Timeline event identifiers are non-empty, terminal-safe strings bounded to 160 characters before policy lookup or reconciliation parsing.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
 - Static timeline field policy itself is bounded to 64 unique, non-empty, terminal-safe string keys of at most 128 characters; malformed, duplicate, oversized, string-as-iterable, and non-terminating allowlists fail closed.
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
@@ -35,32 +36,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Duplicate timeline policy rejection
+## Latest run — 2026-09-16 — Timeline event identifier hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The prior single-read hardening still allowed a malformed static allowlist to repeat the same field name. That caused the projector to call `payload.get()` more than once for one logical field, violating the stated single-read invariant for untrusted custom Mapping implementations.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Static field names and values were already bounded and terminal-safe, but the event identifier itself reached the untrusted static-policy Mapping lookup without equivalent validation. This left an unnecessary oversized/control-character key surface at the persistence/extension boundary.
 
 ### Changes / actions
 
-- Hardened `_bounded_static_fields()` to require unique allowlisted field names after existing type, length, terminal-safety, and count validation.
-- Duplicate field policies now fail closed before any payload value is read rather than being silently normalized.
-- Added a regression using a payload Mapping whose `get()` raises immediately, proving duplicate-policy rejection happens before payload access.
-- Updated the core invariant to explicitly state that static timeline field policies require unique keys.
+- Added `_safe_event_type()` and require event identifiers to be non-empty, terminal-safe strings no longer than 160 characters before any static-policy Mapping lookup.
+- Applied the same terminal-safe identifier validation to reconciliation projection before prefix/suffix parsing.
+- Added regressions for empty identifiers, newline and Unicode line-separator injection, bidi override controls, and oversized identifiers.
+- Added a hostile static-policy Mapping regression proving unsafe identifiers are rejected before `get()` is invoked.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation update committed as `6c0b125352a9f8c4b52f927383722c4f0df128d3`.
-- Regression-test update committed as `11d1e3e28b3af41a058f9400e3c91653d6dbad8b`.
-- This runner does not expose an executable checkout, so the new regression was not run and no green-test claim is made.
+- Implementation committed as `dd55679aa1b60363a14690dc54cac18e0b30b784`.
+- Regression tests committed as `9379149f4e54c10162ec21a3646e3d47f5a71cad`.
+- This connector runner does not expose an executable checkout, so the new regressions were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Duplicate disclosure-policy keys are malformed configuration, not harmless redundancy, because custom Mapping reads can have side effects.
-2. Reject duplicates before touching the payload so the single-read invariant remains structurally enforceable.
-3. Prefer fail-closed rejection over deduplication, which could conceal configuration mistakes.
+1. Validate event identifiers before using them as keys against untrusted/custom Mapping implementations.
+2. Reuse the existing terminal-safety rules so operator-visible identifiers and values have a coherent display boundary.
+3. Keep the event identifier limit at 160 characters, matching the existing reconciliation bound and comfortably covering current canonical event names.
 
 ### Blockers / unknowns
 
