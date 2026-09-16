@@ -21,6 +21,9 @@ import shlex
 _MCP_TRANSPORT_FLAGS = frozenset({"-t", "--transport"})
 _MCP_NETWORK_TRANSPORTS = frozenset({"sse", "streamable-http"})
 _OFFICIAL_MCP_DOCKER_IMAGE = "grafana/mcp-grafana"
+MAX_LAUNCHER_COMMAND_CHARS = 8192
+MAX_LAUNCHER_ARGUMENTS = 128
+MAX_LAUNCHER_ARGUMENT_CHARS = 2048
 
 
 def _transport_values(parts: list[str]) -> list[str]:
@@ -78,10 +81,16 @@ def split_command(command: str, *, windows: bool | None = None) -> list[str]:
     official Docker image must also declare ``-t stdio`` because that image's
     default transport differs from the native binary's default.
 
+    Launcher text, argument count, and individual argument size are bounded before
+    subprocess creation so an accidentally corrupted environment cannot turn this
+    release-smoke boundary into unbounded parser/argv work.
+
     ``windows`` is injectable for deterministic cross-platform tests.
     """
     if not isinstance(command, str) or not command.strip():
         raise ValueError("launcher command must be non-empty")
+    if len(command) > MAX_LAUNCHER_COMMAND_CHARS:
+        raise ValueError("launcher command exceeds maximum length")
 
     is_windows = os.name == "nt" if windows is None else bool(windows)
     try:
@@ -99,6 +108,10 @@ def split_command(command: str, *, windows: bool | None = None) -> list[str]:
 
     if not parts or any(part == "" for part in parts):
         raise ValueError("launcher command must contain non-empty arguments")
+    if len(parts) > MAX_LAUNCHER_ARGUMENTS:
+        raise ValueError("launcher command contains too many arguments")
+    if any(len(part) > MAX_LAUNCHER_ARGUMENT_CHARS for part in parts):
+        raise ValueError("launcher command contains an oversized argument")
 
     _enforce_stdio_mcp_transport(parts)
     return parts
