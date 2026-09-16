@@ -41,7 +41,7 @@ def _safe_display_string(value: str, *, max_length: int = _MAX_STATIC_STRING_LEN
             return False
         if 0x80 <= codepoint <= 0x9F:
             return False
-        if codepoint in {0x2028, 0x2029}:
+        if codepoint in {0x061C, 0x200E, 0x200F, 0x2028, 0x2029}:
             return False
         if 0x202A <= codepoint <= 0x202E or 0x2066 <= codepoint <= 0x2069:
             return False
