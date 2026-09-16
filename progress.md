@@ -24,9 +24,10 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Timeline event identifiers are non-empty, terminal-safe strings bounded to 160 characters before policy lookup or reconciliation parsing.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
 - Static timeline field policy itself is bounded to 64 unique, non-empty, terminal-safe string keys of at most 128 characters; malformed, duplicate, oversized, string-as-iterable, and non-terminating allowlists fail closed.
-- Timeline display strings reject C0/C1 controls, DEL, Unicode line/paragraph separators, the complete Unicode `Cf` format-control category, and Unicode `Cs` surrogate code points. This prevents invisible presentation manipulation and invalid UTF-8 response text while retaining ordinary printable international text, combining marks, and emoji.
+- Timeline display strings reject C0/C1 controls, DEL, Unicode line/paragraph separators, the complete Unicode `Cf` format-control category, and Unicode `Cs` surrogate code points.
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 - Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
+- An absent static timeline policy may delegate to the canonical reconciliation projector; an explicitly configured null/malformed policy never does and fails closed.
 
 ## Retained validation baseline
 
@@ -37,32 +38,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — Unicode surrogate timeline hardening
+## Latest run — 2026-09-17 — explicit-null timeline policy fail-closed semantics
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The central display validator rejected controls and Unicode format characters but still accepted Unicode surrogate code points (`Cs`). Python strings can contain lone surrogates, while normal UTF-8 encoding rejects them; allowing one into an operator timeline could therefore turn malformed durable/plugin data into a JSON/HTTP response-encoding failure.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py`, `runtime/tests/test_timeline_projection.py`, the runtime directory, and searched the repository for TODO markers. The timeline policy lookup used `Mapping.get(event_type)` with the default `None`, making an absent policy entry indistinguishable from an explicitly configured null entry. For canonical reconciliation event names, an explicit null policy therefore fell through to reconciliation projection instead of being treated as malformed configuration.
 
 ### Changes / actions
 
-- Hardened `_safe_display_string()` to reject the complete Unicode `Cs` surrogate category in addition to the existing `Cf` and line/control restrictions.
-- Kept the policy centralized so the protection applies to event identifiers, reconciliation identifiers, static field names, and allowlisted string values.
-- Added regressions for lone high-surrogate injection across reconciliation event types, ordinary event identifiers, static field names, and static values.
-- Preserved printable international Unicode, combining marks, and ordinary emoji.
+- Changed timeline policy lookup to use the private `_MISSING` sentinel, distinguishing absence from an explicit null entry.
+- Only a genuinely absent static policy entry may now delegate to canonical reconciliation projection.
+- Explicit `None` policy entries fail closed before payload projection; valid empty iterables remain an intentional disclose-nothing policy.
+- Added `runtime/tests/test_timeline_policy_presence.py` covering absent-policy reconciliation projection, explicit-null fail-closed behavior, and explicit-empty disclose-nothing behavior.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation committed as `39830ff0323c61c223f4d3517b509378ba951066`.
-- Regression tests committed as `00b469ac5a145d18140c2bbb7e12654636f90d4e`.
-- This connector runner does not expose an executable checkout, so the regressions were not executed and no green-test claim is made.
+- Implementation committed as `58d36cc90070655aa3a133490dbb2dd1c60150cb`.
+- Regression coverage committed as `ca396259fe570aa8075c27e0c5a01ae5d5f99bf1`.
+- This connector runner does not expose an executable checkout, so the new regressions were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Reject surrogate code points at the operator-display boundary instead of relying on downstream JSON/HTTP encoders to fail unpredictably.
-2. Use Unicode general category `Cs`, covering both high and low surrogate ranges without maintaining code-point lists.
-3. Preserve valid non-ASCII operator text; this remains a Unicode-safe rather than ASCII-only boundary.
+1. Treat policy absence and policy corruption as different states: absence permits the narrow built-in reconciliation projection; explicit malformed configuration must fail closed.
+2. Preserve an empty iterable as a valid explicit policy because it provides a useful intentional disclose-nothing override.
+3. Keep the reconciliation fallback canonical and independent of arbitrary payload metadata.
 
 ### Blockers / unknowns
 
