@@ -24,6 +24,7 @@ _RECONCILIATION_REASONS = frozenset({
     "phase_unavailable",
 })
 _MAX_RECONCILIATION_EVENT_TYPE_LENGTH = 160
+_MAX_EVENT_TYPE_LENGTH = 160
 _MAX_STATIC_STRING_LENGTH = 512
 _MAX_STATIC_FIELD_NAME_LENGTH = 128
 _MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
@@ -45,6 +46,15 @@ def _safe_display_string(value: str, *, max_length: int = _MAX_STATIC_STRING_LEN
         if 0x202A <= codepoint <= 0x202E or 0x2066 <= codepoint <= 0x2069:
             return False
     return True
+
+
+def _safe_event_type(event_type: object, *, max_length: int = _MAX_EVENT_TYPE_LENGTH) -> bool:
+    """Validate an event identifier before using it as an untrusted Mapping key."""
+    return (
+        isinstance(event_type, str)
+        and bool(event_type)
+        and _safe_display_string(event_type, max_length=max_length)
+    )
 
 
 def _safe_static_value(value: object) -> bool:
@@ -76,9 +86,6 @@ def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
         for key in fields
     ):
         return None
-    # Duplicate policy entries would cause repeated reads from an untrusted custom
-    # Mapping, violating the single-read disclosure invariant. Reject the entire
-    # policy rather than silently normalizing potentially malformed configuration.
     if len(set(fields)) != len(fields):
         return None
     return fields
@@ -87,8 +94,7 @@ def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
 def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, object]) -> dict[str, str]:
     """Return the bounded operator projection for a reconciliation audit event."""
     if (
-        not isinstance(event_type, str)
-        or len(event_type) > _MAX_RECONCILIATION_EVENT_TYPE_LENGTH
+        not _safe_event_type(event_type, max_length=_MAX_RECONCILIATION_EVENT_TYPE_LENGTH)
         or not event_type.startswith(_RECONCILIATION_PREFIX)
     ):
         return {}
@@ -121,7 +127,7 @@ def timeline_payload(
     static_fields: Mapping[str, Iterable[str]],
 ) -> dict[str, object]:
     """Project one audit payload through StageGuard's operator disclosure policy."""
-    if not isinstance(event_type, str) or not isinstance(payload, Mapping):
+    if not _safe_event_type(event_type) or not isinstance(payload, Mapping):
         return {}
     if not isinstance(static_fields, Mapping):
         return {}
@@ -135,10 +141,6 @@ def timeline_payload(
         if fields is None:
             return {}
 
-        # Read every allowlisted value exactly once. Custom Mapping implementations
-        # are an untrusted persistence/extension boundary: membership plus repeated
-        # __getitem__ calls can disagree or have side effects. A single get() avoids
-        # that TOCTOU surface and lets the complete projection fail closed on error.
         projected: dict[str, object] = {}
         try:
             for key in fields:
