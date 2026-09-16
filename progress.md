@@ -24,7 +24,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Timeline event identifiers are non-empty, terminal-safe strings bounded to 160 characters before policy lookup or reconciliation parsing.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
 - Static timeline field policy itself is bounded to 64 unique, non-empty, terminal-safe string keys of at most 128 characters; malformed, duplicate, oversized, string-as-iterable, and non-terminating allowlists fail closed.
-- Timeline display strings reject C0/C1 controls, DEL, Unicode line separators, and Unicode bidi controls including ALM/LRM/RLM, embedding/override, and isolate controls.
+- Timeline display strings reject C0/C1 controls, DEL, Unicode line/paragraph separators, and the complete Unicode `Cf` format-control category, preventing invisible zero-width/BOM/bidi presentation manipulation while retaining ordinary printable international text and combining marks.
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 - Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
 
@@ -37,31 +37,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Unicode bidi mark timeline hardening
+## Latest run — 2026-09-16 — Unicode format-control timeline hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Existing display validation rejected bidi embedding/override and isolate controls, but still allowed the Unicode Bidi_Control marks ARABIC LETTER MARK (U+061C), LEFT-TO-RIGHT MARK (U+200E), and RIGHT-TO-LEFT MARK (U+200F). Those invisible marks can alter operator-visible ordering without introducing a conventional control character.
+Read `progress.md` completely first, then inspected the runtime tree, `runtime/timeline_projection.py`, and `runtime/tests/test_timeline_projection.py`. The existing display boundary explicitly rejected known bidi controls but still allowed other invisible Unicode format controls such as ZERO WIDTH SPACE (U+200B), ZWNJ (U+200C), ZWJ (U+200D), and BOM/ZWNBSP (U+FEFF). These can make operator-visible identifiers, field names, or values visually differ from their stored representation.
 
 ### Changes / actions
 
-- Extended `_safe_display_string()` to reject U+061C, U+200E, and U+200F in addition to the existing control, line-separator, embedding/override, and isolate exclusions.
-- Added regressions covering all three marks in static timeline values, event identifiers, reconciliation event identifiers, and static field names.
-- Preserved printable multilingual Unicode support; no ASCII-only restriction was introduced.
+- Replaced the incomplete explicit bidi-format denylist in `_safe_display_string()` with rejection of the complete Unicode general category `Cf` via Python `unicodedata`, while retaining explicit rejection of U+2028/U+2029 line separators.
+- Added regressions for zero-width space, ZWNJ, ZWJ, and BOM across static values, event identifiers, reconciliation identifiers, and static field names.
+- Added a positive regression proving combining marks remain accepted, alongside the existing multilingual printable-text coverage.
+- Kept the change dependency-free by using Python's standard library Unicode database.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation committed as `38cdc329130162e11444c47f4305fed872126b42`.
-- Regression tests committed as `48e2b6fcb71f10f898ed0d5657c4ca13e0822c48`.
-- This connector runner does not expose an executable checkout, so the new regressions were not executed and no green-test claim is made.
+- Implementation committed as `c722b8167fcede22919f400cf317d371d6f8c73d`.
+- Regression tests committed as `daf3f6886d65573af298f4e9829bbf165ebbe5d7`.
+- This connector runner does not expose an executable checkout, so the regressions were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat all currently relevant Unicode Bidi_Control marks as unsafe at the operator-display boundary, including invisible ALM/LRM/RLM marks.
-2. Keep internationalized printable text supported rather than reducing the operator timeline to ASCII.
-3. Reuse the central display validator so event identifiers, field names, and string values receive the same spoofing protection.
+1. Reject the Unicode `Cf` category at the operator-display trust boundary rather than manually chasing individual invisible/presentation controls as Unicode evolves.
+2. Preserve printable international text and combining marks; this is not an ASCII-only policy.
+3. Apply the central validator consistently to event identifiers, allowlisted field names, and string values.
 
 ### Blockers / unknowns
 
