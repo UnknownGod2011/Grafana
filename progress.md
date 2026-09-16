@@ -10,7 +10,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - StageGuard's supported MCP deployment is stdio-only and its compose evidence surface is restricted to `datasource,prometheus,loki` with writes and proxied tools disabled.
-- MCP launcher overrides are bounded before subprocess creation: raw command length, argv count, individual argument length, and ASCII control/DEL characters all fail closed above/outside the supported contract.
+- MCP launcher overrides are bounded before subprocess creation: raw command length, argv count, individual argument length, terminal/control characters, Unicode line separators, and bidi formatting controls fail closed outside the supported contract while printable Unicode paths remain valid.
 - The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
 - MCP peer-advertised tool names are untrusted input and must be non-empty, bounded, and free of ASCII control/DEL characters before they are stored, compared, or rendered in release evidence/errors.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
@@ -38,33 +38,33 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — MCP launcher control-character hardening
+## Run log — 2026-09-16 — MCP launcher Unicode diagnostic-control hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/command_line.py` and `runtime/tests/test_command_line_bounds.py`. The previous run had bounded raw launcher size, argv count, and individual argument length, but a quoted argument could still preserve ASCII control bytes (including NUL/DEL) through parsing and defer rejection or ambiguous handling to downstream process/logging behavior.
+Read `progress.md` completely first, then inspected `runtime/command_line.py`, `runtime/tests/test_command_line_bounds.py`, the runtime tree, and searched the repository for obvious TODO/FIXME/NotImplemented placeholders. The prior launcher boundary rejected ASCII C0 controls and DEL, but C1 terminal controls, Unicode line/paragraph separators, and bidi embedding/override/isolate controls could still survive parsing and become misleading terminal/log diagnostics.
 
 ### Changes / actions
 
-- Added a small `_contains_ascii_control()` boundary validator to `runtime/command_line.py`.
-- `split_command()` now rejects any normalized argv entry containing ASCII C0 control characters (`0x00`-`0x1f`) or DEL (`0x7f`) before transport validation and subprocess creation.
-- Ordinary spaces inside quoted arguments remain supported; the supported Docker/native/wrapper launcher contract does not require embedded control characters.
-- Added parameterized regressions for NUL, SOH, tab, newline, carriage return, unit separator, and DEL inside quoted arguments.
-- Added explicit ordinary-space acceptance and Windows post-normalization control-character rejection coverage.
-- Preserved launcher size bounds and stdio-only/network-transport rejection.
+- Replaced the narrow ASCII-control check with `_contains_diagnostic_control()` in `runtime/command_line.py`.
+- Launcher argv now rejects C0, DEL, C1 (`U+0080`-`U+009F`), Unicode line/paragraph separators (`U+2028`/`U+2029`), and explicit bidi embedding/override/isolate controls (`U+202A`-`U+202E`, `U+2066`-`U+2069`) before transport validation or subprocess creation.
+- Kept ordinary printable Unicode valid so legitimate internationalized filesystem paths and media-oriented arguments are not restricted to ASCII.
+- Expanded `runtime/tests/test_command_line_bounds.py` with regressions for C1 controls, Unicode separators, bidi controls, Windows post-normalization bidi rejection, and printable Unicode acceptance.
+- Preserved existing command/argv size bounds and stdio-only/network-transport enforcement.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub connector reads and source/test commits succeeded.
-- This runner does not provide a materialized executable repository checkout, so the new tests were not executed and no green pytest claim is made.
-- No GitHub Actions workflow was created or triggered.
+- GitHub connector repository inspection and source/test commits succeeded.
+- Repository code search found no obvious TODO/FIXME/NotImplemented/pass placeholder requiring higher-priority implementation.
+- This automation runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
+- No GitHub Actions workflow was created or triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Reject control characters at StageGuard's launcher boundary rather than relying on platform-specific subprocess behavior (notably embedded NUL rejection).
-2. Apply validation after Windows quote normalization so the exact argv values destined for process creation are checked consistently across platforms.
-3. Keep ordinary whitespace-in-quoted-arguments valid while rejecting control-bearing argv values that are unnecessary for supported launchers and hazardous in diagnostics.
+1. Treat launcher strings as a diagnostic-integrity boundary as well as a subprocess boundary because environment corruption can otherwise spoof or reorder human-readable incident/release output.
+2. Reject only known terminal/line/bidi formatting controls rather than all non-ASCII text; internationalized executable paths and arguments remain supported.
+3. Keep the validation after platform-specific argv normalization so the exact values destined for process creation are checked.
 
 ### Blockers / unknowns
 
