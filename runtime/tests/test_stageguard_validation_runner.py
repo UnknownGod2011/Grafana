@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,8 @@ RUNNER = ROOT / "scripts" / "run_stageguard_validation.py"
 _spec = importlib.util.spec_from_file_location("stageguard_validation_runner", RUNNER)
 assert _spec is not None and _spec.loader is not None
 runner = importlib.util.module_from_spec(_spec)
+# dataclasses resolves annotations through sys.modules while the module executes.
+sys.modules[_spec.name] = runner
 _spec.loader.exec_module(runner)
 
 
