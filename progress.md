@@ -29,6 +29,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
 - An absent static timeline policy may delegate to the canonical reconciliation projector; an explicitly configured null/malformed policy never does and fails closed.
 - Consolidated local validation gates must resolve to concrete test files before execution; an empty safety gate is an error, never a passing result.
+- The consolidated validation harness must execute its own regression suite before it can report a green result.
 
 ## Retained validation baseline
 
@@ -39,37 +40,33 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation selection integrity
+## Latest run — 2026-09-17 — validation harness self-verification
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, the README validation guidance, and the concrete `runtime/tests` inventory. The consolidated runner existed, but its timeline pattern selected only `test_timeline*.py`; the audit-facing timeline contracts were exercised incidentally by the broader audit gate rather than being owned by the timeline-disclosure gate. More importantly, unittest discovery can succeed with zero selected tests, so a future naming/layout drift could silently turn a safety gate green.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated runner had regressions for its selection and command behavior, but those regressions were not selected by any consolidated gate. A defect in the runner could therefore potentially coexist with a green result from the runner itself.
 
 ### Changes / actions
 
-- Hardened `scripts/run_stageguard_validation.py` so every gate resolves patterns to concrete files before any test process starts.
-- An empty gate now exits with configuration error code 2 rather than allowing unittest's zero-test success to create a false green.
-- Timeline disclosure now explicitly owns both `test_timeline*.py` and `test_audit_timeline*.py`.
-- Pattern overlaps are deduplicated deterministically by filename.
-- Each selected file runs in its own unittest process, preserving precise gate/file failure attribution while retaining fail-fast and `--keep-going` behavior.
-- `--list` now prints the actual concrete files selected by every gate, making coverage inspectable rather than showing only glob patterns.
-- Added `runtime/tests/test_stageguard_validation_runner.py` covering non-empty gate resolution, timeline audit-contract inclusion, deterministic deduplication, and concrete-file command scoping.
-- Corrected the regression test's dynamic module loader to register the runner in `sys.modules` before executing its dataclass declarations.
+- Added an explicit `validation harness` gate selecting `test_stageguard_validation_runner.py`.
+- Placed the harness gate first so fail-fast execution verifies the validator before relying on it for the safety/MCP gates.
+- Updated runner documentation to state the self-verification contract.
+- Added a regression asserting the harness gate owns exactly the runner regression file.
+- Preserved the existing concrete-file resolution, empty-gate failure, deterministic deduplication, fail-fast/keep-going behavior, and no-Docker/no-credential/no-CI scope.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Validation runner hardening committed as `46f74a36f731f358e6d876a12bfb97b435c934e3`.
-- Runner regression coverage added as `b0fb436f2fdf0a64a5c6295dc1b165ae80be0bdd` and loader correction as `18ccab15234fbdb2d3050c16e539db9721d1331d`.
-- Repository test inventory was inspected through GitHub and confirms the expected timeline/audit/MCP/execution test families exist.
-- This connector runner still does not expose an executable repository checkout, so neither the new runner nor its regression test was executed; no green-test claim is made.
+- Validation harness self-verification committed as `4f5c14cbee4277e73a419198642265e66e5f3e37`.
+- Ownership regression committed as `5e0e6930a4c35a7fac471702f7611683d13f3f50`.
+- The connector runner still does not expose an executable repository checkout, so the updated runner and regression were not executed; no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat validation-test discovery as part of the safety boundary: zero matched tests must fail closed.
-2. Give timeline-disclosure tests explicit ownership even when filenames also belong to the broader public-audit family; duplicate execution is preferable to accidental coverage dependence between gates.
-3. Resolve globs before execution so developers can inspect the exact gate contents and failures identify a concrete file.
+1. The validation harness is part of the safety boundary and must verify its own contracts in every consolidated run.
+2. Run harness regressions first so fail-fast mode does not rely on an unverified validator to interpret later gates.
+3. Keep live Docker/Grafana checks outside this dependency-light local gate.
 
 ### Blockers / unknowns
 
@@ -80,4 +77,4 @@ Read `progress.md` completely first, then inspected `scripts/run_stageguard_vali
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, then `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, confirm `validation harness` is first and owns `test_stageguard_validation_runner.py`, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
