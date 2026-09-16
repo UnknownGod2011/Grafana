@@ -6,6 +6,9 @@ typo or repository-layout change from turning an empty unittest discovery into
 a false-green safety gate. Tests run in separate Python processes per file so
 failures remain attributable without requiring runtime/tests to be a package.
 
+The validation harness is itself a gate: changes to this script cannot receive
+a green consolidated result without exercising its selection/command contracts.
+
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 read credentials; live MCP smoke remains an explicit follow-up gate.
 """
@@ -28,6 +31,9 @@ class Gate:
 
 
 GATES = (
+    # Keep the runner's own contract in the consolidated gate. Otherwise a
+    # regression in discovery/fail-closed behavior could still report green.
+    Gate("validation harness", ("test_stageguard_validation_runner.py",)),
     # Timeline policy lives partly in audit-facing tests, so keep both naming
     # families in the same disclosure gate rather than relying on another gate
     # to exercise them incidentally.
