@@ -14,6 +14,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Direct official `grafana/mcp-grafana` Docker launches, including explicit Docker Hub registry aliases, must opt into stdio; registry qualification cannot bypass the transport boundary.
 - The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
 - MCP peer-advertised tool names are untrusted input and must be non-empty, bounded, and free of ASCII control/DEL characters before they are stored, compared, or rendered in release evidence/errors.
+- MCP peer error/result diagnostics are bounded and control-safe before they are emitted; the release smoke must not dump near-frame-limit peer payloads into logs.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -39,40 +40,40 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — Docker Hub MCP image-alias transport hardening
+## Run log — 2026-09-16 — bounded MCP peer diagnostics
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/command_line.py` and `runtime/tests/test_command_line_bounds.py`. The existing direct-Docker safety check recognized `grafana/mcp-grafana[:tag|@digest]`, but explicit Docker Hub registry spellings such as `docker.io/grafana/mcp-grafana:1.4.1` were not recognized as the same official image. That allowed registry qualification to bypass the rule requiring the official image to opt into `-t stdio`.
+Read `progress.md` completely first, inspected the repository tree, then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py`. The stdio frame itself was capped at 1 MiB, but JSON-RPC `error`, malformed `result`, tool-error `content`, and successful query `content` could still be interpolated or printed nearly in full. A malicious or pathological MCP peer could therefore turn an otherwise bounded frame into very large release diagnostics.
 
 ### Changes / actions
 
-- Hardened `_is_official_mcp_docker_image()` to normalize the Docker Hub aliases `docker.io/`, `index.docker.io/`, and `registry-1.docker.io/` before matching the official Grafana MCP repository.
-- Kept matching case-insensitive and preserved tag/digest recognition.
-- Deliberately do not treat arbitrary third-party registries containing a `grafana/mcp-grafana` path as the official image; StageGuard should not infer image provenance across unrelated registries.
-- Added regression coverage proving all supported Docker Hub aliases fail closed without explicit stdio and succeed when `-t stdio` is present.
-- Added a negative regression proving an unrelated registry namespace is not misidentified as the official image.
+- Added `_bounded_diagnostic()` with a 2,048-character peer-diagnostic budget and an explicit truncation marker.
+- Used `repr()` before bounding so embedded control characters are escaped rather than rendered as forged terminal/log lines.
+- Applied bounded rendering to JSON-RPC errors, malformed results, tool `isError` content, and the successful query summary emitted by the release smoke.
+- Renamed emitted successful evidence from raw `result` to `result_summary` to make the intentionally bounded semantics explicit.
+- Added focused contract tests for control escaping, large-payload truncation, and bounded tool-error diagnostics.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
 - GitHub connector repository inspection and source/test commits succeeded.
-- This automation runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
+- This runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
 - No GitHub Actions workflow was created or triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat explicit Docker Hub registry aliases as semantically equivalent to the short official image name for transport enforcement.
-2. Keep the provenance match intentionally narrow: only known Docker Hub aliases are normalized, avoiding false trust in lookalike repositories on arbitrary registries.
-3. Preserve stdio as the only supported StageGuard MCP transport rather than relying on network-server authentication to compensate for an accidental transport change.
+1. Treat MCP response content as untrusted even after the outer JSON-RPC frame passes its 1 MiB transport bound.
+2. Bound diagnostics independently from transport frames because operator logs/release evidence have a much smaller useful size budget.
+3. Preserve enough prefix context for debugging while making truncation explicit and deterministic.
 
 ### Blockers / unknowns
 
-- Latest launcher tests, MCP negotiation/metadata/tool-name/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- Latest MCP smoke diagnostic tests, launcher tests, MCP negotiation/metadata/tool-name/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run `runtime/tests/test_command_line_bounds.py`, `runtime/tests/test_mcp_smoke_contract.py`, `runtime/tests/test_observability_image_pins.py`, the focused timeline/public-audit tests, and execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+Run `runtime/tests/test_mcp_smoke_contract.py`, `runtime/tests/test_command_line_bounds.py`, `runtime/tests/test_observability_image_pins.py`, the focused timeline/public-audit tests, and execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
