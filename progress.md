@@ -13,7 +13,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - MCP launcher overrides are bounded before subprocess creation: raw command length, argv count, individual argument length, terminal/control characters, Unicode line separators, and bidi formatting controls fail closed outside the supported contract while printable Unicode paths remain valid.
 - Direct official `grafana/mcp-grafana` Docker launches, including explicit Docker Hub registry aliases, must opt into stdio; registry qualification cannot bypass the transport boundary.
 - The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
-- MCP peer-advertised tool names are untrusted input and must be non-empty, bounded, and free of ASCII control/DEL characters before they are stored, compared, or rendered in release evidence/errors.
+- MCP peer-advertised server identity and tool names are untrusted display input: they must be bounded and reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls before storage or rendering; ordinary printable Unicode remains valid.
 - MCP peer error/result diagnostics are bounded and control-safe before they are emitted; the release smoke must not dump near-frame-limit peer payloads into logs.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
@@ -40,36 +40,35 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — bounded MCP peer diagnostics
+## Run log — 2026-09-16 — Unicode-safe MCP peer metadata
 
 ### Inspected at start
 
-Read `progress.md` completely first, inspected the repository tree, then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py`. The stdio frame itself was capped at 1 MiB, but JSON-RPC `error`, malformed `result`, tool-error `content`, and successful query `content` could still be interpolated or printed nearly in full. A malicious or pathological MCP peer could therefore turn an otherwise bounded frame into very large release diagnostics.
+Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py`. The release smoke already rejected C0 controls and DEL in peer-advertised `serverInfo` and tool names, but C1 terminal controls, Unicode line/paragraph separators, and bidi formatting controls could still reach operator/release output.
 
 ### Changes / actions
 
-- Added `_bounded_diagnostic()` with a 2,048-character peer-diagnostic budget and an explicit truncation marker.
-- Used `repr()` before bounding so embedded control characters are escaped rather than rendered as forged terminal/log lines.
-- Applied bounded rendering to JSON-RPC errors, malformed results, tool `isError` content, and the successful query summary emitted by the release smoke.
-- Renamed emitted successful evidence from raw `result` to `result_summary` to make the intentionally bounded semantics explicit.
-- Added focused contract tests for control escaping, large-payload truncation, and bounded tool-error diagnostics.
+- Added a shared `_contains_unsafe_display_char()` peer-metadata validator.
+- Server identity and tool names now reject C0 controls, DEL/C1 controls, U+2028/U+2029, bidi embedding/override controls, and bidi isolate controls.
+- Kept printable Unicode valid so legitimate internationalized metadata is not reduced to ASCII-only behavior.
+- Added regressions for NEXT LINE, Unicode line/paragraph separators, bidi override/isolate characters, plus positive printable-Unicode cases for server identity and tool names.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
 - GitHub connector repository inspection and source/test commits succeeded.
 - This runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
-- No GitHub Actions workflow was created or triggered as a substitute for local validation.
+- No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat MCP response content as untrusted even after the outer JSON-RPC frame passes its 1 MiB transport bound.
-2. Bound diagnostics independently from transport frames because operator logs/release evidence have a much smaller useful size budget.
-3. Preserve enough prefix context for debugging while making truncation explicit and deterministic.
+1. Apply the same terminal-safety model to peer metadata that the launcher boundary already applies to environment-controlled argv.
+2. Keep the policy narrowly focused on display-affecting/control code points instead of banning legitimate non-ASCII metadata.
+3. Reuse one validator for server identity and tool names to prevent policy drift.
 
 ### Blockers / unknowns
 
-- Latest MCP smoke diagnostic tests, launcher tests, MCP negotiation/metadata/tool-name/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- Latest MCP smoke metadata/diagnostic tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
