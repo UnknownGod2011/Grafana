@@ -21,6 +21,7 @@ MAX_STDIO_LINE_CHARS = 1_048_576
 MAX_STDOUT_QUEUE_FRAMES = 16
 MAX_SERVER_INFO_FIELD_CHARS = 128
 MAX_TOOL_NAME_CHARS = 128
+MAX_DIAGNOSTIC_CHARS = 2048
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -31,6 +32,20 @@ REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
 
 class McpError(RuntimeError):
     pass
+
+
+def _bounded_diagnostic(value: Any) -> str:
+    """Render untrusted peer data without allowing release diagnostics to explode.
+
+    JSON-RPC frames are already size-bounded, but a near-limit error/result can still
+    make logs and operator terminals unwieldy. Keep diagnostic rendering deterministic
+    and visibly mark truncation. ``repr`` also escapes embedded control characters.
+    """
+    rendered = repr(value)
+    if len(rendered) <= MAX_DIAGNOSTIC_CHARS:
+        return rendered
+    omitted = len(rendered) - MAX_DIAGNOSTIC_CHARS
+    return f"{rendered[:MAX_DIAGNOSTIC_CHARS]}...<truncated {omitted} chars>"
 
 
 def _configured_command(raw: str | None = None) -> list[str]:
@@ -173,10 +188,10 @@ class StdioClient:
             if message.get("id") != request_id:
                 raise McpError(f"MCP returned unexpected response id while waiting for {method}")
             if "error" in message:
-                raise McpError(f"{method} failed: {message['error']}")
+                raise McpError(f"{method} failed: {_bounded_diagnostic(message['error'])}")
             result = message.get("result")
             if not isinstance(result, dict):
-                raise McpError(f"{method} returned malformed result: {result!r}")
+                raise McpError(f"{method} returned malformed result: {_bounded_diagnostic(result)}")
             return result
 
     def close(self) -> None:
@@ -233,7 +248,7 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
 
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
     if result.get("isError"):
-        raise McpError(f"{name} returned isError=true: {result.get('content')}")
+        raise McpError(f"{name} returned isError=true: {_bounded_diagnostic(result.get('content'))}")
 
 
 def main() -> None:
@@ -252,7 +267,7 @@ def main() -> None:
         _assert_tool_result("list_datasources", datasources)
         query = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": DATASOURCE_UID, "expr": QUERY, "queryType": "instant", "endTime": "now"}})
         _assert_tool_result("query_prometheus", query)
-        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": DATASOURCE_UID, "query": QUERY, "result": query.get("content")}, indent=2))
+        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": DATASOURCE_UID, "query": QUERY, "result_summary": _bounded_diagnostic(query.get("content"))}, indent=2))
         print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, and executed a Prometheus query through Grafana.")
     finally:
         client.close()
