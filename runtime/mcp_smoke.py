@@ -31,6 +31,7 @@ REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
 # Peer metadata is eventually rendered into operator/release output. Reject characters
 # that can alter terminal layout or visual ordering even though they are valid Unicode.
 _UNSAFE_DISPLAY_CODEPOINTS = frozenset({0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069})
+_SENSITIVE_ARG_MARKERS = frozenset({"token", "secret", "password", "passwd", "apikey", "api-key", "authorization", "cookie", "credential", "credentials"})
 
 
 class McpError(RuntimeError):
@@ -52,6 +53,30 @@ def _bounded_diagnostic(value: Any) -> str:
         return rendered
     omitted = len(rendered) - MAX_DIAGNOSTIC_CHARS
     return f"{rendered[:MAX_DIAGNOSTIC_CHARS]}...<truncated {omitted} chars>"
+
+
+def _redacted_command(parts: list[str]) -> str:
+    """Render launcher argv without leaking inline credentials into operator output."""
+    rendered: list[str] = []
+    redact_next = False
+    for part in parts:
+        marker = part.lstrip("-\"").split("=", 1)[0].lower()
+        if redact_next:
+            rendered.append("<redacted>")
+            redact_next = False
+            continue
+        if marker in _SENSITIVE_ARG_MARKERS:
+            rendered.append(part.split("=", 1)[0] + "=<redacted>" if "=" in part else part)
+            if "=" not in part:
+                redact_next = True
+            continue
+        if any(marker.startswith(f"{candidate}-") for candidate in _SENSITIVE_ARG_MARKERS):
+            rendered.append(part.split("=", 1)[0] + "=<redacted>" if "=" in part else part)
+            if "=" not in part:
+                redact_next = True
+            continue
+        rendered.append(part)
+    return " ".join(rendered)
 
 
 def _configured_command(raw: str | None = None) -> list[str]:
@@ -261,7 +286,7 @@ def main() -> None:
     command = _configured_command()
     request_timeout = _request_timeout_seconds(os.getenv("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS"))
     requested_protocol = os.getenv("STAGEGUARD_MCP_PROTOCOL_VERSION", "2025-06-18")
-    print("Launching official Grafana MCP smoke test:", " ".join(command))
+    print("Launching official Grafana MCP smoke test:", _redacted_command(command))
     client = StdioClient(command, request_timeout_seconds=request_timeout)
     try:
         initialized = client.request("initialize", {"protocolVersion": requested_protocol, "capabilities": {}, "clientInfo": {"name": "stageguard-mcp-smoke", "version": "0.1.0"}})
