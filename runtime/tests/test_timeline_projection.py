@@ -42,7 +42,7 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
 
     def test_unsafe_reconciliation_event_types_fail_closed(self) -> None:
         payload = {"result": "accepted", "reason": "durable_dispatching"}
-        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u061c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200b", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200d", "remediation_reconciliation_attempt.accepted.durable_dispatching\ufeff", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "x" * 161):
+        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u061c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200b", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200c", "remediation_reconciliation_attempt.accepted.durable_dispatching\u200d", "remediation_reconciliation_attempt.accepted.durable_dispatching\ufeff", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "remediation_reconciliation_attempt.accepted.durable_dispatching\ud800", "x" * 161):
             with self.subTest(event_type=repr(event_type)): self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
 
 
@@ -59,7 +59,7 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         self.assertEqual(timeline_payload("incident_opened", {"message": "x" * 513, "counter": 1 << 63}, {"incident_opened": ("message", "counter")}), {})
 
     def test_terminal_dangerous_strings_are_rejected(self) -> None:
-        dangerous_values = ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue", "c1\x85next", "arabic-mark\u061cvalue", "zero-width-space\u200bvalue", "zwnj\u200cvalue", "zwj\u200dvalue", "bom\ufeffvalue", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text")
+        dangerous_values = ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue", "c1\x85next", "arabic-mark\u061cvalue", "zero-width-space\u200bvalue", "zwnj\u200cvalue", "zwj\u200dvalue", "bom\ufeffvalue", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text", "lone-surrogate\ud800value")
         for dangerous in dangerous_values:
             with self.subTest(dangerous=repr(dangerous)): self.assertEqual(timeline_payload("incident_opened", {"value": dangerous}, {"incident_opened": ("value",)}), {})
 
@@ -81,7 +81,7 @@ class TimelinePayloadScalarTests(unittest.TestCase):
     def test_event_type_is_validated_before_policy_lookup(self) -> None:
         class NoLookupMapping(dict):
             def get(self, key, default=None): raise AssertionError("unsafe event type must fail before policy lookup")
-        for event_type in ("", "incident\nopened", "incident\u200bopened", "incident\u200copened", "incident\u200dopened", "incident\ufeffopened", "incident\u2028opened", "incident\u202eopened", "x" * 161):
+        for event_type in ("", "incident\nopened", "incident\u200bopened", "incident\u200copened", "incident\u200dopened", "incident\ufeffopened", "incident\u2028opened", "incident\u202eopened", "incident\ud800opened", "x" * 161):
             with self.subTest(event_type=repr(event_type)): self.assertEqual(timeline_payload(event_type, {"severity": "high"}, NoLookupMapping()), {})
 
     def test_static_policy_rejects_string_non_string_and_oversized_allowlists(self) -> None:
@@ -93,7 +93,7 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         self.assertEqual(timeline_payload("incident_opened", NoReadMapping({"severity": "high"}), {"incident_opened": ("severity", "severity")}), {})
 
     def test_static_policy_rejects_unsafe_or_oversized_field_names(self) -> None:
-        for field in ("", "line\nfeed", "zero\u200bwidth", "zwnj\u200cfield", "zwj\u200dfield", "bom\ufefffield", "line\u2028separator", "bidi\u202eoverride", "x" * 129):
+        for field in ("", "line\nfeed", "zero\u200bwidth", "zwnj\u200cfield", "zwj\u200dfield", "bom\ufefffield", "line\u2028separator", "bidi\u202eoverride", "surrogate\ud800field", "x" * 129):
             with self.subTest(field=repr(field)): self.assertEqual(timeline_payload("incident_opened", {field: "visible"}, {"incident_opened": (field,)}), {})
 
     def test_static_policy_accepts_printable_unicode_field_names_at_boundary(self) -> None:
