@@ -15,6 +15,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - The Grafana MCP release smoke must negotiate the exact configured MCP protocol and return structurally valid, bounded server identity/capabilities before StageGuard trusts its advertised tool surface.
 - MCP peer-advertised server identity and tool names are untrusted display input: they must be bounded and reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls before storage or rendering; ordinary printable Unicode remains valid.
 - MCP peer error/result diagnostics are bounded and control-safe before they are emitted; the release smoke must not dump near-frame-limit peer payloads into logs.
+- MCP launcher diagnostics must redact inline credential-like argv values before printing the configured command.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -40,18 +41,18 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — Unicode-safe MCP peer metadata
+## Run log — 2026-09-16 — Redacted MCP launcher diagnostics
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py`. The release smoke already rejected C0 controls and DEL in peer-advertised `serverInfo` and tool names, but C1 terminal controls, Unicode line/paragraph separators, and bidi formatting controls could still reach operator/release output.
+Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_contract.py`, and `runtime/command_line.py`. The smoke test printed the fully parsed launcher argv, which could leak inline API keys, bearer tokens, cookies, passwords, or other credential-like values when operators supplied them through `STAGEGUARD_MCP_COMMAND`.
 
 ### Changes / actions
 
-- Added a shared `_contains_unsafe_display_char()` peer-metadata validator.
-- Server identity and tool names now reject C0 controls, DEL/C1 controls, U+2028/U+2029, bidi embedding/override controls, and bidi isolate controls.
-- Kept printable Unicode valid so legitimate internationalized metadata is not reduced to ASCII-only behavior.
-- Added regressions for NEXT LINE, Unicode line/paragraph separators, bidi override/isolate characters, plus positive printable-Unicode cases for server identity and tool names.
+- Added `_redacted_command()` to render launcher argv safely for operator output.
+- Redacts separate sensitive flag values and inline `--token=value` / `--api-key=value`-style values while preserving non-sensitive command structure.
+- Updated the smoke launch banner to use the redacted rendering.
+- Added regressions for separate and inline secrets plus a positive non-sensitive command case.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
@@ -62,17 +63,17 @@ Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py` and `
 
 ### Decisions
 
-1. Apply the same terminal-safety model to peer metadata that the launcher boundary already applies to environment-controlled argv.
-2. Keep the policy narrowly focused on display-affecting/control code points instead of banning legitimate non-ASCII metadata.
-3. Reuse one validator for server identity and tool names to prevent policy drift.
+1. Keep credential redaction local to presentation; the actual validated argv passed to `subprocess.Popen` is unchanged.
+2. Cover common credential markers without attempting broad secret-scanning heuristics that could redact legitimate paths or query arguments.
+3. Preserve the existing bounded/terminal-safe launcher validation as the authoritative subprocess boundary.
 
 ### Blockers / unknowns
 
-- Latest MCP smoke metadata/diagnostic tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- Latest MCP smoke metadata/diagnostic/redaction tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run `runtime/tests/test_mcp_smoke_contract.py`, `runtime/tests/test_command_line_bounds.py`, `runtime/tests/test_observability_image_pins.py`, the focused timeline/public-audit tests, and execution-safety reconciliation suite in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+Run the consolidated MCP smoke/launcher tests plus the focused timeline/public-audit/execution-safety suites in an executable checkout. If green, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
