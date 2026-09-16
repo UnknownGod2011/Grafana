@@ -89,6 +89,15 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         for allowed in ("severity", ("severity", 7), tuple(f"field_{i}" for i in range(65))):
             self.assertEqual(timeline_payload("incident_opened", {"severity": "high"}, {"incident_opened": allowed}), {})
 
+    def test_static_policy_rejects_unsafe_or_oversized_field_names(self) -> None:
+        for field in ("", "line\nfeed", "c1\x85next", "line\u2028separator", "bidi\u202eoverride", "x" * 129):
+            with self.subTest(field=repr(field)):
+                self.assertEqual(timeline_payload("incident_opened", {field: "visible"}, {"incident_opened": (field,)}), {})
+
+    def test_static_policy_accepts_printable_unicode_field_names_at_boundary(self) -> None:
+        field = "測" * 128
+        self.assertEqual(timeline_payload("incident_opened", {field: "visible"}, {"incident_opened": (field,)}), {field: "visible"})
+
     def test_static_policy_bounds_infinite_iterators(self) -> None:
         def forever():
             index = 0
