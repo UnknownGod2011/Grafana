@@ -22,7 +22,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Metric/Loki activation is policy-owned and versioned; HTTP callers cannot supply arbitrary Grafana queries or datasource identities.
 - Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
-- Static timeline field policy itself is bounded to 64 string keys; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed.
+- Static timeline field policy itself is bounded to 64 non-empty, terminal-safe string keys of at most 128 characters; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed.
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 
 ## Retained validation baseline
@@ -34,32 +34,33 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Fail-closed timeline Mapping access
+## Latest run — 2026-09-16 — Terminal-safe timeline field names
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Iterator materialization already failed closed, but custom `Mapping` implementations could still raise ordinary runtime exceptions from policy lookup, payload membership/index access, or reconciliation `.get()` calls and turn an operator timeline request into a server error.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Timeline values and allowlist cardinality were bounded, but allowlisted field names themselves could still be empty, oversized, or contain terminal-control/bidi characters and then become operator-visible JSON keys.
 
 ### Changes / actions
 
-- Hardened reconciliation payload reads so ordinary custom-Mapping failures return an empty projection.
-- Hardened static policy Mapping lookup and allowlisted payload reads with the same fail-closed boundary.
-- Preserved `BaseException` semantics by catching only ordinary `Exception`.
-- Added a reusable broken Mapping fixture and regressions for reconciliation reads, policy lookup failures, and static payload read failures.
+- Added a dedicated 128-character maximum for static timeline field names.
+- Reused the terminal-safety validator with an explicit length budget so field names reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls.
+- Empty field names now fail closed as malformed disclosure policy.
+- Preserved printable internationalized field names and the existing 512-character value budget.
+- Added regressions for empty, newline, C1, Unicode line-separator, bidi-override, oversized, and exact-boundary printable-Unicode field names.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Implementation update committed as `b77f55f8cb23191d2ffaa512c9a6c9456b887dd9`.
-- Regression-test update committed as `b7782ad2575f9642c7e749bcbf65ffa8be187d46`.
+- Implementation update committed as `d4341e8feca7c6c17cf98972ea39af594112de44`.
+- Regression-test update committed as `08fd0f5a7858f1fc618ab8670fb30ce8498e6e03`.
 - This runner does not expose an executable checkout, so the new tests were not run and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat both durable payload Mapping access and extension/configuration policy Mapping access as untrusted boundaries.
-2. Fail closed on ordinary read failures rather than emit partial disclosure or operator-facing 500s.
-3. Continue not catching `BaseException`, preserving cancellation/process-control behavior.
+1. Treat operator-visible JSON keys as part of the same terminal/log injection boundary as values.
+2. Keep field-name and field-value length budgets separate because policy identifiers should be substantially smaller than display values.
+3. Fail the entire malformed static policy closed rather than partially project neighboring fields.
 
 ### Blockers / unknowns
 
