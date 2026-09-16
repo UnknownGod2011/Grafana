@@ -50,37 +50,16 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
 
     def test_unbounded_or_future_values_fail_closed(self) -> None:
         for event_type, payload in (
-            (
-                "remediation_reconciliation_attempt.accepted.future_reason",
-                {"result": "accepted", "reason": "future_reason"},
-            ),
-            (
-                "remediation_reconciliation_attempt.future.durable_dispatching",
-                {"result": "future", "reason": "durable_dispatching"},
-            ),
-            (
-                "remediation_reconciliation_future.accepted.durable_dispatching",
-                {"result": "accepted", "reason": "durable_dispatching"},
-            ),
+            ("remediation_reconciliation_attempt.accepted.future_reason", {"result": "accepted", "reason": "future_reason"}),
+            ("remediation_reconciliation_attempt.future.durable_dispatching", {"result": "future", "reason": "durable_dispatching"}),
+            ("remediation_reconciliation_future.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching"}),
         ):
             with self.subTest(event_type=event_type):
                 self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
 
     def test_event_name_and_payload_must_agree(self) -> None:
-        self.assertEqual(
-            reconciliation_timeline_payload(
-                "remediation_reconciliation_attempt.accepted.durable_dispatching",
-                {"result": "unknown", "reason": "durable_dispatching"},
-            ),
-            {},
-        )
-        self.assertEqual(
-            reconciliation_timeline_payload(
-                "remediation_reconciliation_recovered.accepted.durable_dispatching",
-                {"result": "accepted", "reason": "legacy_unknown"},
-            ),
-            {},
-        )
+        self.assertEqual(reconciliation_timeline_payload("remediation_reconciliation_attempt.accepted.durable_dispatching", {"result": "unknown", "reason": "durable_dispatching"}), {})
+        self.assertEqual(reconciliation_timeline_payload("remediation_reconciliation_recovered.accepted.durable_dispatching", {"result": "accepted", "reason": "legacy_unknown"}), {})
 
     def test_noncanonical_event_names_fail_closed(self) -> None:
         payload = {"result": "accepted", "reason": "durable_dispatching"}
@@ -97,39 +76,16 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
 class TimelinePayloadScalarTests(unittest.TestCase):
     def test_allowlisted_static_fields_project_only_safe_json_scalars(self) -> None:
         static_fields = {"incident_opened": ("severity", "attempt", "details")}
-        payload = {
-            "severity": "high",
-            "attempt": 3,
-            "details": True,
-            "provider_body": {"secret": "must-not-leak"},
-            "operation_id": "must-not-leak",
-        }
-        self.assertEqual(
-            timeline_payload("incident_opened", payload, static_fields),
-            {"severity": "high", "attempt": 3, "details": True},
-        )
+        payload = {"severity": "high", "attempt": 3, "details": True, "provider_body": {"secret": "must-not-leak"}, "operation_id": "must-not-leak"}
+        self.assertEqual(timeline_payload("incident_opened", payload, static_fields), {"severity": "high", "attempt": 3, "details": True})
 
     def test_nested_objects_and_arrays_are_rejected_even_when_allowlisted(self) -> None:
         static_fields = {"incident_opened": ("nested", "items")}
-        self.assertEqual(
-            timeline_payload(
-                "incident_opened",
-                {"nested": {"secret": "x"}, "items": ["x"]},
-                static_fields,
-            ),
-            {},
-        )
+        self.assertEqual(timeline_payload("incident_opened", {"nested": {"secret": "x"}, "items": ["x"]}, static_fields), {})
 
     def test_oversized_strings_and_arbitrary_precision_integers_are_rejected(self) -> None:
         static_fields = {"incident_opened": ("message", "counter")}
-        self.assertEqual(
-            timeline_payload(
-                "incident_opened",
-                {"message": "x" * 513, "counter": 1 << 63},
-                static_fields,
-            ),
-            {},
-        )
+        self.assertEqual(timeline_payload("incident_opened", {"message": "x" * 513, "counter": 1 << 63}, static_fields), {})
 
     def test_terminal_dangerous_strings_are_rejected(self) -> None:
         static_fields = {"incident_opened": ("value",)}
@@ -144,38 +100,37 @@ class TimelinePayloadScalarTests(unittest.TestCase):
         static_fields = {"incident_opened": ("value", "minimum", "maximum")}
         value = "直播·ライブ·лайв·بث"
         self.assertEqual(
-            timeline_payload(
-                "incident_opened",
-                {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1},
-                static_fields,
-            ),
+            timeline_payload("incident_opened", {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1}, static_fields),
             {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1},
         )
 
     def test_non_finite_floats_are_rejected_but_finite_floats_are_allowed(self) -> None:
         static_fields = {"incident_opened": ("good", "bad")}
-        self.assertEqual(
-            timeline_payload(
-                "incident_opened",
-                {"good": 1.25, "bad": math.inf},
-                static_fields,
-            ),
-            {"good": 1.25},
-        )
+        self.assertEqual(timeline_payload("incident_opened", {"good": 1.25, "bad": math.inf}, static_fields), {"good": 1.25})
 
     def test_unknown_event_types_delegate_only_to_canonical_reconciliation_projection(self) -> None:
-        self.assertEqual(
-            timeline_payload(
-                "remediation_reconciliation_attempt.accepted.durable_dispatching",
-                {"result": "accepted", "reason": "durable_dispatching", "body": {"secret": "x"}},
-                {},
-            ),
-            {"result": "accepted", "reason": "durable_dispatching"},
-        )
-        self.assertEqual(
-            timeline_payload("future_event", {"message": "should not leak"}, {}),
-            {},
-        )
+        self.assertEqual(timeline_payload("remediation_reconciliation_attempt.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching", "body": {"secret": "x"}}, {}), {"result": "accepted", "reason": "durable_dispatching"})
+        self.assertEqual(timeline_payload("future_event", {"message": "should not leak"}, {}), {})
+
+    def test_static_policy_rejects_string_non_string_and_oversized_allowlists(self) -> None:
+        payload = {"severity": "high", "attempt": 3}
+        for allowed in ("severity", ("severity", 7), tuple(f"field_{i}" for i in range(65))):
+            with self.subTest(allowed=repr(allowed)):
+                self.assertEqual(timeline_payload("incident_opened", payload, {"incident_opened": allowed}), {})
+
+    def test_static_policy_bounds_infinite_iterators(self) -> None:
+        def forever():
+            index = 0
+            while True:
+                yield f"field_{index}"
+                index += 1
+
+        self.assertEqual(timeline_payload("incident_opened", {"field_0": "visible"}, {"incident_opened": forever()}), {})
+
+    def test_static_policy_accepts_exact_field_limit(self) -> None:
+        allowed = tuple(f"field_{i}" for i in range(64))
+        payload = {"field_0": "first", "field_63": "last"}
+        self.assertEqual(timeline_payload("incident_opened", payload, {"incident_opened": allowed}), {"field_0": "first", "field_63": "last"})
 
 
 if __name__ == "__main__":
