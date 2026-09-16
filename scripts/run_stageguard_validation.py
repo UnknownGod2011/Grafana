@@ -33,6 +33,9 @@ GATES = (
 
 
 def _command(pattern: str) -> list[str]:
+    # Do not force unittest's top-level-directory option here: runtime/tests is
+    # intentionally usable without being a Python package. Running from ROOT
+    # still makes the runtime package importable by the discovered test modules.
     return [
         sys.executable,
         "-m",
@@ -42,8 +45,6 @@ def _command(pattern: str) -> list[str]:
         str(TESTS),
         "-p",
         pattern,
-        "-t",
-        str(ROOT),
     ]
 
 
