@@ -9,16 +9,12 @@ from runtime.timeline_projection import reconciliation_timeline_payload, timelin
 
 
 class BrokenMapping(Mapping):
-    """Mapping whose reads fail like a malformed persistence/plugin adapter."""
     def __iter__(self):
         return iter(())
-
     def __len__(self):
         return 0
-
     def __getitem__(self, key):
         raise RuntimeError("malformed mapping")
-
     def get(self, key, default=None):
         raise RuntimeError("malformed mapping")
 
@@ -49,6 +45,12 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
     def test_mapping_read_failures_fail_closed(self) -> None:
         self.assertEqual(reconciliation_timeline_payload("remediation_reconciliation_attempt.accepted.durable_dispatching", BrokenMapping()), {})
 
+    def test_unsafe_reconciliation_event_types_fail_closed(self) -> None:
+        payload = {"result": "accepted", "reason": "durable_dispatching"}
+        for event_type in ("", "remediation_reconciliation_attempt.accepted.durable_dispatching\n", "remediation_reconciliation_attempt.accepted.durable_dispatching\u202e", "x" * 161):
+            with self.subTest(event_type=repr(event_type)):
+                self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
+
 
 class TimelinePayloadScalarTests(unittest.TestCase):
     def test_allowlisted_static_fields_project_only_safe_json_scalars(self) -> None:
@@ -77,6 +79,15 @@ class TimelinePayloadScalarTests(unittest.TestCase):
     def test_unknown_event_types_delegate_only_to_canonical_reconciliation_projection(self) -> None:
         self.assertEqual(timeline_payload("remediation_reconciliation_attempt.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching"}, {}), {"result": "accepted", "reason": "durable_dispatching"})
         self.assertEqual(timeline_payload("future_event", {"message": "should not leak"}, {}), {})
+
+    def test_event_type_is_validated_before_policy_lookup(self) -> None:
+        class NoLookupMapping(dict):
+            def get(self, key, default=None):
+                raise AssertionError("unsafe event type must fail before policy lookup")
+        payload = {"severity": "high"}
+        for event_type in ("", "incident\nopened", "incident\u2028opened", "incident\u202eopened", "x" * 161):
+            with self.subTest(event_type=repr(event_type)):
+                self.assertEqual(timeline_payload(event_type, payload, NoLookupMapping()), {})
 
     def test_static_policy_rejects_string_non_string_and_oversized_allowlists(self) -> None:
         for allowed in ("severity", ("severity", 7), tuple(f"field_{i}" for i in range(65))):
