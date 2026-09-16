@@ -23,7 +23,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
 - Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
 - Static timeline field policy itself is bounded to 64 string keys; malformed, oversized, string-as-iterable, and non-terminating allowlists fail closed.
-- Static timeline field policy iterator failures fail closed; malformed plugin/configuration iterators cannot surface partial disclosure or operator-facing 500s.
+- Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 
 ## Retained validation baseline
 
@@ -34,31 +34,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-16 — Fail-closed policy iterator handling
+## Latest run — 2026-09-16 — Fail-closed timeline Mapping access
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. The static-field policy was bounded, but exceptions raised while materializing a plugin/configuration iterable were only partially covered (`TypeError`/`ValueError`). A malformed iterator could still raise another runtime exception during operator timeline projection.
+Read `progress.md` completely first, then inspected `runtime/timeline_projection.py` and `runtime/tests/test_timeline_projection.py`. Iterator materialization already failed closed, but custom `Mapping` implementations could still raise ordinary runtime exceptions from policy lookup, payload membership/index access, or reconciliation `.get()` calls and turn an operator timeline request into a server error.
 
 ### Changes / actions
 
-- Hardened `_bounded_static_fields()` to catch any ordinary `Exception` from `iter()`/bounded materialization and return `None`.
-- Preserved `BaseException` semantics so process-control signals are not swallowed.
-- Added a regression with an iterator whose `__iter__` raises `RuntimeError`; projection fails closed with no disclosure.
+- Hardened reconciliation payload reads so ordinary custom-Mapping failures return an empty projection.
+- Hardened static policy Mapping lookup and allowlisted payload reads with the same fail-closed boundary.
+- Preserved `BaseException` semantics by catching only ordinary `Exception`.
+- Added a reusable broken Mapping fixture and regressions for reconciliation reads, policy lookup failures, and static payload read failures.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub source update succeeded: `4435d56b92454c03fa12ad63c3b814b18f97d6ac`.
-- Regression-test update succeeded: `9e7b9e11bcd8ab5258101f6816e59fa0327f8ce5`.
-- This runner does not expose an executable checkout, so the new test was not run and no green-test claim is made.
+- Implementation update committed as `b77f55f8cb23191d2ffaa512c9a6c9456b887dd9`.
+- Regression-test update committed as `b7782ad2575f9642c7e749bcbf65ffa8be187d46`.
+- This runner does not expose an executable checkout, so the new tests were not run and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat policy iterator execution as untrusted extension/configuration behavior.
-2. Fail closed on ordinary iterator failures rather than expose partial fields or convert malformed policy into a public server error.
-3. Do not catch `BaseException`, preserving cancellation and process-level control semantics.
+1. Treat both durable payload Mapping access and extension/configuration policy Mapping access as untrusted boundaries.
+2. Fail closed on ordinary read failures rather than emit partial disclosure or operator-facing 500s.
+3. Continue not catching `BaseException`, preserving cancellation/process-control behavior.
 
 ### Blockers / unknowns
 
