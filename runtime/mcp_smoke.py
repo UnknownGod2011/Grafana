@@ -22,6 +22,7 @@ MAX_STDOUT_QUEUE_FRAMES = 16
 MAX_SERVER_INFO_FIELD_CHARS = 128
 MAX_TOOL_NAME_CHARS = 128
 MAX_DIAGNOSTIC_CHARS = 2048
+MAX_CONFIG_TEXT_CHARS = 512
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv(
     "STAGEGUARD_MCP_SMOKE_QUERY",
@@ -44,6 +45,15 @@ def _contains_unsafe_display_char(value: str) -> bool:
         if codepoint < 32 or 0x7F <= codepoint <= 0x9F or codepoint in _UNSAFE_DISPLAY_CODEPOINTS:
             return True
     return False
+
+
+def _bounded_config_text(value: str, field: str) -> str:
+    """Validate operator-controlled config before it enters requests or output."""
+    if not isinstance(value, str) or not value.strip():
+        raise McpError(f"{field} must be a non-empty string")
+    if len(value) > MAX_CONFIG_TEXT_CHARS or _contains_unsafe_display_char(value):
+        raise McpError(f"{field} exceeds the bounded printable configuration contract")
+    return value
 
 
 def _bounded_diagnostic(value: Any) -> str:
@@ -285,7 +295,9 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
 def main() -> None:
     command = _configured_command()
     request_timeout = _request_timeout_seconds(os.getenv("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS"))
-    requested_protocol = os.getenv("STAGEGUARD_MCP_PROTOCOL_VERSION", "2025-06-18")
+    requested_protocol = _bounded_config_text(os.getenv("STAGEGUARD_MCP_PROTOCOL_VERSION", "2025-06-18"), "STAGEGUARD_MCP_PROTOCOL_VERSION")
+    datasource_uid = _bounded_config_text(DATASOURCE_UID, "STAGEGUARD_DATASOURCE_UID")
+    query = _bounded_config_text(QUERY, "STAGEGUARD_MCP_SMOKE_QUERY")
     print("Launching official Grafana MCP smoke test:", _redacted_command(command))
     client = StdioClient(command, request_timeout_seconds=request_timeout)
     try:
@@ -296,9 +308,9 @@ def main() -> None:
         _assert_read_only_tool_surface(tools)
         datasources = client.request("tools/call", {"name": "list_datasources", "arguments": {}})
         _assert_tool_result("list_datasources", datasources)
-        query = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": DATASOURCE_UID, "expr": QUERY, "queryType": "instant", "endTime": "now"}})
-        _assert_tool_result("query_prometheus", query)
-        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": DATASOURCE_UID, "query": QUERY, "result_summary": _bounded_diagnostic(query.get("content"))}, indent=2))
+        query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
+        _assert_tool_result("query_prometheus", query_result)
+        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": datasource_uid, "query": query, "result_summary": _bounded_diagnostic(query_result.get("content"))}, indent=2))
         print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, and executed a Prometheus query through Grafana.")
     finally:
         client.close()
