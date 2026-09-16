@@ -131,6 +131,27 @@ class TimelinePayloadScalarTests(unittest.TestCase):
             {},
         )
 
+    def test_terminal_dangerous_strings_are_rejected(self) -> None:
+        static_fields = {"incident_opened": ("value",)}
+        for dangerous in ("line\nfeed", "carriage\rreturn", "tab\tvalue", "nul\x00value", "del\x7fvalue"):
+            with self.subTest(dangerous=repr(dangerous)):
+                self.assertEqual(timeline_payload("incident_opened", {"value": dangerous}, static_fields), {})
+        for dangerous in ("c1\x85next", "line\u2028separator", "para\u2029separator", "bidi\u202eoverride", "isolate\u2066text"):
+            with self.subTest(dangerous=repr(dangerous)):
+                self.assertEqual(timeline_payload("incident_opened", {"value": dangerous}, static_fields), {})
+
+    def test_printable_unicode_and_scalar_boundaries_remain_allowed(self) -> None:
+        static_fields = {"incident_opened": ("value", "minimum", "maximum")}
+        value = "直播·ライブ·лайв·بث"
+        self.assertEqual(
+            timeline_payload(
+                "incident_opened",
+                {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1},
+                static_fields,
+            ),
+            {"value": value, "minimum": -(1 << 63) + 1, "maximum": (1 << 63) - 1},
+        )
+
     def test_non_finite_floats_are_rejected_but_finite_floats_are_allowed(self) -> None:
         static_fields = {"incident_opened": ("good", "bad")}
         self.assertEqual(
