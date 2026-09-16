@@ -16,6 +16,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - MCP peer-advertised server identity and tool names are untrusted display input: they must be bounded and reject C0/C1 controls, DEL, Unicode line/paragraph separators, and bidi embedding/override/isolate controls before storage or rendering; ordinary printable Unicode remains valid.
 - MCP peer error/result diagnostics are bounded and control-safe before they are emitted; the release smoke must not dump near-frame-limit peer payloads into logs.
 - MCP launcher diagnostics must redact inline credential-like argv values before printing the configured command.
+- MCP smoke operator configuration is bounded and printable before entering requests or release output; protocol version, datasource UID, and PromQL query fail closed on empty, oversized, or terminal-dangerous values.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -41,35 +42,35 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Current committed consolidated tests remain blocked from repository execution in this runner; connector commits are not treated as passing tests.
 - An earlier `runtime/timeline_projection.py` revision was independently syntax-compiled and exercised in an isolated local smoke on 2026-09-15. The latest scalar/integer hardening has not yet received repository-level execution.
 
-## Run log — 2026-09-16 — Redacted MCP launcher diagnostics
+## Run log — 2026-09-16 — Bounded MCP smoke configuration
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_contract.py`, and `runtime/command_line.py`. The smoke test printed the fully parsed launcher argv, which could leak inline API keys, bearer tokens, cookies, passwords, or other credential-like values when operators supplied them through `STAGEGUARD_MCP_COMMAND`.
+Read `progress.md` completely first, then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_contract.py`. The release smoke accepted unbounded or terminal-dangerous environment values for the requested protocol, datasource UID, and PromQL query, and then reused them in JSON-RPC requests and operator output.
 
 ### Changes / actions
 
-- Added `_redacted_command()` to render launcher argv safely for operator output.
-- Redacts separate sensitive flag values and inline `--token=value` / `--api-key=value`-style values while preserving non-sensitive command structure.
-- Updated the smoke launch banner to use the redacted rendering.
-- Added regressions for separate and inline secrets plus a positive non-sensitive command case.
+- Added `MAX_CONFIG_TEXT_CHARS = 512` and `_bounded_config_text()` for non-empty, printable operator configuration.
+- Validated `STAGEGUARD_MCP_PROTOCOL_VERSION`, `STAGEGUARD_DATASOURCE_UID`, and `STAGEGUARD_MCP_SMOKE_QUERY` before the MCP initialize/query requests and release output.
+- Preserved the validated values for the actual request payload; no credentials or external resources were introduced.
+- Added regressions for empty, oversized, newline, Unicode line-separator, and exact-boundary printable-Unicode configuration values.
 - No CI workflow, cloud resource, credential, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- GitHub connector repository inspection and source/test commits succeeded.
+- GitHub connector repository inspection and sequential source/test commits succeeded: implementation `f4cbca22aa7b4ce8dee94c06688fa540effd73cc`, tests `89a3873ce39cc2f39f85c0f2478dae66ba209eb9`.
 - This runner still does not expose a materialized executable checkout through the GitHub connector, so the new tests were not executed and no green pytest claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Keep credential redaction local to presentation; the actual validated argv passed to `subprocess.Popen` is unchanged.
-2. Cover common credential markers without attempting broad secret-scanning heuristics that could redact legitimate paths or query arguments.
-3. Preserve the existing bounded/terminal-safe launcher validation as the authoritative subprocess boundary.
+1. Bound and terminal-sanitize operator-controlled smoke configuration before both transport and presentation.
+2. Keep the limit deliberately small for a release smoke: enough for realistic PromQL and MCP version strings, while preventing pathological request/log expansion.
+3. Continue treating the configured PromQL as an explicit smoke input only; StageGuard's production HTTP policy remains authoritative for live incident investigations.
 
 ### Blockers / unknowns
 
-- Latest MCP smoke metadata/diagnostic/redaction tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
+- Latest MCP smoke configuration/metadata/diagnostic/redaction tests, launcher tests, MCP negotiation/surface tests, MCP compose contract, timeline scalar/integer hardening, public `audit_timeline()` reconciliation tests, and execution-safety reconciliation suite still require execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
