@@ -60,7 +60,7 @@ def _safe_static_value(value: object) -> bool:
 
 
 def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
-    """Materialize a small, display-safe allowlist or fail closed when malformed."""
+    """Materialize a small, unique, display-safe allowlist or fail closed."""
     if isinstance(allowed, (str, bytes)):
         return None
     try:
@@ -75,6 +75,11 @@ def _bounded_static_fields(allowed: Iterable[str]) -> tuple[str, ...] | None:
         or not _safe_display_string(key, max_length=_MAX_STATIC_FIELD_NAME_LENGTH)
         for key in fields
     ):
+        return None
+    # Duplicate policy entries would cause repeated reads from an untrusted custom
+    # Mapping, violating the single-read disclosure invariant. Reject the entire
+    # policy rather than silently normalizing potentially malformed configuration.
+    if len(set(fields)) != len(fields):
         return None
     return fields
 
