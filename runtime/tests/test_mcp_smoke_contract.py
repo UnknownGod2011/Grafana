@@ -11,6 +11,7 @@ from runtime.mcp_smoke import (
     _assert_read_only_tool_surface,
     _assert_tool_result,
     _bounded_diagnostic,
+    _redacted_command,
     _request_timeout_seconds,
     _tool_map,
 )
@@ -162,3 +163,16 @@ def test_tool_error_diagnostic_is_bounded() -> None:
         _assert_tool_result("query_prometheus", {"isError": True, "content": "x" * (MAX_DIAGNOSTIC_CHARS * 4)})
     assert len(str(captured.value)) < MAX_DIAGNOSTIC_CHARS + 200
     assert "<truncated " in str(captured.value)
+
+
+def test_redacted_command_hides_inline_secret_values() -> None:
+    rendered = _redacted_command(["docker", "run", "--api-key", "super-secret", "--token=abc123", "mcp"])
+    assert "super-secret" not in rendered
+    assert "abc123" not in rendered
+    assert "<redacted>" in rendered
+    assert "docker run" in rendered
+
+
+def test_redacted_command_preserves_non_sensitive_arguments() -> None:
+    rendered = _redacted_command(["docker", "compose", "run", "--rm", "-T", "mcp"])
+    assert rendered == "docker compose run --rm -T mcp"
