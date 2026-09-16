@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from runtime.mcp_smoke import (
+    MAX_CONFIG_TEXT_CHARS,
     MAX_DIAGNOSTIC_CHARS,
     MAX_SERVER_INFO_FIELD_CHARS,
     MAX_TOOL_NAME_CHARS,
@@ -10,6 +11,7 @@ from runtime.mcp_smoke import (
     _assert_initialize_result,
     _assert_read_only_tool_surface,
     _assert_tool_result,
+    _bounded_config_text,
     _bounded_diagnostic,
     _redacted_command,
     _request_timeout_seconds,
@@ -176,3 +178,18 @@ def test_redacted_command_hides_inline_secret_values() -> None:
 def test_redacted_command_preserves_non_sensitive_arguments() -> None:
     rendered = _redacted_command(["docker", "compose", "run", "--rm", "-T", "mcp"])
     assert rendered == "docker compose run --rm -T mcp"
+
+
+@pytest.mark.parametrize("value", [
+    "",
+    "x" * (MAX_CONFIG_TEXT_CHARS + 1),
+    "query\nforged",
+    "query\u2028forged",
+])
+def test_bounded_config_text_rejects_empty_oversized_or_unsafe_values(value: str) -> None:
+    with pytest.raises(McpError):
+        _bounded_config_text(value, "STAGEGUARD_MCP_SMOKE_QUERY")
+
+
+def test_bounded_config_text_accepts_printable_unicode_at_bound() -> None:
+    assert _bounded_config_text("é" * MAX_CONFIG_TEXT_CHARS, "STAGEGUARD_MCP_PROTOCOL_VERSION") == "é" * MAX_CONFIG_TEXT_CHARS
