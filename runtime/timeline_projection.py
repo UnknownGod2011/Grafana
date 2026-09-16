@@ -28,6 +28,7 @@ _MAX_STATIC_STRING_LENGTH = 512
 _MAX_STATIC_FIELD_NAME_LENGTH = 128
 _MAX_STATIC_INTEGER_ABS = (1 << 63) - 1
 _MAX_STATIC_FIELDS = 64
+_MISSING = object()
 
 
 def _safe_display_string(value: str, *, max_length: int = _MAX_STATIC_STRING_LENGTH) -> bool:
@@ -99,9 +100,6 @@ def reconciliation_timeline_payload(event_type: str, payload: Mapping[str, objec
     if encoded_result not in _RECONCILIATION_RESULTS or encoded_reason not in _RECONCILIATION_REASONS:
         return {}
 
-    # Durable mappings may come from adapters or older persistence layers. Treat
-    # mapping access itself as untrusted: a custom Mapping can raise while reading
-    # an otherwise canonical event and must not turn the public timeline into 500.
     try:
         result = payload.get("result")
         reason = payload.get("reason")
@@ -123,9 +121,6 @@ def timeline_payload(
     if not isinstance(static_fields, Mapping):
         return {}
 
-    # Policy lookup can itself be implemented by an extension Mapping. Fail
-    # closed on ordinary lookup failures rather than leaking a partial timeline
-    # or surfacing an operator-visible server error.
     try:
         allowed = static_fields.get(event_type)
     except Exception:
@@ -134,13 +129,19 @@ def timeline_payload(
         fields = _bounded_static_fields(allowed)
         if fields is None:
             return {}
+
+        # Read every allowlisted value exactly once. Custom Mapping implementations
+        # are an untrusted persistence/extension boundary: membership plus repeated
+        # __getitem__ calls can disagree or have side effects. A single get() avoids
+        # that TOCTOU surface and lets the complete projection fail closed on error.
+        projected: dict[str, object] = {}
         try:
-            return {
-                key: payload[key]
-                for key in fields
-                if key in payload and _safe_static_value(payload[key])
-            }
+            for key in fields:
+                value = payload.get(key, _MISSING)
+                if value is not _MISSING and _safe_static_value(value):
+                    projected[key] = value
         except Exception:
             return {}
+        return projected
 
     return reconciliation_timeline_payload(event_type, payload)
