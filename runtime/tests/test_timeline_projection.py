@@ -25,10 +25,7 @@ class BrokenMapping(Mapping):
 
 class ReconciliationTimelineProjectionTests(unittest.TestCase):
     def test_projects_only_bounded_result_and_reason(self) -> None:
-        projected = reconciliation_timeline_payload(
-            "remediation_reconciliation_attempt.accepted.durable_dispatching",
-            {"result": "accepted", "reason": "durable_dispatching", "operation_id": "secret", "provider_body": {"token": "secret"}},
-        )
+        projected = reconciliation_timeline_payload("remediation_reconciliation_attempt.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching", "operation_id": "secret", "provider_body": {"token": "secret"}})
         self.assertEqual(projected, {"result": "accepted", "reason": "durable_dispatching"})
 
     def test_supports_all_current_bounded_states(self) -> None:
@@ -42,11 +39,7 @@ class ReconciliationTimelineProjectionTests(unittest.TestCase):
         self.assertEqual(reconciliation_timeline_payload("remediation_completed", {"result": "accepted", "reason": "durable_dispatching"}), {})
 
     def test_unbounded_or_future_values_fail_closed(self) -> None:
-        for event_type, payload in (
-            ("remediation_reconciliation_attempt.accepted.future_reason", {"result": "accepted", "reason": "future_reason"}),
-            ("remediation_reconciliation_attempt.future.durable_dispatching", {"result": "future", "reason": "durable_dispatching"}),
-            ("remediation_reconciliation_future.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching"}),
-        ):
+        for event_type, payload in (("remediation_reconciliation_attempt.accepted.future_reason", {"result": "accepted", "reason": "future_reason"}), ("remediation_reconciliation_attempt.future.durable_dispatching", {"result": "future", "reason": "durable_dispatching"}), ("remediation_reconciliation_future.accepted.durable_dispatching", {"result": "accepted", "reason": "durable_dispatching"})):
             with self.subTest(event_type=event_type):
                 self.assertEqual(reconciliation_timeline_payload(event_type, payload), {})
 
@@ -117,6 +110,24 @@ class TimelinePayloadScalarTests(unittest.TestCase):
 
     def test_payload_mapping_read_failures_fail_closed(self) -> None:
         self.assertEqual(timeline_payload("incident_opened", BrokenMapping(), {"incident_opened": ("severity",)}), {})
+
+    def test_static_projection_reads_each_mapping_value_once(self) -> None:
+        class SingleReadMapping(dict):
+            def __init__(self):
+                super().__init__({"severity": "high"})
+                self.reads = 0
+            def get(self, key, default=None):
+                self.reads += 1
+                if self.reads > 1:
+                    raise RuntimeError("value was read more than once")
+                return super().get(key, default)
+            def __contains__(self, key):
+                raise RuntimeError("membership probes are forbidden")
+            def __getitem__(self, key):
+                raise RuntimeError("direct repeated reads are forbidden")
+        payload = SingleReadMapping()
+        self.assertEqual(timeline_payload("incident_opened", payload, {"incident_opened": ("severity",)}), {"severity": "high"})
+        self.assertEqual(payload.reads, 1)
 
     def test_static_policy_accepts_exact_field_limit(self) -> None:
         allowed = tuple(f"field_{i}" for i in range(64))
