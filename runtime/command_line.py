@@ -52,6 +52,18 @@ def _is_official_mcp_docker_image(part: str) -> bool:
     ) or normalized.startswith(_OFFICIAL_MCP_DOCKER_IMAGE + "@")
 
 
+def _contains_ascii_control(value: str) -> bool:
+    """Return whether argv text contains an ASCII control character or DEL.
+
+    Environment-provided launcher configuration is an operator-controlled boundary,
+    but rejecting control bytes here gives deterministic errors before subprocess
+    creation and prevents hostile/corrupt values from becoming ambiguous diagnostics.
+    Ordinary spaces are allowed inside a quoted argument; tabs/newlines/control bytes
+    inside an argument are not required by supported StageGuard launchers.
+    """
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+
+
 def _enforce_stdio_mcp_transport(parts: list[str]) -> None:
     transports = _transport_values(parts)
     if len(transports) > 1:
@@ -81,9 +93,10 @@ def split_command(command: str, *, windows: bool | None = None) -> list[str]:
     official Docker image must also declare ``-t stdio`` because that image's
     default transport differs from the native binary's default.
 
-    Launcher text, argument count, and individual argument size are bounded before
-    subprocess creation so an accidentally corrupted environment cannot turn this
-    release-smoke boundary into unbounded parser/argv work.
+    Launcher text, argument count, individual argument size, and control characters
+    are bounded before subprocess creation so an accidentally corrupted environment
+    cannot turn this release-smoke boundary into pathological parser/argv work or
+    ambiguous control-character-bearing diagnostics.
 
     ``windows`` is injectable for deterministic cross-platform tests.
     """
@@ -112,6 +125,8 @@ def split_command(command: str, *, windows: bool | None = None) -> list[str]:
         raise ValueError("launcher command contains too many arguments")
     if any(len(part) > MAX_LAUNCHER_ARGUMENT_CHARS for part in parts):
         raise ValueError("launcher command contains an oversized argument")
+    if any(_contains_ascii_control(part) for part in parts):
+        raise ValueError("launcher command contains an argument with ASCII control characters")
 
     _enforce_stdio_mcp_transport(parts)
     return parts
