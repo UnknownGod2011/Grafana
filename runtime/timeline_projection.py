@@ -42,11 +42,14 @@ def _safe_display_string(value: str, *, max_length: int = _MAX_STATIC_STRING_LEN
             return False
         if 0x80 <= codepoint <= 0x9F:
             return False
+        category = unicodedata.category(char)
         # Unicode format controls are invisible or presentation-changing. Reject
         # the complete Cf category rather than maintaining an incomplete bidi/
-        # zero-width denylist as Unicode evolves. Printable international text,
-        # combining marks, and ordinary emoji remain allowed.
-        if unicodedata.category(char) == "Cf":
+        # zero-width denylist as Unicode evolves. Surrogate code points (Cs) are
+        # also invalid operator text: Python can hold lone surrogates, but they
+        # cannot be encoded as ordinary UTF-8 and can break JSON/HTTP responses.
+        # Printable international text, combining marks, and emoji remain allowed.
+        if category in {"Cf", "Cs"}:
             return False
         if codepoint in {0x2028, 0x2029}:
             return False
