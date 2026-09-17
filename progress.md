@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs credentials/Python injection controls, disables user-site packages/bytecode writes, tests its own harness first, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs credentials/Python injection controls, disables user-site packages/bytecode writes, tests its own harness first, validates runtime activation before operator/API gates, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
 
 ## Retained validation baseline
 
@@ -24,34 +24,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation subprocess launch failure handling
+## Latest run — 2026-09-17 — runtime activation validation coverage
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the repository tree, consolidated validator, and validator self-tests. The validator already handled non-zero child exits and `TimeoutExpired`, but an `OSError` from process creation (for example an unavailable interpreter/runtime resource) escaped `main()` as an unclassified traceback. That meant an infrastructure-level inability to execute a selected safety test was not represented through the validator's normal fail-closed result/reporting path.
+Read `progress.md` completely first, then inspected the consolidated validator, its self-tests, and the runtime test inventory. The validator had strong gates for operator ingress, concurrency, incident lifecycle, audit/timeline, execution safety, and Grafana MCP, but it did not explicitly validate StageGuard's configuration-to-runtime activation boundary even though `runtime/tests/test_activation.py` already contains dedicated activation behavior coverage.
 
 ### Changes / actions
 
-- Updated `scripts/run_stageguard_validation.py` to catch `OSError` around each test subprocess launch.
-- Launch errors are now emitted as `LAUNCH ERROR` diagnostics containing the selected test name and exception class/message.
-- Launch errors are appended to the same gate-qualified failure list as non-zero exits and timeouts, preserving fail-fast and `--keep-going` semantics.
-- Updated the runner module documentation to make this fail-closed behavior explicit.
-- Added a harness regression that injects an interpreter-launch `OSError`, asserts exit code 1, and verifies both the launch diagnostic and gate-qualified failed-test summary.
+- Added a `runtime activation` gate to `scripts/run_stageguard_validation.py` immediately after the validator self-test gate and before operator/API gates.
+- The gate explicitly owns `runtime/tests/test_activation.py`, making activation/configuration regressions part of the recommended fail-closed local validation path rather than relying on an unrelated broader suite.
+- Updated validator documentation to describe the configuration-to-runtime boundary as a production safety gate.
+- Added a validator self-test that pins the runtime activation gate to `test_activation.py`, so deletion, rename, or selection drift fails visibly.
 - No credentials, cloud resources, remediation targets, Docker, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator hardening committed as `58069d9fb43b64465bdd5ea24420f676a11b0e4c`.
-- Harness regression committed as `1a6ee55bafa7e653ce04f4395b21387e28585fe6`.
-- Static inspection confirms `OSError` is caught at the same boundary as `TimeoutExpired`; the test remains marked failed and cannot produce a green validator result.
+- Validator change committed as `df59f91b4ecbf60289c93e022151ae6b456dad88`.
+- Harness regression committed as `3d29c32e931806b2d769a3969fde100d015c669e`.
+- Static repository inspection confirms `runtime/tests/test_activation.py` exists as a direct regular repository test and the new gate is ordered before operator/API validation.
 - This connector environment does not expose an executable checkout, so the new regression has not been repository-executed and no new green-test claim is made.
 - GitHub Actions was intentionally not triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Failure to launch a required test is a validation failure, not an exceptional success-neutral condition.
-2. Catch only expected process-launch OS failures; programming errors should continue surfacing rather than being hidden by an overly broad exception handler.
-3. Preserve the existing fail-fast/keep-going behavior and gate-qualified reporting so local operators get actionable attribution.
+1. Runtime activation is a first-class production boundary: configuration must be proven safe before operator/API behavior is treated as deployable.
+2. Keep the gate exact rather than using a broad activation wildcard; this makes unexpected test-layout drift fail closed instead of silently broadening execution.
+3. Continue keeping live Docker/Grafana access outside the dependency-light validator so local validation does not unexpectedly consume credentials or external services.
 
 ### Blockers / unknowns
 
@@ -62,4 +61,4 @@ Read `progress.md` completely first, then inspected the repository tree, consoli
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and then `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before performing the pinned Grafana MCP 1.4.1 read-only live smoke.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and then `python scripts/run_stageguard_validation.py --keep-going`. Fix any activation or downstream failures before performing the pinned Grafana MCP 1.4.1 read-only live smoke.
