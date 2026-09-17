@@ -21,11 +21,14 @@ credential-scrubbed environment. Python startup/import-path controls are
 removed and user-site package loading is disabled. During execution, HOME,
 USERPROFILE, and CLOUDSDK_CONFIG are redirected to an empty temporary home so
 Google ADC cannot silently discover a developer's well-known local gcloud
-credentials after explicit credential variables have been scrubbed. A test
-selected by multiple gates executes once under its earliest owning gate; later
-gates report it as already covered, avoiding repeated side effects and
-unnecessary runtime. Subprocess launch failures are reported as validation
-failures rather than escaping the harness with an unclassified traceback.
+credentials after explicit credential variables have been scrubbed. GCE
+metadata discovery is also redirected to a loopback discard endpoint so a
+validator running on Google Cloud cannot silently acquire the host workload's
+metadata-server identity. A test selected by multiple gates executes once under
+its earliest owning gate; later gates report it as already covered, avoiding
+repeated side effects and unnecessary runtime. Subprocess launch failures are
+reported as validation failures rather than escaping the harness with an
+unclassified traceback.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -49,11 +52,21 @@ MAX_FILE_TIMEOUT_SECONDS = 3600.0
 SENSITIVE_ENV_NAMES = frozenset({
     "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CREDENTIALS", "GOOGLE_CLOUD_KEYFILE_JSON",
     "CLOUDSDK_AUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+    "GCE_METADATA_HOST", "GCE_METADATA_IP",
     "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONBREAKPOINT",
 })
 SENSITIVE_ENV_PREFIXES = ("GRAFANA_", "GEMINI_", "GOOGLE_API_", "STAGEGUARD_REMEDIATION_")
 SENSITIVE_ENV_SUFFIXES = ("_TOKEN", "_API_KEY", "_PASSWORD", "_SECRET")
-VALIDATION_ENV_OVERRIDES = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+VALIDATION_ENV_OVERRIDES = {
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    # Prevent google-auth from falling through to the ambient Compute Engine /
+    # Cloud Run metadata identity when validation itself runs on Google Cloud.
+    # Port 9 is the conventional discard service; loopback keeps the probe off
+    # the network and makes accidental credential discovery fail closed.
+    "GCE_METADATA_HOST": "127.0.0.1:9",
+    "GCE_METADATA_IP": "127.0.0.1",
+}
 
 @dataclass(frozen=True)
 class Gate:
