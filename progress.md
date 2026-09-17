@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs Grafana/Gemini/Google credentials (including inline Google service-account JSON forms) and Python injection controls, disables user-site packages/bytecode writes, tests its own harness first, validates runtime activation before operator/API gates, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs Grafana/Gemini/Google credentials (including inline Google service-account JSON forms) and Python injection controls, disables user-site packages/bytecode writes, isolates well-known Google ADC/gcloud home locations during execution, tests its own harness first, validates runtime activation before operator/API gates, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
 
 ## Retained validation baseline
 
@@ -24,33 +24,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — inline Google credential isolation
+## Latest run — 2026-09-17 — ambient Google ADC isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the current repository head, consolidated validator, validator self-tests, and runtime test inventory. The validator already removed ADC file pointers, gcloud access-token overrides, Grafana/Gemini/API-key/remediation secrets, generic secret suffixes, and Python injection controls. It did not explicitly remove the common inline Google service-account credential environment forms `GOOGLE_CREDENTIALS` and `GOOGLE_CLOUD_KEYFILE_JSON`, either of which can contain the complete private-key JSON rather than a file path.
+Read `progress.md` completely first, then inspected the current repository head, consolidated validator, and validator self-tests. Explicit Google credential environment variables were already scrubbed, but the validator still inherited the invoking user's `HOME`, `USERPROFILE`, and `CLOUDSDK_CONFIG`. Google Application Default Credentials can discover a well-known local ADC file beneath the user's home even when `GOOGLE_APPLICATION_CREDENTIALS` is absent, so ordinary local regression subprocesses still had a path to ambient developer credentials.
 
 ### Changes / actions
 
-- Added `GOOGLE_CREDENTIALS` and `GOOGLE_CLOUD_KEYFILE_JSON` to the validator's exact sensitive-environment denylist.
-- Extended the credential-isolation regression fixture with representative inline service-account JSON values and require both variables to be absent from the child validation environment.
-- Extended case-insensitive sensitive-name coverage for both inline Google credential names.
-- Kept ordinary Google project/location configuration untouched; the change targets credential-bearing forms rather than preventing tests from receiving non-secret runtime configuration.
+- Added per-run temporary-home isolation around executable validation.
+- `_validation_env` now accepts an `isolated_home` and, when supplied by `main`, overrides `HOME`, `USERPROFILE`, and `CLOUDSDK_CONFIG` so child tests cannot discover the invoking developer's normal Google ADC/gcloud credential locations.
+- Added regression coverage proving inherited POSIX home, Windows profile, and gcloud configuration paths are replaced while ordinary deterministic settings remain available.
+- Kept `--list` side-effect-light: it resolves and prints the plan without creating an execution home because it launches no test subprocesses.
 - No credentials were read or supplied. No Docker, cloud resources, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator hardening committed as `71303013c71c22cc7019cb05c795e708d901d2a4`.
-- Regression coverage committed as `9722e5e4c3f1b5d0d200eeed8fd79bd425d672cf`.
-- Static inspection confirms the sensitive-name matcher is case-insensitive and the new names flow through the same `_validation_env` sanitization used for every test subprocess.
+- Validator hardening committed as `35500dc560b6926de54d6ad8a43f9e366965d2a7`.
+- Regression coverage committed as `ed16da50ed3c09a93e2ff482b2243c2c8adc78f2`.
+- Static inspection confirms executable validation constructs one empty temporary home for the run and passes the isolated environment to every selected subprocess.
 - This connector environment does not expose an executable checkout, so the updated harness has not been repository-executed and no new green-test claim is made.
 - GitHub Actions was intentionally not triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat inline service-account JSON as equivalent in sensitivity to `GOOGLE_APPLICATION_CREDENTIALS`; local validation has no reason to inherit either form.
-2. Use exact-name denial for these variables rather than a broad `GOOGLE_` prefix, because project IDs, regions, and other non-secret Google configuration can be legitimate deterministic test inputs.
-3. Preserve the explicit live-smoke boundary: real Grafana/GCP credentials should only enter deliberate integration commands, never the dependency-light consolidated safety suite.
+1. Treat well-known ADC discovery as part of the credential boundary, not only explicit credential environment variables.
+2. Isolate both POSIX (`HOME`) and Windows (`USERPROFILE`) discovery plus `CLOUDSDK_CONFIG`, because StageGuard should validate safely on either developer platform.
+3. Scope home isolation to actual test execution so `--list` remains a pure planning/inspection path.
 
 ### Blockers / unknowns
 
