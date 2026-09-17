@@ -48,15 +48,21 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
     def test_default_file_timeout_is_bounded(self) -> None:
         self.assertGreater(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 0)
         self.assertLessEqual(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 300)
+        self.assertLessEqual(
+            runner.DEFAULT_FILE_TIMEOUT_SECONDS, runner.MAX_FILE_TIMEOUT_SECONDS
+        )
 
-    def test_timeout_parser_rejects_unbounded_or_non_positive_values(self) -> None:
-        for value in ("0", "-1", "nan", "inf", "-inf"):
+    def test_timeout_parser_rejects_unbounded_non_positive_or_excessive_values(self) -> None:
+        excessive = str(runner.MAX_FILE_TIMEOUT_SECONDS + 1)
+        for value in ("0", "-1", "nan", "inf", "-inf", excessive, "1e308"):
             with self.subTest(value=value):
                 with self.assertRaises(argparse.ArgumentTypeError):
                     runner._positive_timeout(value)
 
-    def test_timeout_parser_accepts_fractional_seconds(self) -> None:
+    def test_timeout_parser_accepts_fractional_seconds_and_maximum(self) -> None:
         self.assertEqual(runner._positive_timeout("2.5"), 2.5)
+        maximum = str(runner.MAX_FILE_TIMEOUT_SECONDS)
+        self.assertEqual(runner._positive_timeout(maximum), runner.MAX_FILE_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
