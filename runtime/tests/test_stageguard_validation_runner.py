@@ -110,6 +110,29 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
             with self.subTest(secret_name=secret_name):
                 self.assertNotIn(secret_name, sanitized)
 
+    def test_validation_environment_scrubs_python_code_injection_controls(self) -> None:
+        source = {
+            "PATH": "/usr/bin",
+            "PYTHONPATH": "/tmp/attacker",
+            "PYTHONHOME": "/tmp/python",
+            "PYTHONSTARTUP": "/tmp/startup.py",
+            "PYTHONINSPECT": "1",
+            "PYTHONBREAKPOINT": "attacker.breakpoint",
+            "PYTHONUNBUFFERED": "1",
+        }
+        sanitized = runner._validation_env(source)
+        for name in (
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONSTARTUP",
+            "PYTHONINSPECT",
+            "PYTHONBREAKPOINT",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(name, sanitized)
+        self.assertEqual(sanitized["PYTHONUNBUFFERED"], "1")
+        self.assertEqual(sanitized["PATH"], "/usr/bin")
+
     def test_validation_environment_does_not_mutate_source(self) -> None:
         source = {"GRAFANA_TOKEN": "secret", "SAFE": "value"}
         original = dict(source)
@@ -118,7 +141,14 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertIsNot(sanitized, source)
 
     def test_sensitive_environment_matching_is_case_insensitive(self) -> None:
-        for name in ("grafana_token", "Gemini_Api_Key", "my_secret", "foo_PASSWORD"):
+        for name in (
+            "grafana_token",
+            "Gemini_Api_Key",
+            "my_secret",
+            "foo_PASSWORD",
+            "pythonpath",
+            "PythonStartup",
+        ):
             with self.subTest(name=name):
                 self.assertTrue(runner._is_sensitive_env_name(name))
 
