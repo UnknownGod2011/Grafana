@@ -17,18 +17,19 @@ long-running remediation keeps read-only observability responsive while
 competing mutations fail closed.
 
 Validation subprocesses are non-interactive, timeout-bounded, and receive a
-credential-scrubbed environment. Python startup/import-path controls are
-removed and user-site package loading is disabled. During execution, HOME,
-USERPROFILE, and CLOUDSDK_CONFIG are redirected to an empty temporary home so
-Google ADC cannot silently discover a developer's well-known local gcloud
-credentials after explicit credential variables have been scrubbed. GCE
-metadata discovery is also redirected to a loopback discard endpoint so a
-validator running on Google Cloud cannot silently acquire the host workload's
-metadata-server identity. A test selected by multiple gates executes once under
-its earliest owning gate; later gates report it as already covered, avoiding
-repeated side effects and unnecessary runtime. Subprocess launch failures are
-reported as validation failures rather than escaping the harness with an
-unclassified traceback.
+credential-scrubbed environment. Python startup/import-path controls and proxy
+environment variables are removed, preventing inherited proxy URLs (which may
+embed credentials) from leaking into tests. User-site package loading is
+disabled. During execution, HOME, USERPROFILE, and CLOUDSDK_CONFIG are redirected
+to an empty temporary home so Google ADC cannot silently discover a developer's
+well-known local gcloud credentials after explicit credential variables have
+been scrubbed. GCE metadata discovery is also redirected to a loopback discard
+endpoint so a validator running on Google Cloud cannot silently acquire the host
+workload's metadata-server identity. A test selected by multiple gates executes
+once under its earliest owning gate; later gates report it as already covered,
+avoiding repeated side effects and unnecessary runtime. Subprocess launch
+failures are reported as validation failures rather than escaping the harness
+with an unclassified traceback.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -53,6 +54,7 @@ SENSITIVE_ENV_NAMES = frozenset({
     "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CREDENTIALS", "GOOGLE_CLOUD_KEYFILE_JSON",
     "CLOUDSDK_AUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
     "GCE_METADATA_HOST", "GCE_METADATA_IP",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONBREAKPOINT",
 })
 SENSITIVE_ENV_PREFIXES = ("GRAFANA_", "GEMINI_", "GOOGLE_API_", "STAGEGUARD_REMEDIATION_")
@@ -66,6 +68,10 @@ VALIDATION_ENV_OVERRIDES = {
     # the network and makes accidental credential discovery fail closed.
     "GCE_METADATA_HOST": "127.0.0.1:9",
     "GCE_METADATA_IP": "127.0.0.1",
+    # Never inherit a developer/runner proxy into dependency-light validation.
+    # Proxy URLs can contain credentials and can also reroute nominally local
+    # traffic. Explicit integration smoke commands own their network settings.
+    "NO_PROXY": "localhost,127.0.0.1,::1",
 }
 
 @dataclass(frozen=True)
