@@ -56,7 +56,7 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
             tests=Path(d)/"tests"; tests.mkdir(); f=tests/"test_ok.py"; f.write_text("pass\n")
             with mock.patch.object(runner,"TESTS",tests): self.assertTrue(runner._safe_test_file(f))
     def test_validation_environment_scrubs_live_integration_credentials(self):
-        source={"PATH":"/usr/bin","HOME":"/tmp/home","GRAFANA_TOKEN":"x","GEMINI_API_KEY":"x","GOOGLE_API_KEY":"x","GOOGLE_APPLICATION_CREDENTIALS":"x","CLOUDSDK_AUTH_ACCESS_TOKEN":"x","STAGEGUARD_REMEDIATION_TOKEN":"x","SOME_OTHER_TOKEN":"x","APP_PASSWORD":"x","ORDINARY_SETTING":"safe"}; sanitized=runner._validation_env(source); self.assertEqual(sanitized["ORDINARY_SETTING"],"safe")
+        source={"PATH":"/usr/bin","HOME":"/tmp/home","GRAFANA_TOKEN":"x","GEMINI_API_KEY":"x","GOOGLE_API_KEY":"x","GOOGLE_APPLICATION_CREDENTIALS":"x","GOOGLE_CREDENTIALS":"{\"private_key\":\"x\"}","GOOGLE_CLOUD_KEYFILE_JSON":"{\"private_key\":\"x\"}","CLOUDSDK_AUTH_ACCESS_TOKEN":"x","STAGEGUARD_REMEDIATION_TOKEN":"x","SOME_OTHER_TOKEN":"x","APP_PASSWORD":"x","ORDINARY_SETTING":"safe"}; sanitized=runner._validation_env(source); self.assertEqual(sanitized["ORDINARY_SETTING"],"safe")
         for n in set(source)-{"PATH","HOME","ORDINARY_SETTING"}: self.assertNotIn(n,sanitized)
     def test_validation_environment_scrubs_python_code_injection_controls(self):
         source={"PATH":"/usr/bin","PYTHONPATH":"x","PYTHONHOME":"x","PYTHONSTARTUP":"x","PYTHONINSPECT":"1","PYTHONBREAKPOINT":"x","PYTHONUNBUFFERED":"1"}; s=runner._validation_env(source)
@@ -67,7 +67,7 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
     def test_validation_environment_does_not_mutate_source(self):
         source={"GRAFANA_TOKEN":"secret","SAFE":"value"}; original=dict(source); sanitized=runner._validation_env(source); self.assertEqual(source,original); self.assertIsNot(sanitized,source)
     def test_sensitive_environment_matching_is_case_insensitive(self):
-        for n in ("grafana_token","Gemini_Api_Key","my_secret","foo_PASSWORD","pythonpath","PythonStartup"): self.assertTrue(runner._is_sensitive_env_name(n))
+        for n in ("grafana_token","Gemini_Api_Key","my_secret","foo_PASSWORD","pythonpath","PythonStartup","google_credentials","Google_Cloud_Keyfile_Json"): self.assertTrue(runner._is_sensitive_env_name(n))
     def test_test_file_subprocess_has_no_interactive_stdin(self):
         path=runner.TESTS/"test_timeline_projection.py"; env={"PATH":"/usr/bin"}; completed=mock.Mock(returncode=0)
         with mock.patch.object(subprocess,"run",return_value=completed) as run: self.assertEqual(runner._run_test_file(path,timeout=5.0,env=env),0)
