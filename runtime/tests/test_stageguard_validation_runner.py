@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 import unittest
@@ -11,7 +12,6 @@ RUNNER = ROOT / "scripts" / "run_stageguard_validation.py"
 _spec = importlib.util.spec_from_file_location("stageguard_validation_runner", RUNNER)
 assert _spec is not None and _spec.loader is not None
 runner = importlib.util.module_from_spec(_spec)
-# dataclasses resolves annotations through sys.modules while the module executes.
 sys.modules[_spec.name] = runner
 _spec.loader.exec_module(runner)
 
@@ -44,6 +44,19 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         command = runner._command(runner.TESTS / "test_timeline_projection.py")
         self.assertEqual(command[-2:], ["-p", "test_timeline_projection.py"])
         self.assertNotIn("-t", command)
+
+    def test_default_file_timeout_is_bounded(self) -> None:
+        self.assertGreater(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 0)
+        self.assertLessEqual(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 300)
+
+    def test_timeout_parser_rejects_non_positive_values(self) -> None:
+        for value in ("0", "-1"):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    runner._positive_timeout(value)
+
+    def test_timeout_parser_accepts_fractional_seconds(self) -> None:
+        self.assertEqual(runner._positive_timeout("2.5"), 2.5)
 
 
 if __name__ == "__main__":
