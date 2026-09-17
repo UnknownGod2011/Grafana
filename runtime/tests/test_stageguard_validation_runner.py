@@ -34,6 +34,14 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
     def test_file_selection_is_unique_and_deterministic(self):
         for gate in runner.GATES:
             names=[p.name for p in runner._files(gate)]; self.assertEqual(names,sorted(set(names)))
+    def test_execution_plan_runs_each_test_at_most_once(self):
+        shared=runner.TESTS/"test_shared.py"; unique=runner.TESTS/"test_unique.py"
+        first=runner.Gate("first",("unused",)); second=runner.Gate("second",("unused",))
+        plan=runner._execution_plan(((first,(shared,unique)),(second,(shared,))))
+        self.assertEqual(plan[0],(first,(shared,unique),()))
+        self.assertEqual(plan[1],(second,(),(shared,)))
+        runnable=[p.name for _,files,_ in plan for p in files]
+        self.assertEqual(runnable,["test_shared.py","test_unique.py"])
     def test_commands_are_scoped_to_one_concrete_file(self):
         command=runner._command(runner.TESTS/"test_timeline_projection.py"); self.assertEqual(command[-2:],["-p","test_timeline_projection.py"]); self.assertNotIn("-t",command)
     def test_command_rejects_paths_outside_test_directory(self):
