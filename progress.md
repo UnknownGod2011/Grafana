@@ -30,6 +30,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - An absent static timeline policy may delegate to the canonical reconciliation projector; an explicitly configured null/malformed policy never does and fails closed.
 - Consolidated local validation gates must resolve to concrete test files before execution; an empty safety gate is an error, never a passing result.
 - The consolidated validation harness must execute its own regression suite before it can report a green result.
+- Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default); a timeout is a validation failure rather than an indefinitely hung gate.
 
 ## Retained validation baseline
 
@@ -40,33 +41,33 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation harness self-verification
+## Latest run — 2026-09-17 — bounded validation execution
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated runner had regressions for its selection and command behavior, but those regressions were not selected by any consolidated gate. A defect in the runner could therefore potentially coexist with a green result from the runner itself.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated validator resolved concrete files and self-tested its selection contracts, but each spawned unittest process had no runtime bound. A deadlocked regression or accidentally blocking integration path could therefore stall the local safety gate indefinitely.
 
 ### Changes / actions
 
-- Added an explicit `validation harness` gate selecting `test_stageguard_validation_runner.py`.
-- Placed the harness gate first so fail-fast execution verifies the validator before relying on it for the safety/MCP gates.
-- Updated runner documentation to state the self-verification contract.
-- Added a regression asserting the harness gate owns exactly the runner regression file.
-- Preserved the existing concrete-file resolution, empty-gate failure, deterministic deduplication, fail-fast/keep-going behavior, and no-Docker/no-credential/no-CI scope.
+- Added a per-test-file subprocess timeout to the consolidated validator, defaulting to 120 seconds.
+- Added `--file-timeout SECONDS` for explicit local tuning without weakening the requirement that the value be finite and positive.
+- Treat `subprocess.TimeoutExpired` as an ordinary attributable gate failure; `--keep-going` continues to later files/gates while fail-fast mode stops.
+- Rejected zero, negative, NaN, and infinite timeout values so the bounded-execution invariant cannot be bypassed through CLI float edge cases.
+- Added validator regressions for the bounded default, invalid timeout values, and valid fractional timeout parsing.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Validation harness self-verification committed as `4f5c14cbee4277e73a419198642265e66e5f3e37`.
-- Ownership regression committed as `5e0e6930a4c35a7fac471702f7611683d13f3f50`.
-- The connector runner still does not expose an executable repository checkout, so the updated runner and regression were not executed; no green-test claim is made.
+- Timeout implementation committed as `9205f638770fc4aacb7a9c018cd7d7cc67dc8459` and finite-value hardening as `bab165bc8c5ac1f0e118395660560652c4b5ddf1`.
+- Regression coverage committed as `41ae55142997ee2f11dd2aa6283be10a9e99279f` and `529208a03b9fb6b36a37c84d99131c4ce37cbffd`.
+- The connector runner still does not expose an executable repository checkout, so these regressions were not executed; no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. The validation harness is part of the safety boundary and must verify its own contracts in every consolidated run.
-2. Run harness regressions first so fail-fast mode does not rely on an unverified validator to interpret later gates.
-3. Keep live Docker/Grafana checks outside this dependency-light local gate.
+1. A production-oriented validation gate must be bounded in both selection and runtime; hanging forever is not a valid test outcome.
+2. Timeout is per concrete test file rather than global, preserving useful attribution and allowing `--keep-going` to classify subsequent gates.
+3. User overrides remain supported for unusually slow machines, but only finite positive values are accepted.
 
 ### Blockers / unknowns
 
@@ -77,4 +78,4 @@ Read `progress.md` completely first, then inspected `scripts/run_stageguard_vali
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, confirm `validation harness` is first and owns `test_stageguard_validation_runner.py`, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, then `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
