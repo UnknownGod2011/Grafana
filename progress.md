@@ -32,6 +32,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - An empty safety gate is an error, never a passing result.
 - The consolidated validation harness must execute its own regression suite before it can report a green result.
 - Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default) capped at 3600 seconds; a timeout is a validation failure rather than an indefinitely hung gate.
+- Consolidated dependency-light validation subprocesses do not inherit Grafana, Gemini, Google Cloud, remediation, or generic token/password/secret environment credentials from the invoking shell.
 
 ## Retained validation baseline
 
@@ -42,33 +43,33 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation path confinement
+## Latest run — 2026-09-17 — validation credential isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, its dedicated regression suite, and the current `runtime/tests` layout. The consolidated runner correctly required non-empty concrete matches and bounded execution time, but `Path.is_file()` followed symlinks. A repository checkout could therefore redirect a matching test filename outside `runtime/tests`, which is an unnecessary execution-boundary weakness for a production-oriented local validator.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated gate was path-confined and timeout-bounded, but each unittest subprocess inherited the complete invoking shell environment. That meant a nominally local/mock regression could accidentally obtain live Grafana, Gemini, Google Cloud, or remediation credentials if a future test or code path stopped mocking an integration correctly.
 
 ### Changes / actions
 
-- Added `_safe_test_file()` to require a direct regular file whose parent resolves exactly to `runtime/tests`.
-- Explicitly reject symlink test inputs before command construction.
-- `_command()` now independently rejects unsafe/out-of-tree paths rather than assuming callers only use `_files()` output.
-- Startup now rejects a symlinked `runtime/tests` directory and empty gates report that no safe tests matched.
-- Added regression coverage for out-of-tree command rejection, symlink rejection, and acceptance of a direct regular test file; symlink coverage skips only where the host platform cannot create symlinks.
+- Added a credential-scrubbed subprocess environment for every consolidated validation test process.
+- Explicitly remove common Google ADC/gcloud credential variables plus all project integration variables prefixed `GRAFANA_`, `GEMINI_`, `GOOGLE_API_`, or `STAGEGUARD_REMEDIATION_`.
+- Also remove generic environment names ending in `_TOKEN`, `_API_KEY`, `_PASSWORD`, or `_SECRET`, case-insensitively, to reduce accidental inheritance from future adapters.
+- Preserve ordinary environment settings needed for local Python/process behavior; the parent environment is copied, never mutated.
+- Added validator self-tests for credential removal, safe-variable preservation, source immutability, and case-insensitive matching.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Validation path confinement committed as `fc5a257d818fdb1cb9f97c94df82dedf9d781ff0`.
-- Regression coverage committed as `e8140095e3385208424b295097e79ad69fff812e`.
-- The connector environment still does not expose an executable repository checkout, so these regressions were not executed and no green-test claim is made.
+- Validator credential isolation committed as `adb653389652599df0d9286bc23dd43b2aaa9c40`.
+- Regression coverage committed as `ec8718059cdff0ed6dafc9d918322f4477d7ca1b`.
+- The connector environment still does not expose an executable repository checkout, so the new self-tests were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Test discovery is an execution boundary, not merely filename selection; symlinks should not be trusted by the consolidated safety gate.
-2. Path safety is checked again in `_command()` so a future caller cannot bypass discovery validation by supplying a path directly.
-3. The restriction intentionally applies only to the consolidated gate; it does not prohibit developers from maintaining symlinks elsewhere in the repository.
+1. A dependency-light safety gate should not be capable of authenticated external operations solely because the developer happens to have credentials exported.
+2. Credential scrubbing belongs at subprocess creation, not inside individual tests, so a newly added test inherits the safe default automatically.
+3. The live Grafana MCP smoke remains separate and may intentionally receive explicitly configured read-only credentials; this hardening applies only to the consolidated local validator.
 
 ### Blockers / unknowns
 
@@ -79,4 +80,4 @@ Read `progress.md` completely first, then inspected `scripts/run_stageguard_vali
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, then `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke, then classify the historical full-suite failures.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, then `python scripts/run_stageguard_validation.py --keep-going`. Fix any selected-gate failures first; if all gates pass, run the pinned Grafana MCP 1.4.1 read-only live smoke with an explicitly scoped read-only credential, then classify the historical full-suite failures.
