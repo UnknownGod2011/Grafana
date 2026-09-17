@@ -8,6 +8,8 @@ failures remain attributable without requiring runtime/tests to be a package.
 
 The validation harness is itself a gate: changes to this script cannot receive
 a green consolidated result without exercising its selection/command contracts.
+Each test-file process also has a bounded runtime so a deadlock or accidentally
+blocking integration path cannot stall the local safety gate indefinitely.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -22,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "runtime" / "tests"
+DEFAULT_FILE_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -31,12 +34,7 @@ class Gate:
 
 
 GATES = (
-    # Keep the runner's own contract in the consolidated gate. Otherwise a
-    # regression in discovery/fail-closed behavior could still report green.
     Gate("validation harness", ("test_stageguard_validation_runner.py",)),
-    # Timeline policy lives partly in audit-facing tests, so keep both naming
-    # families in the same disclosure gate rather than relying on another gate
-    # to exercise them incidentally.
     Gate("timeline disclosure", ("test_timeline*.py", "test_audit_timeline*.py")),
     Gate("public audit", ("test_*audit*.py",)),
     Gate("execution safety", ("test_*execution*.py",)),
@@ -54,9 +52,6 @@ def _files(gate: Gate) -> tuple[Path, ...]:
 
 
 def _command(path: Path) -> list[str]:
-    # Discovery is intentionally scoped to one concrete file. Running from
-    # ROOT keeps runtime imports available without making runtime/tests a
-    # package or depending on unittest's top-level-directory inference.
     return [
         sys.executable,
         "-m",
@@ -67,6 +62,16 @@ def _command(path: Path) -> list[str]:
         "-p",
         path.name,
     ]
+
+
+def _positive_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a number") from exc
+    if timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be greater than zero")
+    return timeout
 
 
 def main() -> int:
@@ -82,6 +87,13 @@ def main() -> int:
         "--list",
         action="store_true",
         help="print the concrete tests selected by each gate without executing them",
+    )
+    parser.add_argument(
+        "--file-timeout",
+        type=_positive_timeout,
+        default=DEFAULT_FILE_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=f"maximum runtime for each test file (default: {DEFAULT_FILE_TIMEOUT_SECONDS:g}s)",
     )
     args = parser.parse_args()
 
@@ -111,8 +123,18 @@ def main() -> int:
         gate_failed = False
         for path in files:
             print(f"--- {path.name} ---", flush=True)
-            completed = subprocess.run(_command(path), cwd=ROOT, check=False)
-            if completed.returncode != 0:
+            try:
+                completed = subprocess.run(
+                    _command(path), cwd=ROOT, check=False, timeout=args.file_timeout
+                )
+                failed = completed.returncode != 0
+            except subprocess.TimeoutExpired:
+                failed = True
+                print(
+                    f"TIMEOUT: {path.name} exceeded {args.file_timeout:g}s",
+                    file=sys.stderr,
+                )
+            if failed:
                 gate_failed = True
                 failures.append(f"{gate.name}/{path.name}")
                 if not args.keep_going:
