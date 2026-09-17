@@ -26,6 +26,7 @@ GATES=(
  Gate("operator concurrency",("test_api_concurrency.py","test_api_execution_watchdog.py")),
  Gate("incident lifecycle",("test_anchored_incident_runtime.py","test_*evidence_unavailable*.py","test_*recovery_recheck.py","test_*transition_failure_authority.py")),
  Gate("remediation adapter boundary",("test_remediation.py","test_remediation_receiver.py","test_remediation_result_boundary.py","test_production_remediation.py","test_http_remediation_transport.py","test_http_remediation_tls_integration.py","test_http_reconciliation_audit_sequence.py","test_http_subprocess_*.py","test_production_reconciliation_bootstrap.py","test_validation_remediation_boundary.py")),
+ Gate("cloud deployment contract",("test_cloud_run_deploy_contract.py","test_cloud_run_deploy_shell.py","test_deploy_cloud_run_script.py","test_cloudrun_entrypoint.py")),
  Gate("cloud runtime metrics bridge",("test_cloud_run_metrics_bridge.py","test_cloud_run_metrics_acceptance.py")),
  Gate("runtime observability",("test_grafana_runtime_observability.py","test_recovery_observability.py","test_watchdog_*.py","test_observability_image_pins.py")),
  Gate("timeline disclosure",("test_timeline*.py","test_audit_timeline*.py")), Gate("public audit",("test_*audit*.py",)),
