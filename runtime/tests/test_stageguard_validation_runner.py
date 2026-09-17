@@ -49,8 +49,8 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertGreater(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 0)
         self.assertLessEqual(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 300)
 
-    def test_timeout_parser_rejects_non_positive_values(self) -> None:
-        for value in ("0", "-1"):
+    def test_timeout_parser_rejects_unbounded_or_non_positive_values(self) -> None:
+        for value in ("0", "-1", "nan", "inf", "-inf"):
             with self.subTest(value=value):
                 with self.assertRaises(argparse.ArgumentTypeError):
                     runner._positive_timeout(value)
