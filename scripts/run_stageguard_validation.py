@@ -12,13 +12,19 @@ a green consolidated result without exercising its selection/command contracts.
 Each test-file process also has a bounded runtime so a deadlock or accidentally
 blocking integration path cannot stall the local safety gate indefinitely.
 
+Validation subprocesses receive a credential-scrubbed environment. This keeps
+the dependency-light gate from accidentally turning a mocked/local regression
+into an authenticated Grafana, Gemini, Google Cloud, or remediation operation
+merely because the developer's shell contains live credentials.
+
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
-read credentials; live MCP smoke remains an explicit follow-up gate.
+intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
 """
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -28,6 +34,24 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "runtime" / "tests"
 DEFAULT_FILE_TIMEOUT_SECONDS = 120.0
 MAX_FILE_TIMEOUT_SECONDS = 3600.0
+
+# Exact names cover common ADC/service-account and provider credentials whose
+# names do not necessarily end in a secret-looking suffix. Prefixes cover the
+# project-owned integrations without trying to mutate the parent environment.
+SENSITIVE_ENV_NAMES = frozenset(
+    {
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN",
+        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+    }
+)
+SENSITIVE_ENV_PREFIXES = (
+    "GRAFANA_",
+    "GEMINI_",
+    "GOOGLE_API_",
+    "STAGEGUARD_REMEDIATION_",
+)
+SENSITIVE_ENV_SUFFIXES = ("_TOKEN", "_API_KEY", "_PASSWORD", "_SECRET")
 
 
 @dataclass(frozen=True)
@@ -46,12 +70,7 @@ GATES = (
 
 
 def _safe_test_file(path: Path) -> bool:
-    """Return True only for a direct, non-symlink regular file in TESTS.
-
-    Gate patterns are repository configuration, but the files they resolve to
-    are still an execution boundary. Refusing symlinks prevents a checkout from
-    redirecting the validator to code outside runtime/tests.
-    """
+    """Return True only for a direct, non-symlink regular file in TESTS."""
     try:
         return (
             path.parent.resolve(strict=True) == TESTS.resolve(strict=True)
@@ -84,6 +103,21 @@ def _command(path: Path) -> list[str]:
         "-p",
         path.name,
     ]
+
+
+def _is_sensitive_env_name(name: str) -> bool:
+    upper = name.upper()
+    return (
+        upper in SENSITIVE_ENV_NAMES
+        or upper.startswith(SENSITIVE_ENV_PREFIXES)
+        or upper.endswith(SENSITIVE_ENV_SUFFIXES)
+    )
+
+
+def _validation_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a copy of the environment with live integration secrets removed."""
+    source_env = os.environ if source is None else source
+    return {key: value for key, value in source_env.items() if not _is_sensitive_env_name(key)}
 
 
 def _positive_timeout(value: str) -> float:
@@ -147,6 +181,7 @@ def main() -> int:
         return 0
 
     failures: list[str] = []
+    validation_env = _validation_env()
     for gate, files in selections:
         print(f"\n=== StageGuard gate: {gate.name} ({len(files)} files) ===", flush=True)
         gate_failed = False
@@ -154,7 +189,11 @@ def main() -> int:
             print(f"--- {path.name} ---", flush=True)
             try:
                 completed = subprocess.run(
-                    _command(path), cwd=ROOT, check=False, timeout=args.file_timeout
+                    _command(path),
+                    cwd=ROOT,
+                    check=False,
+                    timeout=args.file_timeout,
+                    env=validation_env,
                 )
                 failed = completed.returncode != 0
             except subprocess.TimeoutExpired:
