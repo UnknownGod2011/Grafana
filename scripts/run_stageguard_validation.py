@@ -10,7 +10,9 @@ failures remain attributable without requiring runtime/tests to be a package.
 The validation harness is itself a gate. Runtime activation validates the
 configuration-to-runtime boundary before operator traffic is considered safe.
 The incident-lifecycle gate covers the fail-closed path from investigation and
-evidence availability through recovery rechecks. The operator API boundary gate
+evidence availability through recovery rechecks. The durable-state gate covers
+checkpoint/file integrity and locking contracts that preserve incident and
+audit authority across process restarts. The operator API boundary gate
 exercises authentication, request framing, protocol preflight, and HTTP surface
 contracts before live deployment. The operator concurrency gate verifies that
 long-running remediation keeps read-only observability responsive while
@@ -62,15 +64,8 @@ SENSITIVE_ENV_SUFFIXES = ("_TOKEN", "_API_KEY", "_PASSWORD", "_SECRET")
 VALIDATION_ENV_OVERRIDES = {
     "PYTHONNOUSERSITE": "1",
     "PYTHONDONTWRITEBYTECODE": "1",
-    # Prevent google-auth from falling through to the ambient Compute Engine /
-    # Cloud Run metadata identity when validation itself runs on Google Cloud.
-    # Port 9 is the conventional discard service; loopback keeps the probe off
-    # the network and makes accidental credential discovery fail closed.
     "GCE_METADATA_HOST": "127.0.0.1:9",
     "GCE_METADATA_IP": "127.0.0.1",
-    # Never inherit a developer/runner proxy into dependency-light validation.
-    # Proxy URLs can contain credentials and can also reroute nominally local
-    # traffic. Explicit integration smoke commands own their network settings.
     "NO_PROXY": "localhost,127.0.0.1,::1",
 }
 
@@ -82,6 +77,7 @@ class Gate:
 GATES = (
     Gate("validation harness", ("test_stageguard_validation_runner.py",)),
     Gate("runtime activation", ("test_activation.py",)),
+    Gate("durable state integrity", ("test_*checkpoint*.py", "test_*integrity*.py", "test_*file_lock*.py")),
     Gate("operator API boundary", (
         "test_api.py", "test_api_auth_error_redaction.py", "test_api_protocol_preflight.py",
         "test_api_request_framing.py", "test_http_surface_contract.py", "test_identity.py",
@@ -132,9 +128,6 @@ def _validation_env(source: dict[str, str] | None = None, *, isolated_home: str 
     sanitized = {k: v for k, v in source_env.items() if not _is_sensitive_env_name(k)}
     sanitized.update(VALIDATION_ENV_OVERRIDES)
     if isolated_home is not None:
-        # ADC searches a well-known file beneath the user's home even when
-        # GOOGLE_APPLICATION_CREDENTIALS is absent. Isolate both POSIX and
-        # Windows home discovery plus the gcloud configuration directory.
         sanitized["HOME"] = isolated_home
         sanitized["USERPROFILE"] = isolated_home
         sanitized["CLOUDSDK_CONFIG"] = str(Path(isolated_home) / ".config" / "gcloud")
