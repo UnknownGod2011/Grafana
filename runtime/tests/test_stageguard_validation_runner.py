@@ -133,6 +133,17 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertEqual(sanitized["PYTHONUNBUFFERED"], "1")
         self.assertEqual(sanitized["PATH"], "/usr/bin")
 
+    def test_validation_environment_disables_user_site_and_bytecode_writes(self) -> None:
+        source = {
+            "PATH": "/usr/bin",
+            "PYTHONNOUSERSITE": "0",
+            "PYTHONDONTWRITEBYTECODE": "0",
+        }
+        sanitized = runner._validation_env(source)
+        self.assertEqual(sanitized["PYTHONNOUSERSITE"], "1")
+        self.assertEqual(sanitized["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertEqual(sanitized["PATH"], "/usr/bin")
+
     def test_validation_environment_does_not_mutate_source(self) -> None:
         source = {"GRAFANA_TOKEN": "secret", "SAFE": "value"}
         original = dict(source)
