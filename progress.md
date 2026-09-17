@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable checkpoint/integrity contracts before operator mutation gates, explicitly validates remediation provider/transport/result contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state and evidence/diagnosis before operator mutation gates, explicitly validates remediation and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate.
 
 ## Retained validation baseline
 
@@ -24,43 +24,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — validation ownership audit
+## Latest run — 2026-09-18 — evidence/diagnosis and observability validation ownership
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the consolidated validation runner, its harness regression, the runtime tree, and the runtime test inventory. The validator intentionally runs a safety-focused subset, but there was no machine-visible way to tell which safe `runtime/tests/test_*.py` files were outside all gates. That makes future test additions easy to omit silently from the production-safety path.
+Read `progress.md` completely first, then inspected the consolidated validator and the repository's recursive runtime/test inventory. The ownership audit added previously was useful immediately: several production-critical contracts were visibly outside explicit production gates, including deterministic telemetry/log evidence, investigation/briefing, Grafana runtime observability, recovery observability, and watchdog acceptance contracts.
 
 ### Changes / actions
 
-- Added deterministic discovery of every direct, regular, non-symlink `runtime/tests/test_*.py` file.
-- Added an ownership audit that computes tests not selected by any production validation gate.
-- `--list` now prints an `unowned safe runtime tests` section, making validation-scope drift visible without changing the default execution contract.
-- Added opt-in `--require-full-coverage`, which exits with configuration error code 2 before execution if any safe runtime test is unowned. This gives maintainers/acceptance scripts a fail-closed mode without forcing the dependency-light default validator to execute integration-heavy tests.
-- Added harness regressions for deterministic unowned-test detection and fail-closed full-coverage behavior.
-- Preserved existing credential isolation, per-file timeout, gate ordering, overlap de-duplication, and no-Docker/no-live-resource behavior.
+- Added an `evidence and diagnosis` gate covering telemetry, log activation/evidence, base and correlated investigation, briefing runtime, and Gemini commander contracts.
+- Added a `runtime observability` gate covering Grafana runtime observability, recovery observability, watchdog contracts, and observability image-pin safety.
+- Expanded the validation-harness gate to own `test_validation_*.py`, so validator self-contracts cannot themselves become unowned as new safety gates are added.
+- Added `test_validation_evidence_observability.py`, pinning minimum evidence/observability coverage and ordering: evidence must precede the operator mutation boundary; observability must precede execution safety.
+- Preserved existing credential isolation, timeout, safe-file resolution, overlap de-duplication, and no-live-resource behavior.
 - No credentials were read or supplied. No Docker, cloud resources, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validation ownership implementation committed as `bf434efb3edada76f1a13eaa304a96deba772135`.
-- Harness regressions committed as `a68cb6f698b8ff016a27b5c7fef6ec1c12e75106`.
-- Static inspection confirms the new audit only considers safe direct `test_*.py` files and therefore does not widen execution to helpers, symlinks, or external paths.
-- This connector environment does not expose an executable checkout, so no new green-test claim is made and GitHub Actions was intentionally not triggered as a substitute.
+- Validator expansion committed as `3cb54102fff7d9fcab7bca2064e1b6c868caff1f`.
+- Evidence/observability validation contract committed as `16e08a91b2c309a1bb92914515098da2014418a3`.
+- Repository-tree inspection confirms every explicitly required contract exists on the default branch and the new patterns remain scoped to direct safe test files.
+- This connector environment still does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
 
 ### Decisions
 
-1. Make ownership drift observable by default in `--list`, but keep full-suite ownership enforcement opt-in because the consolidated runner is deliberately dependency-light and not every integration test belongs in it.
-2. Fail before subprocess execution when `--require-full-coverage` finds drift, so strict acceptance cannot accidentally run a partial suite and appear successful.
-3. Reuse the existing safe-file predicate for the ownership audit so reporting cannot be influenced by symlinked or out-of-tree files.
+1. Treat evidence acquisition/diagnosis as a production safety boundary, not merely feature coverage, because approval authority is downstream of those results.
+2. Treat Grafana/watchdog observability as production validation because Grafana is StageGuard's indispensable runtime evidence plane and recovery claims depend on observable fresh telemetry.
+3. Own validator contract tests generically under the earliest harness gate; later domain gates may select the same files, but execution-plan de-duplication prevents duplicate runs.
+4. Do not indiscriminately absorb deployment/GCP acceptance tests into the dependency-light validator; they need deliberate classification because some are environment-oriented rather than local safety contracts.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
-- The new `--list` output will reveal the exact current unowned test inventory only when run in a checkout; those tests should then be classified as production-gate candidates versus intentionally integration-only.
+- Remaining unowned tests should now be materially smaller but still need classification, especially Cloud Run deployment/metrics, onboarding/readiness/UI, retention, and GCS acceptance families.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, classify every reported unowned safe runtime test, add genuinely production-critical contracts to explicit gates, then run `python scripts/run_stageguard_validation.py --keep-going`; only use `--require-full-coverage` once intentionally integration-only tests have either been assigned an appropriate gate or explicitly separated from the dependency-light safety inventory.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and then `python scripts/run_stageguard_validation.py --keep-going`; classify the remaining unowned inventory into local production contracts versus environment/acceptance tests, with operator readiness/UI and Cloud Run metrics boundaries the next highest-value candidates for explicit gates.
