@@ -24,32 +24,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — incident lifecycle validation coverage
+## Latest run — 2026-09-17 — operator API boundary validation coverage
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected the consolidated validator, its self-tests, and the repository test inventory. The consolidated gate had become strong at validating its own execution boundary, timeline/audit disclosure, execution safety, and Grafana MCP contracts, but it did not directly select the core fail-closed incident lifecycle tests. That meant evidence-unavailable and recovery-recheck regressions could escape the recommended pre-live-smoke command.
+Read `progress.md` completely first, then inspected the repository tree, consolidated validator, and validator self-tests. The implementation already contains dedicated authentication/error-redaction, HTTP request-framing, protocol-preflight, identity, and HTTP-surface tests, but the recommended consolidated safety command did not explicitly own those production ingress contracts.
 
 ### Changes / actions
 
-- Added a first-class `incident lifecycle` validation gate.
-- The gate explicitly covers anchored incident runtime, evidence-unavailable behavior, recovery rechecks, and transition-failure authority.
-- Added a harness regression requiring representative API and anchored lifecycle contracts to remain selected, so future filename/layout drift fails the harness instead of silently reducing safety coverage.
-- Preserved all existing path confinement, credential isolation, non-interactive execution, timeout, and no-CI/no-Docker behavior.
+- Added a first-class `operator API boundary` validation gate before incident-lifecycle execution.
+- The gate selects the base API contract plus authentication error redaction, protocol preflight, request framing, HTTP surface, and identity tests.
+- Added an exact harness assertion for those six files so deletion/rename or accidental selection drift fails validation rather than silently weakening the ingress gate.
+- Updated the validator module documentation to make the production-boundary coverage explicit.
+- Preserved path confinement, credential isolation, user-site isolation, non-interactive subprocesses, bounded per-file execution, and no-CI/no-Docker behavior.
 - No credentials, cloud resources, remediation targets, workflows, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator expansion committed as `9ee4d9b371f183279145836f26ed4cc2f115666e`.
-- Harness coverage committed as `4bd2b9b974cbb103eaac9564cd75e493b695cfd1`.
-- This connector environment does not expose an executable repository checkout, so no test-pass claim is made.
+- Validator change committed as `3bf625ae6a6fa563cd734fadfb3574558264bb89`.
+- Harness coverage committed as `a447f78535e9f7e776571998bb5e9fe485719bf6`.
+- Repository inventory confirms all six selected operator-boundary test files exist on `main`.
+- This connector environment does not expose an executable checkout, so no new test-pass claim is made.
 - GitHub Actions was intentionally not triggered as a substitute for local validation.
 
 ### Decisions
 
-1. The recommended consolidated gate should exercise production lifecycle invariants, not only the mechanics of the validator and MCP boundary.
-2. Evidence-unavailable abstention and fresh-evidence recovery are high-value fail-closed contracts and belong in the fast local safety gate.
-3. Explicit representative filenames in the harness are intentional: if those critical contracts are renamed or removed, validation should demand a conscious update.
+1. Authentication and request/protocol framing are production mutation-boundary contracts and belong in the fast consolidated safety gate, not only the historical full suite.
+2. This gate runs before lifecycle tests so obvious ingress regressions fail early.
+3. Exact ownership is intentional because these six tests define a small, stable operator-facing trust boundary.
 
 ### Blockers / unknowns
 
@@ -60,4 +62,4 @@ Read `progress.md` completely first. Inspected the consolidated validator, its s
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and verify the new incident-lifecycle selection, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before the pinned Grafana MCP 1.4.1 read-only live smoke.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and confirm the operator API boundary plus incident-lifecycle selections, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before the pinned Grafana MCP 1.4.1 read-only live smoke.
