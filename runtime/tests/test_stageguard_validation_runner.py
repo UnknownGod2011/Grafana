@@ -71,6 +71,13 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertEqual(s["GCE_METADATA_IP"],"127.0.0.1")
         self.assertEqual(s["ORDINARY_SETTING"],"safe")
         self.assertNotIn("metadata.google.internal",s.values()); self.assertNotIn("169.254.169.254",s.values())
+    def test_validation_environment_drops_proxy_urls_and_credentials(self):
+        source={"PATH":"/usr/bin","HTTP_PROXY":"http://alice:secret@proxy.example:8080","https_proxy":"https://bob:token@proxy.example:8443","ALL_PROXY":"socks5://proxy.example:1080","no_proxy":"metadata.google.internal","ORDINARY_SETTING":"safe"}
+        s=runner._validation_env(source)
+        for name in ("HTTP_PROXY","https_proxy","ALL_PROXY","no_proxy"): self.assertNotIn(name,s)
+        self.assertEqual(s["NO_PROXY"],"localhost,127.0.0.1,::1")
+        self.assertEqual(s["ORDINARY_SETTING"],"safe")
+        self.assertFalse(any("secret" in value or "token@" in value or "proxy.example" in value for value in s.values()))
     def test_validation_environment_isolates_well_known_google_adc_locations(self):
         source={"PATH":"/usr/bin","HOME":"/real/home","USERPROFILE":"C:/Users/real","CLOUDSDK_CONFIG":"/real/gcloud","ORDINARY_SETTING":"safe"}
         s=runner._validation_env(source,isolated_home="/tmp/stageguard-isolated")
@@ -82,7 +89,7 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
     def test_validation_environment_does_not_mutate_source(self):
         source={"GRAFANA_TOKEN":"secret","SAFE":"value"}; original=dict(source); sanitized=runner._validation_env(source); self.assertEqual(source,original); self.assertIsNot(sanitized,source)
     def test_sensitive_environment_matching_is_case_insensitive(self):
-        for n in ("grafana_token","Gemini_Api_Key","my_secret","foo_PASSWORD","pythonpath","PythonStartup","google_credentials","Google_Cloud_Keyfile_Json","gce_metadata_host","Gce_Metadata_Ip"): self.assertTrue(runner._is_sensitive_env_name(n))
+        for n in ("grafana_token","Gemini_Api_Key","my_secret","foo_PASSWORD","pythonpath","PythonStartup","google_credentials","Google_Cloud_Keyfile_Json","gce_metadata_host","Gce_Metadata_Ip","http_proxy","Https_Proxy","all_proxy","No_Proxy"): self.assertTrue(runner._is_sensitive_env_name(n))
     def test_test_file_subprocess_has_no_interactive_stdin(self):
         path=runner.TESTS/"test_timeline_projection.py"; env={"PATH":"/usr/bin"}; completed=mock.Mock(returncode=0)
         with mock.patch.object(subprocess,"run",return_value=completed) as run: self.assertEqual(runner._run_test_file(path,timeout=5.0,env=env),0)
