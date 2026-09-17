@@ -7,12 +7,14 @@ validator into either a false-green gate or an execution path outside the
 intended test directory. Tests run in separate Python processes per file so
 failures remain attributable without requiring runtime/tests to be a package.
 
-The validation harness is itself a gate. The incident-lifecycle gate covers the
-fail-closed path from investigation/evidence availability through recovery
-rechecks. The operator API boundary gate exercises authentication, request
-framing, protocol preflight, and HTTP surface contracts before live deployment.
-The operator concurrency gate verifies that long-running remediation keeps
-read-only observability responsive while competing mutations fail closed.
+The validation harness is itself a gate. Runtime activation validates the
+configuration-to-runtime boundary before operator traffic is considered safe.
+The incident-lifecycle gate covers the fail-closed path from investigation and
+evidence availability through recovery rechecks. The operator API boundary gate
+exercises authentication, request framing, protocol preflight, and HTTP surface
+contracts before live deployment. The operator concurrency gate verifies that
+long-running remediation keeps read-only observability responsive while
+competing mutations fail closed.
 
 Validation subprocesses are non-interactive, timeout-bounded, and receive a
 credential-scrubbed environment. Python startup/import-path controls are
@@ -56,6 +58,7 @@ class Gate:
 
 GATES = (
     Gate("validation harness", ("test_stageguard_validation_runner.py",)),
+    Gate("runtime activation", ("test_activation.py",)),
     Gate("operator API boundary", (
         "test_api.py", "test_api_auth_error_redaction.py", "test_api_protocol_preflight.py",
         "test_api_request_framing.py", "test_http_surface_contract.py", "test_identity.py",
