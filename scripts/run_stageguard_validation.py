@@ -16,7 +16,9 @@ read-only observability responsive while competing mutations fail closed.
 
 Validation subprocesses are non-interactive, timeout-bounded, and receive a
 credential-scrubbed environment. Python startup/import-path controls are
-removed and user-site package loading is disabled.
+removed and user-site package loading is disabled. A test selected by multiple
+gates executes once under its earliest owning gate; later gates report it as
+already covered, avoiding repeated side effects and unnecessary runtime.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -86,6 +88,17 @@ def _files(gate: Gate) -> tuple[Path, ...]:
             if _safe_test_file(path): selected[path.name] = path
     return tuple(selected[name] for name in sorted(selected))
 
+def _execution_plan(selections: tuple[tuple[Gate, tuple[Path, ...]], ...]) -> tuple[tuple[Gate, tuple[Path, ...], tuple[Path, ...]], ...]:
+    """Assign each selected test to its earliest gate while retaining overlap visibility."""
+    seen: set[str] = set()
+    plan = []
+    for gate, files in selections:
+        runnable = tuple(path for path in files if path.name not in seen)
+        covered = tuple(path for path in files if path.name in seen)
+        seen.update(path.name for path in files)
+        plan.append((gate, runnable, covered))
+    return tuple(plan)
+
 def _command(path: Path) -> list[str]:
     if not _safe_test_file(path): raise ValueError(f"unsafe validation test path: {path}")
     return [sys.executable, "-m", "unittest", "discover", "-s", str(TESTS), "-p", path.name]
@@ -123,15 +136,17 @@ def main() -> int:
     empty = [gate.name for gate, files in selections if not files]
     if empty:
         print("error: validation gate matched no safe tests: " + ", ".join(empty), file=sys.stderr); return 2
+    plan = _execution_plan(selections)
     if args.list:
-        for gate, files in selections:
+        for gate, runnable, covered in plan:
             print(f"{gate.name} ({', '.join(gate.patterns)}):")
-            for path in files: print(f"  {path.relative_to(ROOT)}")
+            for path in runnable: print(f"  {path.relative_to(ROOT)}")
+            for path in covered: print(f"  {path.relative_to(ROOT)} [covered by earlier gate]")
         return 0
     failures: list[str] = []
     validation_env = _validation_env()
-    for gate, files in selections:
-        print(f"\n=== StageGuard gate: {gate.name} ({len(files)} files) ===", flush=True)
+    for gate, files, covered in plan:
+        print(f"\n=== StageGuard gate: {gate.name} ({len(files)} files; {len(covered)} already covered) ===", flush=True)
         gate_failed = False
         for path in files:
             print(f"--- {path.name} ---", flush=True)
