@@ -35,6 +35,10 @@ def _files(gate):
   for path in TESTS.glob(pattern):
    if _safe_test_file(path):selected[path.name]=path
  return tuple(selected[n] for n in sorted(selected))
+def _all_safe_tests():return tuple(sorted((p for p in TESTS.glob("test_*.py") if _safe_test_file(p)),key=lambda p:p.name))
+def _unowned_tests(selections):
+ owned={p.name for _,files in selections for p in files}
+ return tuple(p for p in _all_safe_tests() if p.name not in owned)
 def _execution_plan(selections):
  seen=set();plan=[]
  for gate,files in selections:
@@ -57,16 +61,22 @@ def _positive_timeout(value):
  return timeout
 def _run_test_file(path,*,timeout,env):return subprocess.run(_command(path),cwd=ROOT,check=False,timeout=timeout,env=env,stdin=subprocess.DEVNULL).returncode
 def main():
- parser=argparse.ArgumentParser(description="Run dependency-light StageGuard safety/MCP regression gates.");parser.add_argument("--keep-going",action="store_true");parser.add_argument("--list",action="store_true");parser.add_argument("--file-timeout",type=_positive_timeout,default=DEFAULT_FILE_TIMEOUT_SECONDS,metavar="SECONDS");args=parser.parse_args()
+ parser=argparse.ArgumentParser(description="Run dependency-light StageGuard safety/MCP regression gates.");parser.add_argument("--keep-going",action="store_true");parser.add_argument("--list",action="store_true");parser.add_argument("--require-full-coverage",action="store_true",help="fail if any safe runtime test is not owned by a production validation gate");parser.add_argument("--file-timeout",type=_positive_timeout,default=DEFAULT_FILE_TIMEOUT_SECONDS,metavar="SECONDS");args=parser.parse_args()
  if not TESTS.is_dir() or TESTS.is_symlink():print(f"error: safe test directory not found: {TESTS}",file=sys.stderr);return 2
  selections=tuple((g,_files(g)) for g in GATES);empty=[g.name for g,f in selections if not f]
  if empty:print("error: validation gate matched no safe tests: "+", ".join(empty),file=sys.stderr);return 2
+ unowned=_unowned_tests(selections)
+ if args.require_full_coverage and unowned:
+  print("error: safe runtime tests are not owned by validation gates: "+", ".join(p.name for p in unowned),file=sys.stderr);return 2
  plan=_execution_plan(selections)
  if args.list:
   for gate,runnable,covered in plan:
    print(f"{gate.name} ({', '.join(gate.patterns)}):")
    for path in runnable:print(f"  {path.relative_to(ROOT)}")
    for path in covered:print(f"  {path.relative_to(ROOT)} [covered by earlier gate]")
+  if unowned:
+   print("unowned safe runtime tests:")
+   for path in unowned:print(f"  {path.relative_to(ROOT)}")
   return 0
  failures=[]
  with tempfile.TemporaryDirectory(prefix="stageguard-validation-") as isolated_home:
