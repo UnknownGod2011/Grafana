@@ -9,8 +9,8 @@ failures remain attributable without requiring runtime/tests to be a package.
 
 The validation harness is itself a gate. The incident-lifecycle gate covers the
 fail-closed path from investigation/evidence availability through recovery
-rechecks, so the consolidated command is useful as a production safety gate
-rather than only a validator/MCP hardening check.
+rechecks. The operator API boundary gate exercises authentication, request
+framing, protocol preflight, and HTTP surface contracts before live deployment.
 
 Validation subprocesses are non-interactive, timeout-bounded, and receive a
 credential-scrubbed environment. Python startup/import-path controls are
@@ -50,6 +50,14 @@ class Gate:
 
 GATES = (
     Gate("validation harness", ("test_stageguard_validation_runner.py",)),
+    Gate("operator API boundary", (
+        "test_api.py",
+        "test_api_auth_error_redaction.py",
+        "test_api_protocol_preflight.py",
+        "test_api_request_framing.py",
+        "test_http_surface_contract.py",
+        "test_identity.py",
+    )),
     Gate("incident lifecycle", (
         "test_anchored_incident_runtime.py",
         "test_*evidence_unavailable*.py",
