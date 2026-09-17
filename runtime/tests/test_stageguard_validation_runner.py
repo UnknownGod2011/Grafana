@@ -39,6 +39,18 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         plan=runner._execution_plan(((first,(shared,unique)),(second,(shared,))))
         self.assertEqual(plan[0],(first,(shared,unique),())); self.assertEqual(plan[1],(second,(),(shared,)))
         self.assertEqual([p.name for _,files,_ in plan for p in files],["test_shared.py","test_unique.py"])
+    def test_unowned_tests_report_only_safe_runtime_tests(self):
+        with tempfile.TemporaryDirectory() as d:
+            tests=Path(d); owned=tests/"test_owned.py"; unowned=tests/"test_unowned.py"; ignored=tests/"helper.py"
+            for p in (owned,unowned,ignored): p.write_text("pass\n")
+            with mock.patch.object(runner,"TESTS",tests):
+                selections=((runner.Gate("synthetic",("test_owned.py",)),(owned,)),)
+                self.assertEqual([p.name for p in runner._unowned_tests(selections)],["test_unowned.py"])
+    def test_require_full_coverage_fails_closed_on_unowned_test(self):
+        gate=runner.Gate("synthetic",("test_timeline_projection.py",)); err=io.StringIO()
+        with mock.patch.object(runner,"GATES",(gate,)), mock.patch.object(runner,"_unowned_tests",return_value=(runner.TESTS/"test_unowned.py",)), mock.patch.object(sys,"argv",["run_stageguard_validation.py","--require-full-coverage"]), redirect_stderr(err):
+            self.assertEqual(runner.main(),2)
+        self.assertIn("test_unowned.py",err.getvalue())
     def test_commands_are_scoped_to_one_concrete_file(self):
         command=runner._command(runner.TESTS/"test_timeline_projection.py"); self.assertEqual(command[-2:],["-p","test_timeline_projection.py"]); self.assertNotIn("-t",command)
     def test_command_rejects_paths_outside_test_directory(self):
