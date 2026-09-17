@@ -15,6 +15,11 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
     def test_validation_harness_gate_owns_runner_regressions(self):
         harness=next(g for g in runner.GATES if g.name=="validation harness")
         self.assertEqual({p.name for p in runner._files(harness)}, {"test_stageguard_validation_runner.py"})
+    def test_operator_api_boundary_covers_auth_framing_and_protocol_contracts(self):
+        gate=next(g for g in runner.GATES if g.name=="operator API boundary")
+        names={p.name for p in runner._files(gate)}
+        required={"test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py"}
+        self.assertEqual(names,required)
     def test_incident_lifecycle_gate_covers_fail_closed_and_recovery_contracts(self):
         gate=next(g for g in runner.GATES if g.name=="incident lifecycle")
         names={p.name for p in runner._files(gate)}
