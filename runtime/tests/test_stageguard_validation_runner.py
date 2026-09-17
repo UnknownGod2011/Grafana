@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -120,6 +121,19 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         for name in ("grafana_token", "Gemini_Api_Key", "my_secret", "foo_PASSWORD"):
             with self.subTest(name=name):
                 self.assertTrue(runner._is_sensitive_env_name(name))
+
+    def test_test_file_subprocess_has_no_interactive_stdin(self) -> None:
+        path = runner.TESTS / "test_timeline_projection.py"
+        env = {"PATH": "/usr/bin"}
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(subprocess, "run", return_value=completed) as run:
+            self.assertEqual(runner._run_test_file(path, timeout=5.0, env=env), 0)
+        kwargs = run.call_args.kwargs
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["timeout"], 5.0)
+        self.assertIs(kwargs["env"], env)
+        self.assertFalse(kwargs["check"])
+        self.assertEqual(kwargs["cwd"], runner.ROOT)
 
     def test_default_file_timeout_is_bounded(self) -> None:
         self.assertGreater(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 0)
