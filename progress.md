@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs Grafana/Gemini/Google credentials (including inline Google service-account JSON forms), inherited proxy URLs/credentials, and Python injection controls, disables user-site packages/bytecode writes, isolates well-known Google ADC/gcloud home locations, blocks ambient GCE metadata-server credential discovery during execution, tests its own harness first, validates runtime activation before operator/API gates, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable checkpoint/integrity contracts before operator mutation gates, executes overlapping selections once under their earliest owner, and classifies subprocess launch failures as validation failures.
 
 ## Retained validation baseline
 
@@ -24,34 +24,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation proxy credential isolation
+## Latest run — 2026-09-17 — durable state validation ownership
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the runtime tree, consolidated validator, validator self-tests, and outstanding validation blockers. The validator already scrubbed StageGuard/Grafana/Gemini/Google credentials, isolated local ADC/gcloud homes, and blocked ambient GCE metadata identity. One host-environment leak remained: standard HTTP(S)/ALL proxy variables were inherited unchanged. Proxy URLs commonly support embedded `user:password@host` credentials and can reroute requests made by tests, so they do not belong in dependency-light safety subprocesses.
+Read `progress.md` completely first, then inspected the consolidated validator, its self-tests, the runtime test inventory, and checkpoint file-security coverage. The recommended safety runner already owned activation, API ingress/concurrency, incident lifecycle, audit/timeline, execution, and Grafana MCP contracts, but checkpoint/file-integrity persistence was not an explicit pre-mutation gate even though durable state is part of StageGuard's authority model.
 
 ### Changes / actions
 
-- Added `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` to exact-name sensitive environment handling; matching remains case-insensitive, covering lowercase variants commonly used on Unix.
-- Added a deterministic `NO_PROXY=localhost,127.0.0.1,::1` override after sanitization so local test traffic stays direct while inherited bypass policy cannot reintroduce production/internal hostnames.
-- Added regression coverage with credential-bearing proxy URLs proving proxy values and embedded credentials do not reach validation subprocess environments.
-- Extended case-insensitive sensitive-name coverage for all proxy controls.
-- Updated validator documentation to state that explicit live/integration smoke commands, rather than dependency-light regression tests, own network/proxy configuration.
+- Added a `durable state integrity` gate before all operator mutation/lifecycle gates.
+- The gate selects checkpoint, integrity, and file-lock contracts, giving persistence safety explicit ownership while existing overlap de-duplication prevents repeated execution of tests also selected by audit gates.
+- Added `test_validation_durable_state_integrity.py`, which fails if checkpoint file-security coverage disappears, if no independent integrity contract remains, or if the durable-state gate moves behind API/concurrency/lifecycle gates.
+- Updated validator documentation to explain why durable persistence must validate before operator traffic is considered safe.
 - No credentials were read or supplied. No Docker, cloud resources, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator hardening committed as `024c2a3571e4d3c7f532b72535c52c676c44b4d4`.
-- Regression coverage committed as `f4a6caff761ab2b751497f70552181d957610af8`.
-- Static inspection confirms proxy variables are removed case-insensitively before the safe local-only `NO_PROXY` override is applied.
-- This connector environment does not expose an executable checkout, so the updated harness has not been repository-executed and no new green-test claim is made.
-- GitHub Actions was intentionally not triggered as a substitute for local validation.
+- Validator change committed as `2fb0405ae69d24be5a50617abf669643aa6c62f4`.
+- Durable-state contract test committed as `5d26f97d6f01a705c97a34b9f705d3f0d2dae80b`.
+- Static inspection confirms `test_checkpoint_file_security.py` exists and is selected by the new checkpoint glob.
+- This connector environment does not expose an executable checkout, so no new green-test claim is made and GitHub Actions was intentionally not triggered as a substitute.
 
 ### Decisions
 
-1. Treat inherited proxy URLs as credential-bearing host configuration even when they happen not to contain a password in a particular environment.
-2. Do not preserve inherited `NO_PROXY`: it can contain production/internal hostnames and changes request routing semantics.
-3. Preserve a deterministic loopback-only `NO_PROXY` because StageGuard's dependency-light tests legitimately use local HTTP surfaces and should never need a corporate/developer proxy for them.
+1. Treat durable checkpoint/integrity behavior as a first-class production safety boundary, not merely an incidental part of broad audit coverage.
+2. Run this boundary before API mutation/lifecycle gates because approval/execution authority depends on trustworthy persisted state.
+3. Keep broad patterns for checkpoint/integrity/file-lock contracts so newly added persistence regressions are automatically incorporated, with a dedicated contract test preventing silent erosion of the minimum expected boundary.
 
 ### Blockers / unknowns
 
@@ -62,4 +60,4 @@ Read `progress.md` completely first, then inspected the runtime tree, consolidat
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and then `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before performing the pinned Grafana MCP 1.4.1 read-only live smoke.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and `python scripts/run_stageguard_validation.py --keep-going`; fix any durable-state or other failures before the pinned Grafana MCP 1.4.1 live read-only smoke.
