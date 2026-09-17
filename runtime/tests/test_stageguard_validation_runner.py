@@ -64,6 +64,14 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertEqual(s["PYTHONUNBUFFERED"],"1")
     def test_validation_environment_disables_user_site_and_bytecode_writes(self):
         s=runner._validation_env({"PATH":"/usr/bin","PYTHONNOUSERSITE":"0","PYTHONDONTWRITEBYTECODE":"0"}); self.assertEqual(s["PYTHONNOUSERSITE"],"1"); self.assertEqual(s["PYTHONDONTWRITEBYTECODE"],"1")
+    def test_validation_environment_isolates_well_known_google_adc_locations(self):
+        source={"PATH":"/usr/bin","HOME":"/real/home","USERPROFILE":"C:/Users/real","CLOUDSDK_CONFIG":"/real/gcloud","ORDINARY_SETTING":"safe"}
+        s=runner._validation_env(source,isolated_home="/tmp/stageguard-isolated")
+        self.assertEqual(s["HOME"],"/tmp/stageguard-isolated")
+        self.assertEqual(s["USERPROFILE"],"/tmp/stageguard-isolated")
+        self.assertEqual(s["CLOUDSDK_CONFIG"],str(Path("/tmp/stageguard-isolated")/".config"/"gcloud"))
+        self.assertEqual(s["ORDINARY_SETTING"],"safe")
+        self.assertNotIn("/real/home",s.values()); self.assertNotIn("C:/Users/real",s.values()); self.assertNotIn("/real/gcloud",s.values())
     def test_validation_environment_does_not_mutate_source(self):
         source={"GRAFANA_TOKEN":"secret","SAFE":"value"}; original=dict(source); sanitized=runner._validation_env(source); self.assertEqual(source,original); self.assertIsNot(sanitized,source)
     def test_sensitive_environment_matching_is_case_insensitive(self):
