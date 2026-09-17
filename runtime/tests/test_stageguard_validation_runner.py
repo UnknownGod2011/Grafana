@@ -1,5 +1,6 @@
 from __future__ import annotations
-import argparse, importlib.util, subprocess, sys, tempfile, unittest
+import argparse, importlib.util, io, subprocess, sys, tempfile, unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,18 +17,14 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         harness=next(g for g in runner.GATES if g.name=="validation harness")
         self.assertEqual({p.name for p in runner._files(harness)}, {"test_stageguard_validation_runner.py"})
     def test_operator_api_boundary_covers_auth_framing_and_protocol_contracts(self):
-        gate=next(g for g in runner.GATES if g.name=="operator API boundary")
-        names={p.name for p in runner._files(gate)}
-        required={"test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py"}
-        self.assertEqual(names,required)
+        gate=next(g for g in runner.GATES if g.name=="operator API boundary"); names={p.name for p in runner._files(gate)}
+        required={"test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py"}; self.assertEqual(names,required)
     def test_operator_concurrency_gate_covers_responsiveness_and_execution_watchdog(self):
         gate=next(g for g in runner.GATES if g.name=="operator concurrency")
         self.assertEqual({p.name for p in runner._files(gate)}, {"test_api_concurrency.py","test_api_execution_watchdog.py"})
     def test_incident_lifecycle_gate_covers_fail_closed_and_recovery_contracts(self):
-        gate=next(g for g in runner.GATES if g.name=="incident lifecycle")
-        names={p.name for p in runner._files(gate)}
-        required={"test_anchored_incident_runtime.py","test_anchored_recovery_recheck.py","test_api_recovery_recheck.py","test_api_evidence_unavailable_briefing.py","test_api_evidence_unavailable_mutations.py","test_anchored_transition_failure_authority.py"}
-        self.assertTrue(required.issubset(names), required-names)
+        gate=next(g for g in runner.GATES if g.name=="incident lifecycle"); names={p.name for p in runner._files(gate)}
+        required={"test_anchored_incident_runtime.py","test_anchored_recovery_recheck.py","test_api_recovery_recheck.py","test_api_evidence_unavailable_briefing.py","test_api_evidence_unavailable_mutations.py","test_anchored_transition_failure_authority.py"}; self.assertTrue(required.issubset(names), required-names)
     def test_timeline_gate_includes_audit_timeline_contracts(self):
         gate=next(g for g in runner.GATES if g.name=="timeline disclosure"); names={p.name for p in runner._files(gate)}
         for name in ("test_timeline_projection.py","test_audit_timeline.py","test_audit_timeline_reconciliation_projection.py"): self.assertIn(name,names)
@@ -35,13 +32,10 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         for gate in runner.GATES:
             names=[p.name for p in runner._files(gate)]; self.assertEqual(names,sorted(set(names)))
     def test_execution_plan_runs_each_test_at_most_once(self):
-        shared=runner.TESTS/"test_shared.py"; unique=runner.TESTS/"test_unique.py"
-        first=runner.Gate("first",("unused",)); second=runner.Gate("second",("unused",))
+        shared=runner.TESTS/"test_shared.py"; unique=runner.TESTS/"test_unique.py"; first=runner.Gate("first",("unused",)); second=runner.Gate("second",("unused",))
         plan=runner._execution_plan(((first,(shared,unique)),(second,(shared,))))
-        self.assertEqual(plan[0],(first,(shared,unique),()))
-        self.assertEqual(plan[1],(second,(),(shared,)))
-        runnable=[p.name for _,files,_ in plan for p in files]
-        self.assertEqual(runnable,["test_shared.py","test_unique.py"])
+        self.assertEqual(plan[0],(first,(shared,unique),())); self.assertEqual(plan[1],(second,(),(shared,)))
+        self.assertEqual([p.name for _,files,_ in plan for p in files],["test_shared.py","test_unique.py"])
     def test_commands_are_scoped_to_one_concrete_file(self):
         command=runner._command(runner.TESTS/"test_timeline_projection.py"); self.assertEqual(command[-2:],["-p","test_timeline_projection.py"]); self.assertNotIn("-t",command)
     def test_command_rejects_paths_outside_test_directory(self):
@@ -59,8 +53,7 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
             tests=Path(d)/"tests"; tests.mkdir(); f=tests/"test_ok.py"; f.write_text("pass\n")
             with mock.patch.object(runner,"TESTS",tests): self.assertTrue(runner._safe_test_file(f))
     def test_validation_environment_scrubs_live_integration_credentials(self):
-        source={"PATH":"/usr/bin","HOME":"/tmp/home","GRAFANA_TOKEN":"x","GEMINI_API_KEY":"x","GOOGLE_API_KEY":"x","GOOGLE_APPLICATION_CREDENTIALS":"x","CLOUDSDK_AUTH_ACCESS_TOKEN":"x","STAGEGUARD_REMEDIATION_TOKEN":"x","SOME_OTHER_TOKEN":"x","APP_PASSWORD":"x","ORDINARY_SETTING":"safe"}
-        sanitized=runner._validation_env(source); self.assertEqual(sanitized["ORDINARY_SETTING"],"safe")
+        source={"PATH":"/usr/bin","HOME":"/tmp/home","GRAFANA_TOKEN":"x","GEMINI_API_KEY":"x","GOOGLE_API_KEY":"x","GOOGLE_APPLICATION_CREDENTIALS":"x","CLOUDSDK_AUTH_ACCESS_TOKEN":"x","STAGEGUARD_REMEDIATION_TOKEN":"x","SOME_OTHER_TOKEN":"x","APP_PASSWORD":"x","ORDINARY_SETTING":"safe"}; sanitized=runner._validation_env(source); self.assertEqual(sanitized["ORDINARY_SETTING"],"safe")
         for n in set(source)-{"PATH","HOME","ORDINARY_SETTING"}: self.assertNotIn(n,sanitized)
     def test_validation_environment_scrubs_python_code_injection_controls(self):
         source={"PATH":"/usr/bin","PYTHONPATH":"x","PYTHONHOME":"x","PYTHONSTARTUP":"x","PYTHONINSPECT":"1","PYTHONBREAKPOINT":"x","PYTHONUNBUFFERED":"1"}; s=runner._validation_env(source)
@@ -76,6 +69,11 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         path=runner.TESTS/"test_timeline_projection.py"; env={"PATH":"/usr/bin"}; completed=mock.Mock(returncode=0)
         with mock.patch.object(subprocess,"run",return_value=completed) as run: self.assertEqual(runner._run_test_file(path,timeout=5.0,env=env),0)
         kwargs=run.call_args.kwargs; self.assertIs(kwargs["stdin"],subprocess.DEVNULL); self.assertEqual(kwargs["timeout"],5.0); self.assertIs(kwargs["env"],env); self.assertFalse(kwargs["check"]); self.assertEqual(kwargs["cwd"],runner.ROOT)
+    def test_main_classifies_subprocess_launch_error_as_validation_failure(self):
+        gate=runner.Gate("synthetic",("test_timeline_projection.py",)); err=io.StringIO()
+        with mock.patch.object(runner,"GATES",(gate,)), mock.patch.object(runner,"_run_test_file",side_effect=OSError("interpreter unavailable")), mock.patch.object(sys,"argv",["run_stageguard_validation.py"]), redirect_stderr(err):
+            self.assertEqual(runner.main(),1)
+        output=err.getvalue(); self.assertIn("LAUNCH ERROR: test_timeline_projection.py",output); self.assertIn("synthetic/test_timeline_projection.py",output)
     def test_default_file_timeout_is_bounded(self):
         self.assertGreater(runner.DEFAULT_FILE_TIMEOUT_SECONDS,0); self.assertLessEqual(runner.DEFAULT_FILE_TIMEOUT_SECONDS,300); self.assertLessEqual(runner.DEFAULT_FILE_TIMEOUT_SECONDS,runner.MAX_FILE_TIMEOUT_SECONDS)
     def test_timeout_parser_rejects_unbounded_non_positive_or_excessive_values(self):
