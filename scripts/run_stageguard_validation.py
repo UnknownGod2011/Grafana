@@ -11,6 +11,8 @@ The validation harness is itself a gate: changes to this script cannot receive
 a green consolidated result without exercising its selection/command contracts.
 Each test-file process also has a bounded runtime so a deadlock or accidentally
 blocking integration path cannot stall the local safety gate indefinitely.
+Subprocess stdin is disconnected so an unexpected prompt fails immediately
+instead of consuming the timeout while waiting for operator input.
 
 Validation subprocesses receive a credential-scrubbed environment. This keeps
 the dependency-light gate from accidentally turning a mocked/local regression
@@ -35,9 +37,6 @@ TESTS = ROOT / "runtime" / "tests"
 DEFAULT_FILE_TIMEOUT_SECONDS = 120.0
 MAX_FILE_TIMEOUT_SECONDS = 3600.0
 
-# Exact names cover common ADC/service-account and provider credentials whose
-# names do not necessarily end in a secret-looking suffix. Prefixes cover the
-# project-owned integrations without trying to mutate the parent environment.
 SENSITIVE_ENV_NAMES = frozenset(
     {
         "GOOGLE_APPLICATION_CREDENTIALS",
@@ -134,6 +133,19 @@ def _positive_timeout(value: str) -> float:
     return timeout
 
 
+def _run_test_file(path: Path, *, timeout: float, env: dict[str, str]) -> int:
+    """Execute one selected test file without permitting interactive input."""
+    completed = subprocess.run(
+        _command(path),
+        cwd=ROOT,
+        check=False,
+        timeout=timeout,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+    return completed.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run dependency-light StageGuard safety/MCP regression gates."
@@ -188,14 +200,9 @@ def main() -> int:
         for path in files:
             print(f"--- {path.name} ---", flush=True)
             try:
-                completed = subprocess.run(
-                    _command(path),
-                    cwd=ROOT,
-                    check=False,
-                    timeout=args.file_timeout,
-                    env=validation_env,
-                )
-                failed = completed.returncode != 0
+                failed = _run_test_file(
+                    path, timeout=args.file_timeout, env=validation_env
+                ) != 0
             except subprocess.TimeoutExpired:
                 failed = True
                 print(
