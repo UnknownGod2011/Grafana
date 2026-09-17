@@ -28,7 +28,8 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
 - Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
 - An absent static timeline policy may delegate to the canonical reconciliation projector; an explicitly configured null/malformed policy never does and fails closed.
-- Consolidated local validation gates must resolve to concrete test files before execution; an empty safety gate is an error, never a passing result.
+- Consolidated local validation gates must resolve to concrete direct regular files under `runtime/tests`; symlinks and paths outside that directory are not executable validation inputs.
+- An empty safety gate is an error, never a passing result.
 - The consolidated validation harness must execute its own regression suite before it can report a green result.
 - Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default) capped at 3600 seconds; a timeout is a validation failure rather than an indefinitely hung gate.
 
@@ -41,31 +42,33 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation timeout ceiling
+## Latest run — 2026-09-17 — validation path confinement
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The previous run correctly required a finite positive per-file timeout, but the CLI still accepted arbitrarily large finite values such as `1e308`, which technically preserved finiteness while defeating the operational purpose of a bounded local safety gate.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, its dedicated regression suite, and the current `runtime/tests` layout. The consolidated runner correctly required non-empty concrete matches and bounded execution time, but `Path.is_file()` followed symlinks. A repository checkout could therefore redirect a matching test filename outside `runtime/tests`, which is an unnecessary execution-boundary weakness for a production-oriented local validator.
 
 ### Changes / actions
 
-- Added `MAX_FILE_TIMEOUT_SECONDS = 3600.0` and reject larger `--file-timeout` values.
-- Updated CLI help to expose both the 120-second default and one-hour hard ceiling.
-- Expanded runner regressions to reject values immediately above the ceiling and extreme finite values, accept the exact ceiling, and assert the default remains within it.
+- Added `_safe_test_file()` to require a direct regular file whose parent resolves exactly to `runtime/tests`.
+- Explicitly reject symlink test inputs before command construction.
+- `_command()` now independently rejects unsafe/out-of-tree paths rather than assuming callers only use `_files()` output.
+- Startup now rejects a symlinked `runtime/tests` directory and empty gates report that no safe tests matched.
+- Added regression coverage for out-of-tree command rejection, symlink rejection, and acceptance of a direct regular test file; symlink coverage skips only where the host platform cannot create symlinks.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Timeout-ceiling implementation committed as `dbbc407e02825267f798fbd609c58916b278429a`.
-- Regression coverage committed as `6875944aff004345c7ee038cafd364415ba45424`.
-- The connector runner still does not expose an executable repository checkout, so these regressions were not executed; no green-test claim is made.
+- Validation path confinement committed as `fc5a257d818fdb1cb9f97c94df82dedf9d781ff0`.
+- Regression coverage committed as `e8140095e3385208424b295097e79ad69fff812e`.
+- The connector environment still does not expose an executable repository checkout, so these regressions were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. "Finite" alone is insufficient for a production-oriented local gate because extremely large finite values are operationally equivalent to no useful bound.
-2. One hour per concrete test file is intentionally generous for slow development machines while preserving a meaningful hard ceiling.
-3. The normal default remains 120 seconds; the ceiling is an escape hatch, not the expected operating value.
+1. Test discovery is an execution boundary, not merely filename selection; symlinks should not be trusted by the consolidated safety gate.
+2. Path safety is checked again in `_command()` so a future caller cannot bypass discovery validation by supplying a path directly.
+3. The restriction intentionally applies only to the consolidated gate; it does not prohibit developers from maintaining symlinks elsewhere in the repository.
 
 ### Blockers / unknowns
 
