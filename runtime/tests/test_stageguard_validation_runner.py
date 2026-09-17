@@ -16,6 +16,9 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
     def test_validation_harness_gate_owns_runner_regressions(self):
         harness=next(g for g in runner.GATES if g.name=="validation harness")
         self.assertEqual({p.name for p in runner._files(harness)}, {"test_stageguard_validation_runner.py"})
+    def test_runtime_activation_gate_covers_configuration_to_runtime_boundary(self):
+        gate=next(g for g in runner.GATES if g.name=="runtime activation")
+        self.assertEqual({p.name for p in runner._files(gate)}, {"test_activation.py"})
     def test_operator_api_boundary_covers_auth_framing_and_protocol_contracts(self):
         gate=next(g for g in runner.GATES if g.name=="operator API boundary"); names={p.name for p in runner._files(gate)}
         required={"test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py"}; self.assertEqual(names,required)
