@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "runtime" / "tests"
 DEFAULT_FILE_TIMEOUT_SECONDS = 120.0
+MAX_FILE_TIMEOUT_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,10 @@ def _positive_timeout(value: str) -> float:
         raise argparse.ArgumentTypeError("timeout must be a number") from exc
     if not math.isfinite(timeout) or timeout <= 0:
         raise argparse.ArgumentTypeError("timeout must be a finite number greater than zero")
+    if timeout > MAX_FILE_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"timeout must not exceed {MAX_FILE_TIMEOUT_SECONDS:g} seconds"
+        )
     return timeout
 
 
@@ -94,7 +99,10 @@ def main() -> int:
         type=_positive_timeout,
         default=DEFAULT_FILE_TIMEOUT_SECONDS,
         metavar="SECONDS",
-        help=f"maximum runtime for each test file (default: {DEFAULT_FILE_TIMEOUT_SECONDS:g}s)",
+        help=(
+            f"maximum runtime for each test file (default: {DEFAULT_FILE_TIMEOUT_SECONDS:g}s; "
+            f"maximum: {MAX_FILE_TIMEOUT_SECONDS:g}s)"
+        ),
     )
     args = parser.parse_args()
 
