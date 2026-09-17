@@ -18,8 +18,9 @@ Validation subprocesses receive a credential-scrubbed environment. This keeps
 the dependency-light gate from accidentally turning a mocked/local regression
 into an authenticated Grafana, Gemini, Google Cloud, or remediation operation
 merely because the developer's shell contains live credentials. Python startup
-and import-path control variables are also removed so the invoking shell cannot
-silently inject external code into the supposedly repository-scoped test run.
+and import-path control variables are removed, and user-site package loading is
+explicitly disabled, so the invoking shell/user profile cannot silently inject
+external code into the supposedly repository-scoped test run.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -60,6 +61,13 @@ SENSITIVE_ENV_PREFIXES = (
     "STAGEGUARD_REMEDIATION_",
 )
 SENSITIVE_ENV_SUFFIXES = ("_TOKEN", "_API_KEY", "_PASSWORD", "_SECRET")
+VALIDATION_ENV_OVERRIDES = {
+    # Prevent packages/code installed only in the invoking user's site directory
+    # from participating in the supposedly repository-scoped validation run.
+    "PYTHONNOUSERSITE": "1",
+    # Validation should not modify the checkout with __pycache__ artifacts.
+    "PYTHONDONTWRITEBYTECODE": "1",
+}
 
 
 @dataclass(frozen=True)
@@ -125,7 +133,13 @@ def _is_sensitive_env_name(name: str) -> bool:
 def _validation_env(source: dict[str, str] | None = None) -> dict[str, str]:
     """Return an environment safe for repository-scoped validation children."""
     source_env = os.environ if source is None else source
-    return {key: value for key, value in source_env.items() if not _is_sensitive_env_name(key)}
+    sanitized = {
+        key: value for key, value in source_env.items() if not _is_sensitive_env_name(key)
+    }
+    # Apply security invariants after copying so a caller cannot disable them
+    # through inherited values such as PYTHONNOUSERSITE=0.
+    sanitized.update(VALIDATION_ENV_OVERRIDES)
+    return sanitized
 
 
 def _positive_timeout(value: str) -> float:
