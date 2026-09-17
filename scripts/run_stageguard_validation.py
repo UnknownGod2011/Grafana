@@ -21,6 +21,7 @@ GATES=(
  Gate("runtime activation",("test_activation.py",)),
  Gate("durable state integrity",("test_*checkpoint*.py","test_*integrity*.py","test_*file_lock*.py","test_validation_durable_state_integrity.py")),
  Gate("evidence and diagnosis",("test_telemetry.py","test_log_activation.py","test_log_evidence.py","test_investigator.py","test_correlated_investigator.py","test_briefing_runtime.py","test_gemini_commander.py")),
+ Gate("operator readiness and UI",("test_bootstrap.py","test_incident_service.py","test_onboarding.py","test_readiness*.py","test_operator_*.py","test_preflight_cli.py","test_stageguard_doctor.py","test_command_line*.py")),
  Gate("operator API boundary",("test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py")),
  Gate("operator concurrency",("test_api_concurrency.py","test_api_execution_watchdog.py")),
  Gate("incident lifecycle",("test_anchored_incident_runtime.py","test_*evidence_unavailable*.py","test_*recovery_recheck.py","test_*transition_failure_authority.py")),
