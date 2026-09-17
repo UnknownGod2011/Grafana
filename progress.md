@@ -33,6 +33,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - The consolidated validation harness must execute its own regression suite before it can report a green result.
 - Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default) capped at 3600 seconds; a timeout is a validation failure rather than an indefinitely hung gate.
 - Consolidated dependency-light validation subprocesses do not inherit Grafana, Gemini, Google Cloud, remediation, or generic token/password/secret environment credentials from the invoking shell.
+- Consolidated validation subprocesses receive no interactive stdin; an unexpected prompt cannot silently consume the timeout waiting for operator input.
 
 ## Retained validation baseline
 
@@ -43,33 +44,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation credential isolation
+## Latest run — 2026-09-17 — non-interactive validation subprocesses
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated gate was path-confined and timeout-bounded, but each unittest subprocess inherited the complete invoking shell environment. That meant a nominally local/mock regression could accidentally obtain live Grafana, Gemini, Google Cloud, or remediation credentials if a future test or code path stopped mocking an integration correctly.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated gate already confined test paths, bounded runtime, and scrubbed credentials, but each unittest subprocess still inherited the invoking process stdin. A future regression that unexpectedly prompts for input could therefore wait on an operator or consume the entire timeout rather than failing immediately.
 
 ### Changes / actions
 
-- Added a credential-scrubbed subprocess environment for every consolidated validation test process.
-- Explicitly remove common Google ADC/gcloud credential variables plus all project integration variables prefixed `GRAFANA_`, `GEMINI_`, `GOOGLE_API_`, or `STAGEGUARD_REMEDIATION_`.
-- Also remove generic environment names ending in `_TOKEN`, `_API_KEY`, `_PASSWORD`, or `_SECRET`, case-insensitively, to reduce accidental inheritance from future adapters.
-- Preserve ordinary environment settings needed for local Python/process behavior; the parent environment is copied, never mutated.
-- Added validator self-tests for credential removal, safe-variable preservation, source immutability, and case-insensitive matching.
+- Added `_run_test_file()` as the single subprocess boundary for selected validation files.
+- Set every validation subprocess stdin to `subprocess.DEVNULL`, making the consolidated safety gate explicitly non-interactive.
+- Preserved existing repository-local command confinement, credential-scrubbed environment, timeout, cwd, and non-raising return-code semantics.
+- Added a validator self-test that mocks subprocess execution and asserts DEVNULL stdin plus timeout/environment/cwd/check propagation.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Validator credential isolation committed as `adb653389652599df0d9286bc23dd43b2aaa9c40`.
-- Regression coverage committed as `ec8718059cdff0ed6dafc9d918322f4477d7ca1b`.
-- The connector environment still does not expose an executable repository checkout, so the new self-tests were not executed and no green-test claim is made.
+- Non-interactive subprocess hardening committed as `2f313dbe56ad1fd2e99bb2486bad7cdb9f3e2534`.
+- Regression coverage committed as `63e001c7e4dc040bd3519bba6a76482110c4bc87`.
+- The connector environment still does not expose an executable repository checkout, so the new self-test was not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. A dependency-light safety gate should not be capable of authenticated external operations solely because the developer happens to have credentials exported.
-2. Credential scrubbing belongs at subprocess creation, not inside individual tests, so a newly added test inherits the safe default automatically.
-3. The live Grafana MCP smoke remains separate and may intentionally receive explicitly configured read-only credentials; this hardening applies only to the consolidated local validator.
+1. Dependency-light validation must never depend on operator input; credential absence or an accidental prompt should fail rather than solicit interaction.
+2. The subprocess policy belongs in one helper so future execution hardening can be regression-tested without invoking real child processes.
+3. Live Grafana MCP smoke remains a separate explicitly authenticated integration gate and is not weakened by the local validator's non-interactive contract.
 
 ### Blockers / unknowns
 
