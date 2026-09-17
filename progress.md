@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs Grafana/Gemini/Google credentials (including inline Google service-account JSON forms) and Python injection controls, disables user-site packages/bytecode writes, isolates well-known Google ADC/gcloud home locations during execution, tests its own harness first, validates runtime activation before operator/API gates, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs Grafana/Gemini/Google credentials (including inline Google service-account JSON forms) and Python injection controls, disables user-site packages/bytecode writes, isolates well-known Google ADC/gcloud home locations, blocks ambient GCE metadata-server credential discovery during execution, tests its own harness first, validates runtime activation before operator/API gates, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
 
 ## Retained validation baseline
 
@@ -24,33 +24,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — ambient Google ADC isolation
+## Latest run — 2026-09-17 — GCE metadata credential isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the current repository head, consolidated validator, and validator self-tests. Explicit Google credential environment variables were already scrubbed, but the validator still inherited the invoking user's `HOME`, `USERPROFILE`, and `CLOUDSDK_CONFIG`. Google Application Default Credentials can discover a well-known local ADC file beneath the user's home even when `GOOGLE_APPLICATION_CREDENTIALS` is absent, so ordinary local regression subprocesses still had a path to ambient developer credentials.
+Read `progress.md` completely first, then inspected the consolidated validator and its self-tests. The previous run correctly isolated explicit Google credential variables plus well-known ADC/gcloud files under the invoking user's home. One ambient ADC path remained: when validation itself runs on Google Compute Engine, GKE/Cloud Run-style Google environments, google-auth can fall through to the metadata server and obtain the host workload identity even with an empty home and no explicit credential variables.
 
 ### Changes / actions
 
-- Added per-run temporary-home isolation around executable validation.
-- `_validation_env` now accepts an `isolated_home` and, when supplied by `main`, overrides `HOME`, `USERPROFILE`, and `CLOUDSDK_CONFIG` so child tests cannot discover the invoking developer's normal Google ADC/gcloud credential locations.
-- Added regression coverage proving inherited POSIX home, Windows profile, and gcloud configuration paths are replaced while ordinary deterministic settings remain available.
-- Kept `--list` side-effect-light: it resolves and prints the plan without creating an execution home because it launches no test subprocesses.
+- Added `GCE_METADATA_HOST` and `GCE_METADATA_IP` to exact-name sensitive environment handling so inherited metadata routing cannot survive sanitization.
+- Added deterministic validation overrides routing metadata discovery to loopback (`127.0.0.1:9` / `127.0.0.1`) rather than the Google metadata service. This keeps accidental probes local and makes ambient workload credential discovery fail closed.
+- Added regression coverage proving hostile/inherited metadata host/IP values are replaced and ordinary deterministic settings remain intact.
+- Extended case-insensitive sensitive-name coverage for both metadata variables.
+- Updated validator documentation to make the metadata-server identity boundary explicit.
 - No credentials were read or supplied. No Docker, cloud resources, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator hardening committed as `35500dc560b6926de54d6ad8a43f9e366965d2a7`.
-- Regression coverage committed as `ed16da50ed3c09a93e2ff482b2243c2c8adc78f2`.
-- Static inspection confirms executable validation constructs one empty temporary home for the run and passes the isolated environment to every selected subprocess.
+- Validator hardening committed as `5e086f79d3fb955209099676a29430937caae005`.
+- Regression coverage committed as `de61eddb7d77d8c1d3e023faa5db8c673495a608`.
+- Static inspection confirms metadata routing overrides are applied after sensitive-variable sanitization, so inherited values cannot restore access.
 - This connector environment does not expose an executable checkout, so the updated harness has not been repository-executed and no new green-test claim is made.
 - GitHub Actions was intentionally not triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Treat well-known ADC discovery as part of the credential boundary, not only explicit credential environment variables.
-2. Isolate both POSIX (`HOME`) and Windows (`USERPROFILE`) discovery plus `CLOUDSDK_CONFIG`, because StageGuard should validate safely on either developer platform.
-3. Scope home isolation to actual test execution so `--list` remains a pure planning/inspection path.
+1. Treat metadata-server workload identity as credential material for validation purposes, just like explicit ADC files/tokens.
+2. Override rather than merely delete metadata routing variables: deletion would allow google-auth to fall back to its default metadata endpoint.
+3. Use loopback routing so accidental ADC probes do not leave the host or contact production metadata infrastructure.
 
 ### Blockers / unknowns
 
