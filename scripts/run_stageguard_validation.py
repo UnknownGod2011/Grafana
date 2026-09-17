@@ -18,11 +18,14 @@ competing mutations fail closed.
 
 Validation subprocesses are non-interactive, timeout-bounded, and receive a
 credential-scrubbed environment. Python startup/import-path controls are
-removed and user-site package loading is disabled. A test selected by multiple
-gates executes once under its earliest owning gate; later gates report it as
-already covered, avoiding repeated side effects and unnecessary runtime.
-Subprocess launch failures are reported as validation failures rather than
-escaping the harness with an unclassified traceback.
+removed and user-site package loading is disabled. During execution, HOME,
+USERPROFILE, and CLOUDSDK_CONFIG are redirected to an empty temporary home so
+Google ADC cannot silently discover a developer's well-known local gcloud
+credentials after explicit credential variables have been scrubbed. A test
+selected by multiple gates executes once under its earliest owning gate; later
+gates report it as already covered, avoiding repeated side effects and
+unnecessary runtime. Subprocess launch failures are reported as validation
+failures rather than escaping the harness with an unclassified traceback.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -34,6 +37,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,10 +108,18 @@ def _is_sensitive_env_name(name: str) -> bool:
     upper = name.upper()
     return upper in SENSITIVE_ENV_NAMES or upper.startswith(SENSITIVE_ENV_PREFIXES) or upper.endswith(SENSITIVE_ENV_SUFFIXES)
 
-def _validation_env(source: dict[str, str] | None = None) -> dict[str, str]:
+def _validation_env(source: dict[str, str] | None = None, *, isolated_home: str | None = None) -> dict[str, str]:
     source_env = os.environ if source is None else source
     sanitized = {k: v for k, v in source_env.items() if not _is_sensitive_env_name(k)}
-    sanitized.update(VALIDATION_ENV_OVERRIDES); return sanitized
+    sanitized.update(VALIDATION_ENV_OVERRIDES)
+    if isolated_home is not None:
+        # ADC searches a well-known file beneath the user's home even when
+        # GOOGLE_APPLICATION_CREDENTIALS is absent. Isolate both POSIX and
+        # Windows home discovery plus the gcloud configuration directory.
+        sanitized["HOME"] = isolated_home
+        sanitized["USERPROFILE"] = isolated_home
+        sanitized["CLOUDSDK_CONFIG"] = str(Path(isolated_home) / ".config" / "gcloud")
+    return sanitized
 
 def _positive_timeout(value: str) -> float:
     try: timeout = float(value)
@@ -139,22 +151,24 @@ def main() -> int:
             for path in runnable: print(f"  {path.relative_to(ROOT)}")
             for path in covered: print(f"  {path.relative_to(ROOT)} [covered by earlier gate]")
         return 0
-    failures: list[str] = []; validation_env = _validation_env()
-    for gate, files, covered in plan:
-        print(f"\n=== StageGuard gate: {gate.name} ({len(files)} files; {len(covered)} already covered) ===", flush=True)
-        gate_failed = False
-        for path in files:
-            print(f"--- {path.name} ---", flush=True)
-            try:
-                failed = _run_test_file(path, timeout=args.file_timeout, env=validation_env) != 0
-            except subprocess.TimeoutExpired:
-                failed = True; print(f"TIMEOUT: {path.name} exceeded {args.file_timeout:g}s", file=sys.stderr)
-            except OSError as exc:
-                failed = True; print(f"LAUNCH ERROR: {path.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
-            if failed:
-                gate_failed = True; failures.append(f"{gate.name}/{path.name}")
-                if not args.keep_going: break
-        if gate_failed and not args.keep_going: break
+    failures: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="stageguard-validation-") as isolated_home:
+        validation_env = _validation_env(isolated_home=isolated_home)
+        for gate, files, covered in plan:
+            print(f"\n=== StageGuard gate: {gate.name} ({len(files)} files; {len(covered)} already covered) ===", flush=True)
+            gate_failed = False
+            for path in files:
+                print(f"--- {path.name} ---", flush=True)
+                try:
+                    failed = _run_test_file(path, timeout=args.file_timeout, env=validation_env) != 0
+                except subprocess.TimeoutExpired:
+                    failed = True; print(f"TIMEOUT: {path.name} exceeded {args.file_timeout:g}s", file=sys.stderr)
+                except OSError as exc:
+                    failed = True; print(f"LAUNCH ERROR: {path.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                if failed:
+                    gate_failed = True; failures.append(f"{gate.name}/{path.name}")
+                    if not args.keep_going: break
+            if gate_failed and not args.keep_going: break
     if failures:
         print("\nFAILED tests: " + ", ".join(failures), file=sys.stderr); return 1
     print("\nAll selected StageGuard validation gates passed.")
