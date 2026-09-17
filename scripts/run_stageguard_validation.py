@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Run StageGuard's dependency-light safety and Grafana/MCP regression gates.
 
-Each gate is resolved to concrete test files before execution. This prevents a
-typo or repository-layout change from turning an empty unittest discovery into
-a false-green safety gate. Tests run in separate Python processes per file so
+Each gate is resolved to concrete, repository-local regular test files before
+execution. This prevents a typo, layout change, or symlink from turning the
+validator into either a false-green gate or an execution path outside the
+intended test directory. Tests run in separate Python processes per file so
 failures remain attributable without requiring runtime/tests to be a package.
 
 The validation harness is itself a gate: changes to this script cannot receive
@@ -44,16 +45,35 @@ GATES = (
 )
 
 
+def _safe_test_file(path: Path) -> bool:
+    """Return True only for a direct, non-symlink regular file in TESTS.
+
+    Gate patterns are repository configuration, but the files they resolve to
+    are still an execution boundary. Refusing symlinks prevents a checkout from
+    redirecting the validator to code outside runtime/tests.
+    """
+    try:
+        return (
+            path.parent.resolve(strict=True) == TESTS.resolve(strict=True)
+            and not path.is_symlink()
+            and path.is_file()
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
 def _files(gate: Gate) -> tuple[Path, ...]:
     selected: dict[str, Path] = {}
     for pattern in gate.patterns:
         for path in TESTS.glob(pattern):
-            if path.is_file():
+            if _safe_test_file(path):
                 selected[path.name] = path
     return tuple(selected[name] for name in sorted(selected))
 
 
 def _command(path: Path) -> list[str]:
+    if not _safe_test_file(path):
+        raise ValueError(f"unsafe validation test path: {path}")
     return [
         sys.executable,
         "-m",
@@ -106,15 +126,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not TESTS.is_dir():
-        print(f"error: test directory not found: {TESTS}", file=sys.stderr)
+    if not TESTS.is_dir() or TESTS.is_symlink():
+        print(f"error: safe test directory not found: {TESTS}", file=sys.stderr)
         return 2
 
     selections = tuple((gate, _files(gate)) for gate in GATES)
     empty = [gate.name for gate, files in selections if not files]
     if empty:
         print(
-            "error: validation gate matched no tests: " + ", ".join(empty),
+            "error: validation gate matched no safe tests: " + ", ".join(empty),
             file=sys.stderr,
         )
         return 2
