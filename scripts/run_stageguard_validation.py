@@ -19,6 +19,8 @@ credential-scrubbed environment. Python startup/import-path controls are
 removed and user-site package loading is disabled. A test selected by multiple
 gates executes once under its earliest owning gate; later gates report it as
 already covered, avoiding repeated side effects and unnecessary runtime.
+Subprocess launch failures are reported as validation failures rather than
+escaping the harness with an unclassified traceback.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -55,19 +57,13 @@ class Gate:
 GATES = (
     Gate("validation harness", ("test_stageguard_validation_runner.py",)),
     Gate("operator API boundary", (
-        "test_api.py",
-        "test_api_auth_error_redaction.py",
-        "test_api_protocol_preflight.py",
-        "test_api_request_framing.py",
-        "test_http_surface_contract.py",
-        "test_identity.py",
+        "test_api.py", "test_api_auth_error_redaction.py", "test_api_protocol_preflight.py",
+        "test_api_request_framing.py", "test_http_surface_contract.py", "test_identity.py",
     )),
     Gate("operator concurrency", ("test_api_concurrency.py", "test_api_execution_watchdog.py")),
     Gate("incident lifecycle", (
-        "test_anchored_incident_runtime.py",
-        "test_*evidence_unavailable*.py",
-        "test_*recovery_recheck.py",
-        "test_*transition_failure_authority.py",
+        "test_anchored_incident_runtime.py", "test_*evidence_unavailable*.py",
+        "test_*recovery_recheck.py", "test_*transition_failure_authority.py",
     )),
     Gate("timeline disclosure", ("test_timeline*.py", "test_audit_timeline*.py")),
     Gate("public audit", ("test_*audit*.py",)),
@@ -90,13 +86,11 @@ def _files(gate: Gate) -> tuple[Path, ...]:
 
 def _execution_plan(selections: tuple[tuple[Gate, tuple[Path, ...]], ...]) -> tuple[tuple[Gate, tuple[Path, ...], tuple[Path, ...]], ...]:
     """Assign each selected test to its earliest gate while retaining overlap visibility."""
-    seen: set[str] = set()
-    plan = []
+    seen: set[str] = set(); plan = []
     for gate, files in selections:
         runnable = tuple(path for path in files if path.name not in seen)
         covered = tuple(path for path in files if path.name in seen)
-        seen.update(path.name for path in files)
-        plan.append((gate, runnable, covered))
+        seen.update(path.name for path in files); plan.append((gate, runnable, covered))
     return tuple(plan)
 
 def _command(path: Path) -> list[str]:
@@ -110,8 +104,7 @@ def _is_sensitive_env_name(name: str) -> bool:
 def _validation_env(source: dict[str, str] | None = None) -> dict[str, str]:
     source_env = os.environ if source is None else source
     sanitized = {k: v for k, v in source_env.items() if not _is_sensitive_env_name(k)}
-    sanitized.update(VALIDATION_ENV_OVERRIDES)
-    return sanitized
+    sanitized.update(VALIDATION_ENV_OVERRIDES); return sanitized
 
 def _positive_timeout(value: str) -> float:
     try: timeout = float(value)
@@ -143,16 +136,18 @@ def main() -> int:
             for path in runnable: print(f"  {path.relative_to(ROOT)}")
             for path in covered: print(f"  {path.relative_to(ROOT)} [covered by earlier gate]")
         return 0
-    failures: list[str] = []
-    validation_env = _validation_env()
+    failures: list[str] = []; validation_env = _validation_env()
     for gate, files, covered in plan:
         print(f"\n=== StageGuard gate: {gate.name} ({len(files)} files; {len(covered)} already covered) ===", flush=True)
         gate_failed = False
         for path in files:
             print(f"--- {path.name} ---", flush=True)
-            try: failed = _run_test_file(path, timeout=args.file_timeout, env=validation_env) != 0
+            try:
+                failed = _run_test_file(path, timeout=args.file_timeout, env=validation_env) != 0
             except subprocess.TimeoutExpired:
                 failed = True; print(f"TIMEOUT: {path.name} exceeded {args.file_timeout:g}s", file=sys.stderr)
+            except OSError as exc:
+                failed = True; print(f"LAUNCH ERROR: {path.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
             if failed:
                 gate_failed = True; failures.append(f"{gate.name}/{path.name}")
                 if not args.keep_going: break
@@ -160,7 +155,6 @@ def main() -> int:
     if failures:
         print("\nFAILED tests: " + ", ".join(failures), file=sys.stderr); return 1
     print("\nAll selected StageGuard validation gates passed.")
-    print("Live Docker/Grafana MCP smoke is intentionally not part of this runner.")
-    return 0
+    print("Live Docker/Grafana MCP smoke is intentionally not part of this runner."); return 0
 
 if __name__ == "__main__": raise SystemExit(main())
