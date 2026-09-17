@@ -30,7 +30,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - An absent static timeline policy may delegate to the canonical reconciliation projector; an explicitly configured null/malformed policy never does and fails closed.
 - Consolidated local validation gates must resolve to concrete test files before execution; an empty safety gate is an error, never a passing result.
 - The consolidated validation harness must execute its own regression suite before it can report a green result.
-- Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default); a timeout is a validation failure rather than an indefinitely hung gate.
+- Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default) capped at 3600 seconds; a timeout is a validation failure rather than an indefinitely hung gate.
 
 ## Retained validation baseline
 
@@ -41,33 +41,31 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — bounded validation execution
+## Latest run — 2026-09-17 — validation timeout ceiling
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated validator resolved concrete files and self-tested its selection contracts, but each spawned unittest process had no runtime bound. A deadlocked regression or accidentally blocking integration path could therefore stall the local safety gate indefinitely.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The previous run correctly required a finite positive per-file timeout, but the CLI still accepted arbitrarily large finite values such as `1e308`, which technically preserved finiteness while defeating the operational purpose of a bounded local safety gate.
 
 ### Changes / actions
 
-- Added a per-test-file subprocess timeout to the consolidated validator, defaulting to 120 seconds.
-- Added `--file-timeout SECONDS` for explicit local tuning without weakening the requirement that the value be finite and positive.
-- Treat `subprocess.TimeoutExpired` as an ordinary attributable gate failure; `--keep-going` continues to later files/gates while fail-fast mode stops.
-- Rejected zero, negative, NaN, and infinite timeout values so the bounded-execution invariant cannot be bypassed through CLI float edge cases.
-- Added validator regressions for the bounded default, invalid timeout values, and valid fractional timeout parsing.
+- Added `MAX_FILE_TIMEOUT_SECONDS = 3600.0` and reject larger `--file-timeout` values.
+- Updated CLI help to expose both the 120-second default and one-hour hard ceiling.
+- Expanded runner regressions to reject values immediately above the ceiling and extreme finite values, accept the exact ceiling, and assert the default remains within it.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Timeout implementation committed as `9205f638770fc4aacb7a9c018cd7d7cc67dc8459` and finite-value hardening as `bab165bc8c5ac1f0e118395660560652c4b5ddf1`.
-- Regression coverage committed as `41ae55142997ee2f11dd2aa6283be10a9e99279f` and `529208a03b9fb6b36a37c84d99131c4ce37cbffd`.
+- Timeout-ceiling implementation committed as `dbbc407e02825267f798fbd609c58916b278429a`.
+- Regression coverage committed as `6875944aff004345c7ee038cafd364415ba45424`.
 - The connector runner still does not expose an executable repository checkout, so these regressions were not executed; no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. A production-oriented validation gate must be bounded in both selection and runtime; hanging forever is not a valid test outcome.
-2. Timeout is per concrete test file rather than global, preserving useful attribution and allowing `--keep-going` to classify subsequent gates.
-3. User overrides remain supported for unusually slow machines, but only finite positive values are accepted.
+1. "Finite" alone is insufficient for a production-oriented local gate because extremely large finite values are operationally equivalent to no useful bound.
+2. One hour per concrete test file is intentionally generous for slow development machines while preserving a meaningful hard ceiling.
+3. The normal default remains 120 seconds; the ceiling is an escape hatch, not the expected operating value.
 
 ### Blockers / unknowns
 
