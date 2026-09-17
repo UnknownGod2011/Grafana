@@ -17,7 +17,9 @@ instead of consuming the timeout while waiting for operator input.
 Validation subprocesses receive a credential-scrubbed environment. This keeps
 the dependency-light gate from accidentally turning a mocked/local regression
 into an authenticated Grafana, Gemini, Google Cloud, or remediation operation
-merely because the developer's shell contains live credentials.
+merely because the developer's shell contains live credentials. Python startup
+and import-path control variables are also removed so the invoking shell cannot
+silently inject external code into the supposedly repository-scoped test run.
 
 This runner does not start Docker, contact Grafana, trigger GitHub Actions, or
 intentionally read credentials; live MCP smoke remains an explicit follow-up gate.
@@ -42,6 +44,13 @@ SENSITIVE_ENV_NAMES = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
         "CLOUDSDK_AUTH_ACCESS_TOKEN",
         "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+        # Python execution/import controls can make a local unittest subprocess
+        # execute code outside this checkout before StageGuard tests even load.
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "PYTHONBREAKPOINT",
     }
 )
 SENSITIVE_ENV_PREFIXES = (
@@ -114,7 +123,7 @@ def _is_sensitive_env_name(name: str) -> bool:
 
 
 def _validation_env(source: dict[str, str] | None = None) -> dict[str, str]:
-    """Return a copy of the environment with live integration secrets removed."""
+    """Return an environment safe for repository-scoped validation children."""
     source_env = os.environ if source is None else source
     return {key: value for key, value in source_env.items() if not _is_sensitive_env_name(key)}
 
