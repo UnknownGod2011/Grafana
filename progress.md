@@ -10,8 +10,6 @@ Detailed older run history remains in Git history; this file keeps current invar
 
 - Grafana/MCP is read-only evidence access; infrastructure-write credentials remain isolated.
 - Supported MCP deployment is stdio-only; compose exposes only the required read-only datasource/Prometheus/Loki evidence surface.
-- MCP launcher configuration, peer metadata, diagnostics, and smoke configuration are bounded, terminal-safe, and credential-redacted before operator display.
-- Direct official `grafana/mcp-grafana` Docker launches, including recognized Docker Hub aliases, must explicitly use stdio.
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
@@ -20,20 +18,11 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Durable checkpoint/audit failures fail closed; provider operation reconciliation is required where supported.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Metric/Loki activation is policy-owned and versioned; HTTP callers cannot supply arbitrary Grafana queries or datasource identities.
-- Operator timeline disclosure is allowlist-based. Reconciliation exposes only canonical bounded `result` and `reason`; provider bodies, operation IDs, targets, credentials, arbitrary metadata, and raw actor identities remain private.
-- Timeline event identifiers are non-empty, terminal-safe strings bounded to 160 characters before policy lookup or reconciliation parsing.
-- Static timeline values are bounded JSON scalars and terminal-safe; nested values, oversized strings, non-finite floats, and unbounded integers fail closed.
-- Static timeline field policy itself is bounded to 64 unique, non-empty, terminal-safe string keys of at most 128 characters; malformed, duplicate, oversized, string-as-iterable, and non-terminating allowlists fail closed.
-- Timeline display strings reject C0/C1 controls, DEL, Unicode line/paragraph separators, the complete Unicode `Cf` format-control category, and Unicode `Cs` surrogate code points.
-- Timeline policy iterators and Mapping access are treated as untrusted extension/persistence behavior; ordinary read failures fail closed without partial disclosure.
-- Static timeline projection reads each allowlisted Mapping value exactly once, avoiding membership/read TOCTOU behavior from custom persistence adapters.
-- An absent static timeline policy may delegate to the canonical reconciliation projector; an explicitly configured null/malformed policy never does and fails closed.
-- Consolidated local validation gates must resolve to concrete direct regular files under `runtime/tests`; symlinks and paths outside that directory are not executable validation inputs.
-- An empty safety gate is an error, never a passing result.
-- The consolidated validation harness must execute its own regression suite before it can report a green result.
-- Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default) capped at 3600 seconds; a timeout is a validation failure rather than an indefinitely hung gate.
-- Consolidated dependency-light validation subprocesses do not inherit Grafana, Gemini, Google Cloud, remediation, generic token/password/secret credentials, or Python startup/import-path injection controls from the invoking shell.
-- Consolidated validation subprocesses receive no interactive stdin; an unexpected prompt cannot silently consume the timeout waiting for operator input.
+- Operator timeline disclosure is allowlist-based and bounded; reconciliation exposes only canonical `result` and `reason`, never provider bodies, operation IDs, targets, credentials, arbitrary metadata, or raw actor identities.
+- Consolidated local validation gates resolve only concrete direct non-symlink regular files under `runtime/tests`; empty gates fail closed and the harness tests itself first.
+- Every consolidated test subprocess is non-interactive and timeout-bounded (120 seconds default, 3600 maximum).
+- Consolidated dependency-light validation children do not inherit Grafana/Gemini/Google/remediation/generic secret credentials or Python startup/import-path injection controls.
+- Validation children explicitly disable Python user-site packages and bytecode writes so user-profile packages cannot silently participate and the checkout is not modified by `__pycache__` artifacts.
 
 ## Retained validation baseline
 
@@ -44,32 +33,34 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation Python environment isolation
+## Latest run — 2026-09-17 — validation user-site isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The validator already confined selected test paths, bounded runtime, removed integration credentials, and disconnected stdin. However, its sanitized child environment still inherited Python execution controls such as `PYTHONPATH` and `PYTHONSTARTUP`. In a developer shell these can alter import resolution or inject external startup behavior, weakening the claim that the consolidated gate executes repository-scoped tests in a controlled environment.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The runner already removed explicit Python path/startup controls, credentials, and interactive stdin, but Python could still import packages installed in the invoking user's site-packages directory. That weakens reproducibility and leaves an ambient-code path outside the repository despite `PYTHONPATH` scrubbing.
 
 ### Changes / actions
 
-- Added `PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONINSPECT`, and `PYTHONBREAKPOINT` to the exact environment denylist used for validation subprocesses.
-- Kept benign Python runtime controls such as `PYTHONUNBUFFERED` available rather than broadly deleting all `PYTHON*` settings.
-- Updated the validator module contract/documentation to state that Python startup/import-path controls are removed in addition to live integration credentials.
-- Added regression coverage proving all five execution-control variables are removed, ordinary variables remain, and case-insensitive matching applies to Python controls too.
+- Added forced validation environment overrides `PYTHONNOUSERSITE=1` and `PYTHONDONTWRITEBYTECODE=1`.
+- Overrides are applied after inherited-environment sanitization, so an invoking shell cannot disable them with `PYTHONNOUSERSITE=0` or `PYTHONDONTWRITEBYTECODE=0`.
+- User-site package loading is now disabled for every consolidated test subprocess, reducing ambient dependency/code injection from developer profiles.
+- Bytecode writes are disabled so dependency-light validation does not leave `__pycache__` artifacts in the checkout.
+- Added a runner regression proving hostile/disabled inherited values are replaced with the enforced values while ordinary environment variables remain available.
+- Updated validator documentation to describe the stronger import isolation contract.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Validator hardening committed as `6dbc6fe9329546b32c84c2494569c41cbb505de7`.
-- Regression coverage committed as `e04aba0aecadf96326d834d47a5d7c6fe78d06fa`.
-- The connector environment still does not expose an executable repository checkout, so the new self-tests were not executed and no green-test claim is made.
+- Validator hardening committed as `5097c384acb7b9dd3858880e718cfef89902df24`.
+- Regression coverage committed as `f0ee9d3ac31bd94bf27ee2a703a48569a031b24b`.
+- This connector environment still does not expose an executable repository checkout, so the new self-test was not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Repository-local path confinement is insufficient if interpreter startup/import behavior can still be redirected by inherited shell variables.
-2. Environment hardening remains targeted rather than an allowlist so cross-platform unittest execution retains ordinary OS/runtime variables required to launch Python reliably.
-3. Live Grafana MCP smoke remains a separate explicitly authenticated integration gate and is intentionally outside this credential-free validator.
+1. Removing `PYTHONPATH` alone is not sufficient isolation because Python user-site packages are another ambient import source.
+2. The validator remains dependency-light rather than using Python isolated mode (`-I`), which could alter repository import behavior; explicit user-site suppression is the narrower compatible control.
+3. Validation should be read-like with respect to the checkout, so suppressing bytecode writes is appropriate.
 
 ### Blockers / unknowns
 
