@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs credentials/Python injection controls, disables user-site packages/bytecode writes, tests its own harness first, and executes overlapping gate selections only once under their earliest owner.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs credentials/Python injection controls, disables user-site packages/bytecode writes, tests its own harness first, executes overlapping gate selections only once under their earliest owner, and classifies subprocess launch failures as validation failures.
 
 ## Retained validation baseline
 
@@ -24,36 +24,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — validation execution deduplication
+## Latest run — 2026-09-17 — validation subprocess launch failure handling
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the consolidated validator and its self-tests. The gate taxonomy intentionally overlaps: for example, execution-watchdog contracts can be selected by both operator-concurrency and execution-safety patterns, while audit timeline contracts can be selected by both timeline-disclosure and public-audit patterns. The validator previously executed every occurrence, meaning one test file could run more than once in a single safety pass. That increased validation time and repeated any test side effects without adding coverage.
+Read `progress.md` completely first, then inspected the repository tree, consolidated validator, and validator self-tests. The validator already handled non-zero child exits and `TimeoutExpired`, but an `OSError` from process creation (for example an unavailable interpreter/runtime resource) escaped `main()` as an unclassified traceback. That meant an infrastructure-level inability to execute a selected safety test was not represented through the validator's normal fail-closed result/reporting path.
 
 ### Changes / actions
 
-- Added `_execution_plan()` to assign each concrete selected test file to its earliest owning gate.
-- Later gates retain visibility of overlapping tests as `already covered` rather than silently dropping them.
-- `--list` now reports overlaps explicitly with `[covered by earlier gate]`.
-- Runtime gate headings report runnable and already-covered counts.
-- Added a harness regression proving a shared test executes at most once and remains attributed to its earliest gate.
-- Preserved each gate's raw selection semantics, including existing exact ownership assertions for operator API/concurrency and lifecycle coverage.
-- Preserved path confinement, credential/Python-environment isolation, non-interactive execution, per-file timeouts, and no-CI/no-Docker behavior.
-- No credentials, cloud resources, remediation targets, workflows, or unrelated repositories were touched.
+- Updated `scripts/run_stageguard_validation.py` to catch `OSError` around each test subprocess launch.
+- Launch errors are now emitted as `LAUNCH ERROR` diagnostics containing the selected test name and exception class/message.
+- Launch errors are appended to the same gate-qualified failure list as non-zero exits and timeouts, preserving fail-fast and `--keep-going` semantics.
+- Updated the runner module documentation to make this fail-closed behavior explicit.
+- Added a harness regression that injects an interpreter-launch `OSError`, asserts exit code 1, and verifies both the launch diagnostic and gate-qualified failed-test summary.
+- No credentials, cloud resources, remediation targets, Docker, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator deduplication committed as `a848c4e8cbf3c684b255d439e365a8b0a8eb0b63`.
-- Harness regression committed as `fd1b10480b0bbaddc0fd5ed3a29b7c0b26d9f53d`.
-- Static inspection confirms deduplication happens only after all gates are resolved and empty-gate validation is performed, so overlap handling cannot turn an empty gate into a false green.
-- This connector environment does not expose an executable checkout, so no new test-pass claim is made.
+- Validator hardening committed as `58069d9fb43b64465bdd5ea24420f676a11b0e4c`.
+- Harness regression committed as `1a6ee55bafa7e653ce04f4395b21387e28585fe6`.
+- Static inspection confirms `OSError` is caught at the same boundary as `TimeoutExpired`; the test remains marked failed and cannot produce a green validator result.
+- This connector environment does not expose an executable checkout, so the new regression has not been repository-executed and no new green-test claim is made.
 - GitHub Actions was intentionally not triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Overlapping safety taxonomy is useful for human comprehension, but duplicate subprocess execution is not useful coverage.
-2. Earliest-gate ownership is deterministic because `GATES` is ordered and per-gate file selection is sorted.
-3. Raw gate selections remain intact for harness assertions; deduplication applies only to the execution plan.
+1. Failure to launch a required test is a validation failure, not an exceptional success-neutral condition.
+2. Catch only expected process-launch OS failures; programming errors should continue surfacing rather than being hidden by an overly broad exception handler.
+3. Preserve the existing fail-fast/keep-going behavior and gate-qualified reporting so local operators get actionable attribution.
 
 ### Blockers / unknowns
 
@@ -64,4 +62,4 @@ Read `progress.md` completely first, then inspected the consolidated validator a
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and confirm overlapping files are marked as already covered, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before the pinned Grafana MCP 1.4.1 read-only live smoke.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and then `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before performing the pinned Grafana MCP 1.4.1 read-only live smoke.
