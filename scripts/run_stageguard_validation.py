@@ -17,6 +17,7 @@ read credentials; live MCP smoke remains an explicit follow-up gate.
 from __future__ import annotations
 
 import argparse
+import math
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -69,8 +70,8 @@ def _positive_timeout(value: str) -> float:
         timeout = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("timeout must be a number") from exc
-    if timeout <= 0:
-        raise argparse.ArgumentTypeError("timeout must be greater than zero")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a finite number greater than zero")
     return timeout
 
 
