@@ -11,6 +11,8 @@ The validation harness is itself a gate. The incident-lifecycle gate covers the
 fail-closed path from investigation/evidence availability through recovery
 rechecks. The operator API boundary gate exercises authentication, request
 framing, protocol preflight, and HTTP surface contracts before live deployment.
+The operator concurrency gate verifies that long-running remediation keeps
+read-only observability responsive while competing mutations fail closed.
 
 Validation subprocesses are non-interactive, timeout-bounded, and receive a
 credential-scrubbed environment. Python startup/import-path controls are
@@ -58,6 +60,7 @@ GATES = (
         "test_http_surface_contract.py",
         "test_identity.py",
     )),
+    Gate("operator concurrency", ("test_api_concurrency.py", "test_api_execution_watchdog.py")),
     Gate("incident lifecycle", (
         "test_anchored_incident_runtime.py",
         "test_*evidence_unavailable*.py",
