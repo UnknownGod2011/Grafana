@@ -24,34 +24,35 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — operator API boundary validation coverage
+## Latest run — 2026-09-17 — operator concurrency validation coverage
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the repository tree, consolidated validator, and validator self-tests. The implementation already contains dedicated authentication/error-redaction, HTTP request-framing, protocol-preflight, identity, and HTTP-surface tests, but the recommended consolidated safety command did not explicitly own those production ingress contracts.
+Read `progress.md` completely first, then inspected the consolidated validator, its self-tests, the runtime test inventory, and the API concurrency contract. The production API already has a strong test proving that a blocked remediation provider does not block incident/readiness/metrics reads, that deadline telemetry becomes unhealthy, that competing mutations fail closed, and that remediation is not replayed. The execution-watchdog API contract also exists, but neither was explicitly owned by a dedicated fast production-concurrency gate.
 
 ### Changes / actions
 
-- Added a first-class `operator API boundary` validation gate before incident-lifecycle execution.
-- The gate selects the base API contract plus authentication error redaction, protocol preflight, request framing, HTTP surface, and identity tests.
-- Added an exact harness assertion for those six files so deletion/rename or accidental selection drift fails validation rather than silently weakening the ingress gate.
-- Updated the validator module documentation to make the production-boundary coverage explicit.
-- Preserved path confinement, credential isolation, user-site isolation, non-interactive subprocesses, bounded per-file execution, and no-CI/no-Docker behavior.
+- Added a first-class `operator concurrency` validation gate immediately after the operator API boundary gate.
+- The gate owns exactly `test_api_concurrency.py` and `test_api_execution_watchdog.py`.
+- Added a validator self-test pinning that exact ownership so deletion, rename, or accidental selection drift fails the harness instead of silently weakening concurrency coverage.
+- Updated validator documentation to state the responsiveness/fail-closed purpose of this gate.
+- Preserved path confinement, credential/Python-environment isolation, non-interactive execution, per-file timeouts, and no-CI/no-Docker behavior.
 - No credentials, cloud resources, remediation targets, workflows, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validator change committed as `3bf625ae6a6fa563cd734fadfb3574558264bb89`.
-- Harness coverage committed as `a447f78535e9f7e776571998bb5e9fe485719bf6`.
-- Repository inventory confirms all six selected operator-boundary test files exist on `main`.
+- Validator change committed as `1b8f4846c5e6246ea812990d3876c0b24c1969c6`.
+- Harness coverage committed as `abff634bd4bb09302f0de9728f03d79be8aa8fac`.
+- Repository inspection confirms both selected concurrency/watchdog test files exist on `main`.
+- The concurrency test explicitly exercises real loopback HTTP serving with a deliberately blocked remediation fake and checks read responsiveness, watchdog/readiness/metrics state, competing-mutation rejection, and no replay.
 - This connector environment does not expose an executable checkout, so no new test-pass claim is made.
 - GitHub Actions was intentionally not triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Authentication and request/protocol framing are production mutation-boundary contracts and belong in the fast consolidated safety gate, not only the historical full suite.
-2. This gate runs before lifecycle tests so obvious ingress regressions fail early.
-3. Exact ownership is intentional because these six tests define a small, stable operator-facing trust boundary.
+1. Production incident-command software must remain observable while remediation I/O is slow or stuck; this is a first-class safety contract, not merely a performance concern.
+2. Concurrency/watchdog tests belong immediately after ingress validation and before broader lifecycle gates so deadlock/replay regressions fail early.
+3. Exact two-file ownership is intentional because these tests define the HTTP execution responsiveness/watchdog boundary.
 
 ### Blockers / unknowns
 
@@ -62,4 +63,4 @@ Read `progress.md` completely first, then inspected the repository tree, consoli
 
 ## Single best next step
 
-In an executable checkout, run `python scripts/run_stageguard_validation.py --list` and confirm the operator API boundary plus incident-lifecycle selections, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before the pinned Grafana MCP 1.4.1 read-only live smoke.
+In an executable checkout, run `python scripts/run_stageguard_validation.py --list`, confirm the operator API, operator concurrency, and incident-lifecycle selections, then run `python scripts/run_stageguard_validation.py --keep-going`. Fix any failures before the pinned Grafana MCP 1.4.1 read-only live smoke.
