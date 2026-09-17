@@ -78,6 +78,49 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
             with mock.patch.object(runner, "TESTS", tests):
                 self.assertTrue(runner._safe_test_file(test_file))
 
+    def test_validation_environment_scrubs_live_integration_credentials(self) -> None:
+        source = {
+            "PATH": "/usr/bin",
+            "HOME": "/tmp/home",
+            "GRAFANA_TOKEN": "grafana-secret",
+            "GEMINI_API_KEY": "gemini-secret",
+            "GOOGLE_API_KEY": "google-secret",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/service-account.json",
+            "CLOUDSDK_AUTH_ACCESS_TOKEN": "gcloud-secret",
+            "STAGEGUARD_REMEDIATION_TOKEN": "write-secret",
+            "SOME_OTHER_TOKEN": "generic-secret",
+            "APP_PASSWORD": "password-secret",
+            "ORDINARY_SETTING": "safe",
+        }
+        sanitized = runner._validation_env(source)
+        self.assertEqual(sanitized["PATH"], "/usr/bin")
+        self.assertEqual(sanitized["HOME"], "/tmp/home")
+        self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+        for secret_name in (
+            "GRAFANA_TOKEN",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUDSDK_AUTH_ACCESS_TOKEN",
+            "STAGEGUARD_REMEDIATION_TOKEN",
+            "SOME_OTHER_TOKEN",
+            "APP_PASSWORD",
+        ):
+            with self.subTest(secret_name=secret_name):
+                self.assertNotIn(secret_name, sanitized)
+
+    def test_validation_environment_does_not_mutate_source(self) -> None:
+        source = {"GRAFANA_TOKEN": "secret", "SAFE": "value"}
+        original = dict(source)
+        sanitized = runner._validation_env(source)
+        self.assertEqual(source, original)
+        self.assertIsNot(sanitized, source)
+
+    def test_sensitive_environment_matching_is_case_insensitive(self) -> None:
+        for name in ("grafana_token", "Gemini_Api_Key", "my_secret", "foo_PASSWORD"):
+            with self.subTest(name=name):
+                self.assertTrue(runner._is_sensitive_env_name(name))
+
     def test_default_file_timeout_is_bounded(self) -> None:
         self.assertGreater(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 0)
         self.assertLessEqual(runner.DEFAULT_FILE_TIMEOUT_SECONDS, 300)
