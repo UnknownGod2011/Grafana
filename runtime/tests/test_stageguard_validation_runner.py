@@ -20,6 +20,9 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         names={p.name for p in runner._files(gate)}
         required={"test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py"}
         self.assertEqual(names,required)
+    def test_operator_concurrency_gate_covers_responsiveness_and_execution_watchdog(self):
+        gate=next(g for g in runner.GATES if g.name=="operator concurrency")
+        self.assertEqual({p.name for p in runner._files(gate)}, {"test_api_concurrency.py","test_api_execution_watchdog.py"})
     def test_incident_lifecycle_gate_covers_fail_closed_and_recovery_contracts(self):
         gate=next(g for g in runner.GATES if g.name=="incident lifecycle")
         names={p.name for p in runner._files(gate)}
