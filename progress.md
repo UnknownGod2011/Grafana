@@ -32,7 +32,7 @@ Detailed older run history remains in Git history; this file keeps current invar
 - An empty safety gate is an error, never a passing result.
 - The consolidated validation harness must execute its own regression suite before it can report a green result.
 - Every consolidated test-file subprocess has a finite positive timeout (120 seconds by default) capped at 3600 seconds; a timeout is a validation failure rather than an indefinitely hung gate.
-- Consolidated dependency-light validation subprocesses do not inherit Grafana, Gemini, Google Cloud, remediation, or generic token/password/secret environment credentials from the invoking shell.
+- Consolidated dependency-light validation subprocesses do not inherit Grafana, Gemini, Google Cloud, remediation, generic token/password/secret credentials, or Python startup/import-path injection controls from the invoking shell.
 - Consolidated validation subprocesses receive no interactive stdin; an unexpected prompt cannot silently consume the timeout waiting for operator input.
 
 ## Retained validation baseline
@@ -44,32 +44,32 @@ Detailed older run history remains in Git history; this file keeps current invar
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-17 — non-interactive validation subprocesses
+## Latest run — 2026-09-17 — validation Python environment isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The consolidated gate already confined test paths, bounded runtime, and scrubbed credentials, but each unittest subprocess still inherited the invoking process stdin. A future regression that unexpectedly prompts for input could therefore wait on an operator or consume the entire timeout rather than failing immediately.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The validator already confined selected test paths, bounded runtime, removed integration credentials, and disconnected stdin. However, its sanitized child environment still inherited Python execution controls such as `PYTHONPATH` and `PYTHONSTARTUP`. In a developer shell these can alter import resolution or inject external startup behavior, weakening the claim that the consolidated gate executes repository-scoped tests in a controlled environment.
 
 ### Changes / actions
 
-- Added `_run_test_file()` as the single subprocess boundary for selected validation files.
-- Set every validation subprocess stdin to `subprocess.DEVNULL`, making the consolidated safety gate explicitly non-interactive.
-- Preserved existing repository-local command confinement, credential-scrubbed environment, timeout, cwd, and non-raising return-code semantics.
-- Added a validator self-test that mocks subprocess execution and asserts DEVNULL stdin plus timeout/environment/cwd/check propagation.
+- Added `PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONINSPECT`, and `PYTHONBREAKPOINT` to the exact environment denylist used for validation subprocesses.
+- Kept benign Python runtime controls such as `PYTHONUNBUFFERED` available rather than broadly deleting all `PYTHON*` settings.
+- Updated the validator module contract/documentation to state that Python startup/import-path controls are removed in addition to live integration credentials.
+- Added regression coverage proving all five execution-control variables are removed, ordinary variables remain, and case-insensitive matching applies to Python controls too.
 - No CI workflow, credential, cloud resource, remediation target, or unrelated repository was touched.
 
 ### Checks / results
 
-- Non-interactive subprocess hardening committed as `2f313dbe56ad1fd2e99bb2486bad7cdb9f3e2534`.
-- Regression coverage committed as `63e001c7e4dc040bd3519bba6a76482110c4bc87`.
-- The connector environment still does not expose an executable repository checkout, so the new self-test was not executed and no green-test claim is made.
+- Validator hardening committed as `6dbc6fe9329546b32c84c2494569c41cbb505de7`.
+- Regression coverage committed as `e04aba0aecadf96326d834d47a5d7c6fe78d06fa`.
+- The connector environment still does not expose an executable repository checkout, so the new self-tests were not executed and no green-test claim is made.
 - No GitHub Actions workflow was triggered as a substitute for local validation.
 
 ### Decisions
 
-1. Dependency-light validation must never depend on operator input; credential absence or an accidental prompt should fail rather than solicit interaction.
-2. The subprocess policy belongs in one helper so future execution hardening can be regression-tested without invoking real child processes.
-3. Live Grafana MCP smoke remains a separate explicitly authenticated integration gate and is not weakened by the local validator's non-interactive contract.
+1. Repository-local path confinement is insufficient if interpreter startup/import behavior can still be redirected by inherited shell variables.
+2. Environment hardening remains targeted rather than an allowlist so cross-platform unittest execution retains ordinary OS/runtime variables required to launch Python reliably.
+3. Live Grafana MCP smoke remains a separate explicitly authenticated integration gate and is intentionally outside this credential-free validator.
 
 ### Blockers / unknowns
 
