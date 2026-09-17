@@ -17,13 +17,15 @@ VALIDATION_ENV_OVERRIDES={"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","
 @dataclass(frozen=True)
 class Gate: name:str; patterns:tuple[str,...]
 GATES=(
- Gate("validation harness",("test_stageguard_validation_runner.py",)),
+ Gate("validation harness",("test_stageguard_validation_runner.py","test_validation_*.py")),
  Gate("runtime activation",("test_activation.py",)),
  Gate("durable state integrity",("test_*checkpoint*.py","test_*integrity*.py","test_*file_lock*.py","test_validation_durable_state_integrity.py")),
+ Gate("evidence and diagnosis",("test_telemetry.py","test_log_activation.py","test_log_evidence.py","test_investigator.py","test_correlated_investigator.py","test_briefing_runtime.py","test_gemini_commander.py")),
  Gate("operator API boundary",("test_api.py","test_api_auth_error_redaction.py","test_api_protocol_preflight.py","test_api_request_framing.py","test_http_surface_contract.py","test_identity.py")),
  Gate("operator concurrency",("test_api_concurrency.py","test_api_execution_watchdog.py")),
  Gate("incident lifecycle",("test_anchored_incident_runtime.py","test_*evidence_unavailable*.py","test_*recovery_recheck.py","test_*transition_failure_authority.py")),
  Gate("remediation adapter boundary",("test_remediation.py","test_remediation_receiver.py","test_remediation_result_boundary.py","test_production_remediation.py","test_http_remediation_transport.py","test_http_remediation_tls_integration.py","test_http_reconciliation_audit_sequence.py","test_http_subprocess_*.py","test_production_reconciliation_bootstrap.py","test_validation_remediation_boundary.py")),
+ Gate("runtime observability",("test_grafana_runtime_observability.py","test_recovery_observability.py","test_watchdog_*.py","test_observability_image_pins.py")),
  Gate("timeline disclosure",("test_timeline*.py","test_audit_timeline*.py")), Gate("public audit",("test_*audit*.py",)),
  Gate("execution safety",("test_*execution*.py","test_local_execution_uncertainty_barrier.py")), Gate("Grafana MCP",("test_*mcp*.py",)),)
 def _safe_test_file(path):
