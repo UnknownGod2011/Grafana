@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Production remediation accepts only canonical operation IDs and strictly validated provider result contracts; ambiguous provider results never trigger replay.
+- Production remediation accepts only canonical operation IDs and strictly validated provider result contracts; malformed operation identity types fail closed before transport and are not reflected into action metadata.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 
@@ -26,34 +26,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — strict production remediation result contract
+## Latest run — 2026-09-19 — production remediation identity type boundary
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/production_remediation.py` and `runtime/tests/test_production_remediation.py`. The previous run correctly rejected non-`TransportResult` objects, but Python dataclass annotations do not enforce field types. A provider adapter could therefore return a nominal `TransportResult` with truthy integers/strings, boolean status codes, out-of-range HTTP status codes, or contradictory `accepted=True, retryable=True` state and cross the mutation trust boundary.
+Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, and the consolidated validation runner. The canonical operation-ID regex correctly rejected malformed strings, but calling it with a non-string value raised `TypeError`. Because Python annotations are not runtime enforcement, an API/integration bug could therefore crash execution or reconciliation before the intended fail-closed boundary. Invalid caller objects were also reflected into action metadata on rejection, creating an avoidable serialization/trust-boundary hazard.
 
 ### Changes / actions
 
-- Added `_valid_transport_result` as an explicit runtime contract validator for the provider boundary.
-- Require exact `bool` types for `accepted` and `retryable`; this intentionally rejects integers because Python `bool` subclasses `int`.
-- Require `status_code` to be `None` or an exact integer in the HTTP status range 100-599.
-- Reject contradictory accepted-and-retryable results rather than treating them as successful mutation acknowledgements.
-- Preserve the no-replay invariant: every malformed or contradictory result fails closed after exactly one provider call, with no retry even when `max_attempts=3`.
-- Expanded the focused regression to cover a dict response, integer accepted flag, boolean status, low/high invalid status, string retry flag, and accepted+retryable contradiction.
+- Changed `_valid_operation_id` to accept `object` and require exact `str` type before regex matching.
+- Invalid non-string operation IDs now fail closed before mutation transport and reconciliation transport calls.
+- Rejected invalid operation identities are no longer reflected into `ActionResult.metadata`; the metadata identity is the safe empty-string sentinel.
+- Applied the same no-reflection behavior when both the target and operation identity are invalid.
+- Added `test_validation_remediation_identity_types.py` covering `None`, integers, booleans, bytes, lists, and dictionaries for execution/reconciliation plus the wrong-target path.
+- Ensured the new regression is owned by the existing `test_validation_*.py` consolidated validation gate; removed the temporary unowned filename so `--require-full-coverage` is not weakened.
 - No credentials were read or used; no cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runtime contract hardening committed as `799cb7f74fd01ebdaff4716959bd4c2df1cfcb64`.
-- Regression expansion committed as `31cd6dfe56f3c53e2aa98397bd57ed491c09de2b`.
-- Static inspection confirms malformed result metadata does not propagate an untrusted status code and no malformed-result path reaches retry/sleep.
+- Runtime type hardening committed as `3c212224ee992077a2f27f3fe35bf145cc7d4a81` and invalid-identity metadata hardening as `2c9fd2a8ade2a38e14ed6c365db0d8489ed28741`.
+- Regression was added under validation ownership in `da0106e52c70b9420baea826bdde11f9760a49a9`; the temporary unowned duplicate was removed in `092252615219f971d54358e77f93a712c1036df8`.
+- Static inspection confirms non-string identities cannot reach the provider mutation/reconciliation methods and cannot be propagated into action metadata.
 - No green execution claim is made because this connector environment does not expose an executable checkout.
 
 ### Decisions
 
-1. Type annotations are documentation, not validation, at an external provider trust boundary.
-2. Contradictory provider acknowledgements are execution uncertainty and must not be normalized into success.
-3. HTTP status metadata is bounded before it enters StageGuard action state.
+1. External operation identity is runtime-untrusted even when Python signatures annotate it as `str`.
+2. Rejection metadata should contain only canonicalized/bounded values, not arbitrary caller objects.
+3. New safe runtime regressions must preserve full validation ownership immediately rather than waiting for a later coverage repair.
 
 ### Blockers / unknowns
 
