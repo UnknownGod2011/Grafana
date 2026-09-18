@@ -23,6 +23,16 @@ class SequenceTransport:
         return result
 
 
+class ReconcilingTransport(SequenceTransport):
+    def __init__(self, results=()):
+        super().__init__(results)
+        self.reconciliations = []
+
+    def reconcile(self, operation_id, *, timeout_seconds):
+        self.reconciliations.append((operation_id, timeout_seconds))
+        return "accepted"
+
+
 class SequenceMetrics:
     def __init__(self, values):
         self.values = list(values)
@@ -70,6 +80,38 @@ class ProductionRemediationTests(unittest.TestCase):
         result = client.recover_uplink_idempotent("prod-1", "other", "sg-" + "a" * 40)
         self.assertFalse(result.accepted)
         self.assertEqual([], transport.requests)
+
+    def test_adapter_rejects_noncanonical_operation_identity_without_transport_call(self):
+        for operation_id in (
+            "sg-" + "A" * 40,
+            "sg-" + "g" * 40,
+            "sg-" + "a" * 39 + "/",
+            "sg-" + "a" * 39 + "\n",
+            "xx-" + "a" * 40,
+        ):
+            with self.subTest(operation_id=repr(operation_id)):
+                transport = SequenceTransport([])
+                client = AllowlistedProductionRemediationClient(
+                    transport,
+                    allowed_production_id="broadcast-alpha",
+                    allowed_uplink="uplink-b",
+                )
+                result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", operation_id)
+                self.assertFalse(result.accepted)
+                self.assertEqual(0, result.metadata["attempt_count"])
+                self.assertEqual([], transport.requests)
+
+    def test_reconciliation_rejects_noncanonical_operation_identity_without_provider_call(self):
+        transport = ReconcilingTransport()
+        client = AllowlistedProductionRemediationClient(
+            transport,
+            allowed_production_id="broadcast-alpha",
+            allowed_uplink="uplink-b",
+        )
+        for operation_id in ("sg-" + "A" * 40, "sg-" + "z" * 40, "sg-" + "a" * 39 + "\n"):
+            with self.subTest(operation_id=repr(operation_id)):
+                self.assertEqual("unknown", client.reconcile_operation(operation_id))
+        self.assertEqual([], transport.reconciliations)
 
     def test_retry_reuses_identical_operation_identity(self):
         transport = SequenceTransport([
