@@ -25,32 +25,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — ambient credential-helper isolation hardening
+## Latest run — 2026-09-18 — package-manager credential isolation hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The validator already stripped provider credential namespaces, generic secret suffixes, proxies, Python injection controls, Google ADC paths, and AWS/GCE metadata fallback. A remaining escape hatch was inherited credential/config helper channels such as SSH agent sockets, Git/SSH askpass helpers, `.netrc`, Docker config, and kubeconfig.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The dependency-light validator already removed provider credentials, generic secret suffixes, proxies, Python injection controls, Google/AWS metadata fallback, SSH/Git credential helpers, `.netrc`, Docker config, and kubeconfig. A remaining ambient-credential channel was authenticated package-manager/client configuration inherited through pip/npm/Yarn/curl/wget environment variables.
 
 ### Changes / actions
 
-- Added `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH`, `GIT_SSH_COMMAND`, `NETRC`, `DOCKER_CONFIG`, and `KUBECONFIG` to the exact sensitive-environment denylist.
-- Added `GIT_TERMINAL_PROMPT=0` as a forced validation override so a transitive Git invocation cannot fall back to an interactive credential prompt.
-- Added `runtime/tests/test_validation_credential_helpers.py` covering helper/config removal, case-insensitive classification, preservation of ordinary configuration, and the forced non-interactive Git setting.
-- The new regression is automatically owned by the intentionally bounded `test_validation_*.py` validation-harness gate.
+- Added exact, case-insensitive denial for `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_CONFIG_FILE`, `NPM_CONFIG_USERCONFIG`, `YARN_RC_FILENAME`, `CURL_HOME`, and `WGETRC`.
+- Added forced `PIP_NO_INPUT=1` so an unexpected pip invocation cannot fall back to an interactive prompt.
+- Added `runtime/tests/test_validation_package_manager_credentials.py` covering authenticated registry URL removal, external config-file removal, case-insensitive matching, preservation of ordinary StageGuard configuration, and forced non-interactive pip behavior.
+- The new regression is automatically owned by the bounded `test_validation_*.py` validation-harness gate.
 - No credentials were read or used; no cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `b040e6a7b97e40b4dfe872e3194cf9e35ba1e3ca`.
-- Regression committed as `5aac59aaffb1c86a7568b976d38c097431e77807`.
-- Static inspection confirms the added channels are exact-name, case-insensitive matches and therefore do not broadly remove unrelated variables.
-- No green execution claim is made because this connector environment still does not expose an executable checkout.
+- Runner hardening committed as `6819e7fa7ac289ab8fb2a387a76e512cfb2414f1`.
+- Regression committed as `bb31119344c7018b1a3eee351ba86df876a4671f`.
+- Static inspection confirms the new channels are exact-name, case-insensitive matches rather than broad package-related substring matching.
+- No green execution claim is made because this connector environment does not expose an executable checkout.
 
 ### Decisions
 
-1. Dependency-light validation must not inherit credential agents or external client configuration merely because no literal secret exists in the environment.
-2. Loopback networking remains available because several dependency-light HTTP boundary tests require local servers; credential discovery is blocked without pretending the runner is a network sandbox.
-3. Git terminal prompting is forced off independently of inherited values to preserve non-interactive behavior.
+1. Dependency-light validation must not inherit authenticated package registries or client credential files; these are credential sources even when no secret-looking variable name is present.
+2. The denylist remains narrow so ordinary package/runtime configuration is not removed accidentally.
+3. Network access is not represented as sandboxed: loopback remains intentionally available for boundary tests, while known credential discovery paths are removed.
 
 ### Blockers / unknowns
 
