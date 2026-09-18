@@ -19,6 +19,7 @@ class Gate: name:str; patterns:tuple[str,...]
 GATES=(
  Gate("validation harness",("test_stageguard_validation_runner.py","test_validation_*.py")),
  Gate("runtime activation",("test_activation.py",)),
+ Gate("telemetry simulator",("test_simulator.py",)),
  Gate("durable state integrity",("test_*checkpoint*.py","test_*integrity*.py","test_*file_lock*.py","test_validation_durable_state_integrity.py")),
  Gate("cloud durability simulation",("test_gcs_checkpoint.py","test_gcs_multiprocess_cas.py","test_fake_cloud_restart_acceptance.py")),
  Gate("retention safety",("test_retention_planner.py","test_retention_executor.py","test_retention_path_security.py","test_retention_coordinator_cli.py")),
@@ -30,23 +31,11 @@ GATES=(
  Gate("remediation adapter boundary",("test_remediation.py","test_remediation_receiver.py","test_remediation_result_boundary.py","test_production_remediation.py","test_http_remediation_transport.py","test_http_remediation_tls_integration.py","test_http_reconciliation_audit_sequence.py","test_http_subprocess_*.py","test_production_reconciliation_bootstrap.py","test_validation_remediation_boundary.py")),
  Gate("cloud deployment contract",("test_cloud_run_deploy_contract.py","test_cloud_run_deploy_shell.py","test_deploy_cloud_run_script.py","test_cloudrun_entrypoint.py")),
  Gate("GCP deployment readiness",("test_gcp_deploy_doctor.py","test_gcp_deploy_doctor_fake_gcloud.py","test_gcp_deploy_doctor_process_failures.py","test_gcp_deploy_doctor_serialization.py","test_gcp_identifiers.py")),
- Gate("cloud runtime metrics bridge",(
-  "test_cloud_run_metrics_bridge.py","test_cloud_run_metrics_acceptance.py",
-  "test_cloud_run_metrics_bridge_audience_boundary.py","test_cloud_run_metrics_bridge_bounds.py",
-  "test_cloud_run_metrics_bridge_inbound_auth.py","test_cloud_run_metrics_bridge_redirects.py",
-  "test_cloud_run_metrics_bridge_sentinel_family.py")),
+ Gate("cloud runtime metrics bridge",("test_cloud_run_metrics_bridge.py","test_cloud_run_metrics_acceptance.py","test_cloud_run_metrics_bridge_audience_boundary.py","test_cloud_run_metrics_bridge_bounds.py","test_cloud_run_metrics_bridge_inbound_auth.py","test_cloud_run_metrics_bridge_redirects.py","test_cloud_run_metrics_bridge_sentinel_family.py")),
  Gate("runtime observability",("test_grafana_runtime_observability.py","test_recovery_observability.py","test_watchdog_*.py","test_observability_image_pins.py")),
  Gate("timeline disclosure",("test_timeline*.py","test_audit_timeline*.py")), Gate("public audit",("test_*audit*.py",)),
  Gate("execution concurrency simulation",("test_execution_gcs_multiprocess_cas.py","test_execution_reconciliation_gcs_multiprocess_cas.py")),
- Gate("execution safety",(
-  "test_anchored_execution_safety.py","test_bootstrap_execution_safety.py",
-  "test_execution_conflict_reload_phases.py","test_execution_crash_matrix.py",
-  "test_execution_outcome_checkpoint_authority.py","test_execution_phase_observability.py",
-  "test_execution_phase_v2.py","test_execution_reconciliation_audit.py",
-  "test_execution_reconciliation_gate.py","test_execution_reconciliation_observability.py",
-  "test_execution_safety.py","test_execution_safety_api.py",
-  "test_execution_safety_http_transport.py","test_execution_watchdog_bounds.py",
-  "test_execution_watchdog_clock_boundary.py","test_local_execution_uncertainty_barrier.py")),
+ Gate("execution safety",("test_anchored_execution_safety.py","test_bootstrap_execution_safety.py","test_execution_conflict_reload_phases.py","test_execution_crash_matrix.py","test_execution_outcome_checkpoint_authority.py","test_execution_phase_observability.py","test_execution_phase_v2.py","test_execution_reconciliation_audit.py","test_execution_reconciliation_gate.py","test_execution_reconciliation_observability.py","test_execution_safety.py","test_execution_safety_api.py","test_execution_safety_http_transport.py","test_execution_watchdog_bounds.py","test_execution_watchdog_clock_boundary.py","test_local_execution_uncertainty_barrier.py")),
  Gate("Grafana MCP",("test_*mcp*.py",)),)
 def _safe_test_file(path):
  try:return path.parent.resolve(strict=True)==TESTS.resolve(strict=True) and not path.is_symlink() and path.is_file()
