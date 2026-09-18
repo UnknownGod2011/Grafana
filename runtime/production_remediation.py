@@ -16,9 +16,9 @@ from remediation import ActionResult
 _OPERATION_ID_RE = re.compile(r"sg-[0-9a-f]{40}\Z")
 
 
-def _valid_operation_id(operation_id: str) -> bool:
+def _valid_operation_id(operation_id: object) -> bool:
     """Accept only StageGuard's canonical, non-ambiguous operation identifier."""
-    return bool(_OPERATION_ID_RE.fullmatch(operation_id))
+    return type(operation_id) is str and bool(_OPERATION_ID_RE.fullmatch(operation_id))
 
 
 @dataclass(frozen=True)
@@ -117,26 +117,9 @@ class AllowlistedProductionRemediationClient:
             except (TimeoutError, OSError):
                 result = TransportResult(False, None, retryable=True)
             except Exception:
-                # A provider adapter is an external trust boundary. Unexpected
-                # adapter faults must not crash the incident commander or be
-                # interpreted as permission to retry a potentially mutating call.
-                return self._result(
-                    False,
-                    operation_id,
-                    attempt,
-                    last_status,
-                    "production remediation transport fault",
-                )
+                return self._result(False, operation_id, attempt, last_status, "production remediation transport fault")
             if not _valid_transport_result(result):
-                # Reject malformed/contradictory adapter responses without retrying:
-                # execution may already have occurred, so another write is unsafe.
-                return self._result(
-                    False,
-                    operation_id,
-                    attempt,
-                    last_status,
-                    "invalid production remediation transport result",
-                )
+                return self._result(False, operation_id, attempt, last_status, "invalid production remediation transport result")
             last_status = result.status_code
             if result.accepted:
                 return self._result(True, operation_id, attempt, last_status, "production remediation accepted")
