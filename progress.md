@@ -25,31 +25,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — validation harness ownership regression fix
+## Latest run — 2026-09-18 — validation full-coverage contract
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, and the runtime-test inventory exposed by the repository API.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, the complete runtime-test inventory exposed by the repository API, and an existing validation-ownership regression to preserve the repository's test-loading convention.
 
 ### Changes / actions
 
-- Fixed the pre-existing validator regression in `test_stageguard_validation_runner.py::test_validation_harness_gate_owns_runner_regressions`.
-- The regression now matches the runner's intentional ownership model: the `validation harness` gate owns `test_stageguard_validation_runner.py` plus the `test_validation_*.py` ownership contracts.
-- The assertion remains fail-closed about scope: every file selected by that gate must be either the runner regression itself or a `test_validation_*.py` contract, and at least one ownership contract must be present.
-- This preserves the useful property that newly added validation-ownership regressions are automatically validated while preventing unrelated tests from silently entering the harness gate.
+- Audited the current `runtime/tests/test_*.py` inventory against the consolidated validator's gate selectors.
+- Added `runtime/tests/test_validation_full_coverage.py` as a validator-of-the-validator contract.
+- The new regression requires every safe runtime test to have at least one intentional production-validation gate owner, so adding a dependency-light test without classifying it becomes fail-visible immediately.
+- It also requires every declared gate to resolve at least one safe test, preventing stale/renamed patterns from silently turning a safety boundary into an empty gate.
+- It verifies the execution plan de-duplicates overlapping ownership so an intentionally cross-cutting test still runs at most once.
+- The new contract is itself automatically owned by the existing `validation harness` gate through the intentionally bounded `test_validation_*.py` selector.
+- No live/credentialed test was newly admitted merely to satisfy coverage; the coverage contract operates on the runner's existing definition of safe repository-local runtime tests.
 - No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- The inconsistent assertion identified in the previous run has been reconciled with the actual gate definition.
-- Change committed as `7eea66a2d1e6c7a9313173cd679c99fac607aa5d`.
-- No green test-run claim is made because this connector environment does not expose an executable checkout.
+- Repository API inventory was reconciled against the current gate patterns; no currently visible safe runtime test was identified as unowned after applying those selectors.
+- New full-coverage regression committed as `ee4e70227875c7c10955094b8120b903918889d7`.
+- No green execution claim is made because this connector environment does not expose an executable checkout; the new regression and consolidated runner still need repository execution.
 
 ### Decisions
 
-1. Keep `test_validation_*.py` as intentional validation-harness ownership rather than splitting every ownership contract into another meta-gate; these tests validate the validator itself and are dependency-light.
-2. Make the regression verify both inclusion and scope instead of hard-coding a stale one-file set.
-3. Continue treating `--require-full-coverage` as a release criterion only after execution in a real checkout confirms the current inventory and failures are classified.
+1. Make full ownership a permanent regression rather than relying on occasional manual `--require-full-coverage` audits.
+2. Preserve overlap where it expresses cross-cutting safety ownership, but require the execution plan to run each file once.
+3. Keep genuinely live/credentialed acceptance outside this dependency-light boundary rather than weakening credential isolation to achieve a cosmetic coverage number.
 
 ### Blockers / unknowns
 
@@ -61,4 +64,4 @@ Read `progress.md` completely first, then inspected `scripts/run_stageguard_vali
 
 ## Single best next step
 
-Audit the remaining currently unowned `runtime/tests/test_*.py` files and classify every dependency-light test into an exact or narrowly bounded gate while explicitly excluding genuinely live/credentialed acceptance tests; then run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and classify failures rather than weakening gates.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout; classify and fix every failure without weakening gate ownership or credential isolation, then use the resulting green dependency-light baseline to resume product-facing hardening.
