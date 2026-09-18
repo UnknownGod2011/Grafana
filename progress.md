@@ -25,36 +25,35 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — Gemini validation ownership audit
+## Latest run — 2026-09-18 — validation harness ownership regression fix
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the repository tree, `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, and the previously unowned `runtime/tests/test_gemini_acceptance_smoke.py`.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, and the runtime-test inventory exposed by the repository API.
 
 ### Changes / actions
 
-- Classified `test_gemini_acceptance_smoke.py` explicitly under the `evidence and diagnosis` production-validation gate.
-- This does **not** enable live Gemini calls. The test's subprocess path omits `--execute`; execute-path unit tests mock `_execute_smoke`, and the runner separately strips ambient Google/Gemini credentials and isolates ADC/gcloud homes.
-- Repository tree review found the remaining runtime acceptance-named watchdog tests are already intentionally selected by the runtime-observability gate; fake-cloud restart acceptance is explicitly owned by cloud durability simulation.
+- Fixed the pre-existing validator regression in `test_stageguard_validation_runner.py::test_validation_harness_gate_owns_runner_regressions`.
+- The regression now matches the runner's intentional ownership model: the `validation harness` gate owns `test_stageguard_validation_runner.py` plus the `test_validation_*.py` ownership contracts.
+- The assertion remains fail-closed about scope: every file selected by that gate must be either the runner regression itself or a `test_validation_*.py` contract, and at least one ownership contract must be present.
+- This preserves the useful property that newly added validation-ownership regressions are automatically validated while preventing unrelated tests from silently entering the harness gate.
 - No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Manual inspection confirmed `test_gemini_acceptance_smoke.py` validates the no-execute default, identifier validation, explicit execute opt-in, safe error contracts, and mocked execute dispatch without making a live model request.
-- Validation runner update committed as `4c797e177bbb6d7ade8983db06afbec2d8a045f3`.
-- No green test-run claim is made because the connector environment does not expose an executable checkout.
-- During the audit, a pre-existing validator-regression inconsistency was found: `test_stageguard_validation_runner.py::test_validation_harness_gate_owns_runner_regressions` expects the `validation harness` gate to resolve only `test_stageguard_validation_runner.py`, while that gate intentionally also selects `test_validation_*.py`. This must be reconciled before promoting the consolidated runner as green.
+- The inconsistent assertion identified in the previous run has been reconciled with the actual gate definition.
+- Change committed as `7eea66a2d1e6c7a9313173cd679c99fac607aa5d`.
+- No green test-run claim is made because this connector environment does not expose an executable checkout.
 
 ### Decisions
 
-1. Distinguish the safe Gemini acceptance **contract tests** from the credentialed live Gemini smoke itself. The former belong in dependency-light validation; the latter remains explicitly outside it.
-2. Do not create an exclusion merely because a filename contains `acceptance`; admission is based on inspected behavior and side-effect boundaries.
-3. Do not claim `--require-full-coverage` release readiness until the validator-regression ownership inconsistency is fixed and the command is executed in a real checkout.
+1. Keep `test_validation_*.py` as intentional validation-harness ownership rather than splitting every ownership contract into another meta-gate; these tests validate the validator itself and are dependency-light.
+2. Make the regression verify both inclusion and scope instead of hard-coding a stale one-file set.
+3. Continue treating `--require-full-coverage` as a release criterion only after execution in a real checkout confirms the current inventory and failures are classified.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
-- The validation-harness ownership regression described above is currently inconsistent with the runner's intentional `test_validation_*.py` ownership and is the immediate code-level blocker.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside this dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -62,4 +61,4 @@ Read `progress.md` completely first, then inspected the repository tree, `script
 
 ## Single best next step
 
-Fix the validation-harness ownership model so `test_stageguard_validation_runner.py` and the `test_validation_*.py` ownership regressions have unambiguous gate ownership, add a current-inventory assertion for zero accidental unowned safe tests, then execute `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available real checkout and classify any failures rather than weakening gates.
+Audit the remaining currently unowned `runtime/tests/test_*.py` files and classify every dependency-light test into an exact or narrowly bounded gate while explicitly excluding genuinely live/credentialed acceptance tests; then run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and classify failures rather than weakening gates.
