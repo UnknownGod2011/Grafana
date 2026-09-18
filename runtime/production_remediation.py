@@ -6,6 +6,7 @@ result metadata. A deployment-specific transport owns credentialed I/O.
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -19,6 +20,11 @@ _OPERATION_ID_RE = re.compile(r"sg-[0-9a-f]{40}\Z")
 def _valid_operation_id(operation_id: object) -> bool:
     """Accept only StageGuard's canonical, non-ambiguous operation identifier."""
     return type(operation_id) is str and bool(_OPERATION_ID_RE.fullmatch(operation_id))
+
+
+def _bounded_number(value: object, minimum: float, maximum: float) -> bool:
+    """Accept finite real configuration values while excluding bool-as-int coercion."""
+    return type(value) in {int, float} and math.isfinite(value) and minimum <= value <= maximum
 
 
 @dataclass(frozen=True)
@@ -70,14 +76,18 @@ class AllowlistedProductionRemediationClient:
         retry_delay_seconds: float = 0.25,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if not allowed_production_id.strip() or not allowed_uplink.strip():
-            raise ValueError("allowlisted production and uplink are required")
-        if not (0.1 <= timeout_seconds <= 10.0):
-            raise ValueError("timeout_seconds must be between 0.1 and 10")
-        if max_attempts not in {1, 2, 3}:
-            raise ValueError("max_attempts must be between 1 and 3")
-        if not (0.0 <= retry_delay_seconds <= 2.0):
-            raise ValueError("retry_delay_seconds must be between 0 and 2")
+        if type(allowed_production_id) is not str or not allowed_production_id.strip():
+            raise ValueError("allowlisted production is required and must be a string")
+        if type(allowed_uplink) is not str or not allowed_uplink.strip():
+            raise ValueError("allowlisted uplink is required and must be a string")
+        if not _bounded_number(timeout_seconds, 0.1, 10.0):
+            raise ValueError("timeout_seconds must be a finite number between 0.1 and 10")
+        if type(max_attempts) is not int or max_attempts not in {1, 2, 3}:
+            raise ValueError("max_attempts must be an integer between 1 and 3")
+        if not _bounded_number(retry_delay_seconds, 0.0, 2.0):
+            raise ValueError("retry_delay_seconds must be a finite number between 0 and 2")
+        if not callable(sleep):
+            raise ValueError("sleep must be callable")
         self._transport = transport
         self._production_id = allowed_production_id
         self._uplink = allowed_uplink
