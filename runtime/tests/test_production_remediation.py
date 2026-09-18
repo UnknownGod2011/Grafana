@@ -187,20 +187,32 @@ class ProductionRemediationTests(unittest.TestCase):
         self.assertEqual(1, len(transport.requests))
 
     def test_malformed_transport_result_fails_closed_without_retry(self):
-        transport = SequenceTransport([{"accepted": True}])
-        client = AllowlistedProductionRemediationClient(
-            transport,
-            allowed_production_id="broadcast-alpha",
-            allowed_uplink="uplink-b",
-            max_attempts=3,
-            retry_delay_seconds=0,
-            sleep=lambda _: None,
-        )
-        result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", "sg-" + "d" * 40)
-        self.assertFalse(result.accepted)
-        self.assertEqual("invalid production remediation transport result", result.detail)
-        self.assertEqual(1, result.metadata["attempt_count"])
-        self.assertEqual(1, len(transport.requests))
+        malformed_results = [
+            {"accepted": True},
+            TransportResult(1, 202, False),
+            TransportResult(True, True, False),
+            TransportResult(False, 99, False),
+            TransportResult(False, 600, False),
+            TransportResult(False, 503, "yes"),
+            TransportResult(True, 202, True),
+        ]
+        for malformed in malformed_results:
+            with self.subTest(result=repr(malformed)):
+                transport = SequenceTransport([malformed])
+                client = AllowlistedProductionRemediationClient(
+                    transport,
+                    allowed_production_id="broadcast-alpha",
+                    allowed_uplink="uplink-b",
+                    max_attempts=3,
+                    retry_delay_seconds=0,
+                    sleep=lambda _: None,
+                )
+                result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", "sg-" + "d" * 40)
+                self.assertFalse(result.accepted)
+                self.assertEqual("invalid production remediation transport result", result.detail)
+                self.assertEqual(1, result.metadata["attempt_count"])
+                self.assertIsNone(result.metadata["transport_status"])
+                self.assertEqual(1, len(transport.requests))
 
     def test_construction_rejects_unbounded_policy(self):
         transport = SequenceTransport([])
