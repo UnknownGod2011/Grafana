@@ -14,7 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates the deterministic telemetry simulator before evidence consumers, durable state, fake-cloud durability/restart behavior, fake execution/reconciliation CAS concurrency, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, runtime-observability contracts, restart/recovery and crash-reconciliation safety, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate. Execution-safety, telemetry-simulator, and Cloud Run metrics-bridge ownership use exact admission for sensitive additions so newly added tests cannot silently enter dependency-light validation.
+- Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 
 ## Retained validation baseline
 
@@ -25,43 +25,41 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — restart/recovery validation classification
+## Latest run — 2026-09-18 — Gemini validation ownership audit
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the consolidated validation runner and the current `runtime/tests` inventory. Focused inspection covered `test_recovery_recheck_restart.py`, `test_transition_failure_snapshot_authority.py`, and `test_subprocess_crash_recovery.py`, which were safe runtime contracts not explicitly admitted by their intended production gates.
+Read `progress.md` completely first, then inspected the repository tree, `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, and the previously unowned `runtime/tests/test_gemini_acceptance_smoke.py`.
 
 ### Changes / actions
 
-- Added `test_recovery_recheck_restart.py` and `test_transition_failure_snapshot_authority.py` explicitly to the incident-lifecycle gate.
-- Added `test_subprocess_crash_recovery.py` explicitly to execution safety. It uses local multiprocessing, temporary files, POSIX SIGKILL fault injection, fake metrics, and reconciliation-only remediation; it does not contact a provider or cloud service.
-- Added `test_validation_restart_recovery_ownership.py` to pin these ownership decisions and prevent replacing them with broad restart/crash wildcards.
+- Classified `test_gemini_acceptance_smoke.py` explicitly under the `evidence and diagnosis` production-validation gate.
+- This does **not** enable live Gemini calls. The test's subprocess path omits `--execute`; execute-path unit tests mock `_execute_smoke`, and the runner separately strips ambient Google/Gemini credentials and isolates ADC/gcloud homes.
+- Repository tree review found the remaining runtime acceptance-named watchdog tests are already intentionally selected by the runtime-observability gate; fake-cloud restart acceptance is explicitly owned by cloud durability simulation.
 - No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Manual inspection confirmed the restart recheck contract restores a local JSON checkpoint and proves recovery verification cannot replay remediation after restart.
-- Manual inspection confirmed transition-failure snapshot tests use in-memory audit/remediation and an injected failing checkpoint store to prove uncommitted approval/outcome state is not published.
-- Manual inspection confirmed subprocess crash recovery uses temporary local checkpoint/call-log files and a spawned child killed at controlled side-effect boundaries, then verifies reconciliation without remediation replay.
-- Validation runner update committed as `f4d7d4ea1d8cbf1d8e445549403263e37ad9dc01`.
-- Ownership regression committed as `6383944eafeb85b4c048ff7e99f742acc1ecbfec`.
-- The connector environment does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
+- Manual inspection confirmed `test_gemini_acceptance_smoke.py` validates the no-execute default, identifier validation, explicit execute opt-in, safe error contracts, and mocked execute dispatch without making a live model request.
+- Validation runner update committed as `4c797e177bbb6d7ade8983db06afbec2d8a045f3`.
+- No green test-run claim is made because the connector environment does not expose an executable checkout.
+- During the audit, a pre-existing validator-regression inconsistency was found: `test_stageguard_validation_runner.py::test_validation_harness_gate_owns_runner_regressions` expects the `validation harness` gate to resolve only `test_stageguard_validation_runner.py`, while that gate intentionally also selects `test_validation_*.py`. This must be reconciled before promoting the consolidated runner as green.
 
 ### Decisions
 
-1. Restart recovery and persistence-failure authority are production lifecycle safety contracts and belong in dependency-light validation.
-2. Hard-crash reconciliation belongs in execution safety because it proves at-most-once provider dispatch across process death.
-3. Admit these tests by exact filename rather than broad restart/crash selectors so future integration tests require inspection before entry.
+1. Distinguish the safe Gemini acceptance **contract tests** from the credentialed live Gemini smoke itself. The former belong in dependency-light validation; the latter remains explicitly outside it.
+2. Do not create an exclusion merely because a filename contains `acceptance`; admission is based on inspected behavior and side-effect boundaries.
+3. Do not claim `--require-full-coverage` release readiness until the validator-regression ownership inconsistency is fixed and the command is executed in a real checkout.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
+- The validation-harness ownership regression described above is currently inconsistent with the runner's intentional `test_validation_*.py` ownership and is the immediate code-level blocker.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- Remaining unowned safe runtime tests need explicit classification before `--require-full-coverage` can be promoted as a release criterion.
-- Live Gemini acceptance remains intentionally credentialed and should not be admitted to this dependency-light runner.
+- Live Gemini acceptance remains intentionally credentialed and outside this dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Continue the unowned-test audit, beginning with any remaining safe files not selected by `GATES`; explicitly classify dependency-light tests while creating a pinned intentional-exclusion set for genuinely credentialed/live acceptance, then make `--require-full-coverage` distinguish safe exclusions from accidental omissions.
+Fix the validation-harness ownership model so `test_stageguard_validation_runner.py` and the `test_validation_*.py` ownership regressions have unambiguous gate ownership, add a current-inventory assertion for zero accidental unowned safe tests, then execute `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available real checkout and classify any failures rather than weakening gates.
