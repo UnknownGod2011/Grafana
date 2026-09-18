@@ -15,7 +15,10 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
             with self.subTest(gate=gate.name): self.assertTrue(runner._files(gate))
     def test_validation_harness_gate_owns_runner_regressions(self):
         harness=next(g for g in runner.GATES if g.name=="validation harness")
-        self.assertEqual({p.name for p in runner._files(harness)}, {"test_stageguard_validation_runner.py"})
+        names={p.name for p in runner._files(harness)}
+        self.assertIn("test_stageguard_validation_runner.py", names)
+        self.assertTrue(any(name.startswith("test_validation_") for name in names))
+        self.assertTrue(all(name=="test_stageguard_validation_runner.py" or name.startswith("test_validation_") for name in names))
     def test_runtime_activation_gate_covers_configuration_to_runtime_boundary(self):
         gate=next(g for g in runner.GATES if g.name=="runtime activation")
         self.assertEqual({p.name for p in runner._files(gate)}, {"test_activation.py"})
