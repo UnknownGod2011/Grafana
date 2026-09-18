@@ -25,32 +25,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — canonical remediation operation identity
+## Latest run — 2026-09-19 — fail-closed production remediation transport boundary
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the consolidated validation runner, repository runtime inventory, `README.md`, `runtime/production_remediation.py`, and `runtime/tests/test_production_remediation.py`. The production remediation boundary validated only the `sg-` prefix and total length of operation IDs, so arbitrary non-hex/control characters of the same length could pass the adapter's identity check before a provider write or reconciliation call.
+Read `progress.md` completely first, then inspected `runtime/production_remediation.py` and its focused regression suite. The adapter treated expected timeout/OS failures as bounded retryable failures, but an unexpected provider SDK exception or a malformed adapter return could escape as an exception/attribute error and crash the incident command path. Retrying an unknown/malformed mutation result would also be unsafe because the provider may already have performed the write.
 
 ### Changes / actions
 
-- Added one canonical operation-ID validator in `runtime/production_remediation.py`: exactly `sg-` followed by 40 lowercase hexadecimal characters.
-- Reused the same validator for mutation dispatch and read-only provider reconciliation so both boundaries agree and malformed identifiers fail closed before transport/provider access.
-- Added regressions covering uppercase, non-hex, wrong-prefix, slash, and newline-bearing identifiers; malformed IDs make zero remediation transport calls.
-- Added a reconciliation regression proving malformed IDs return `unknown` without invoking the provider reconciliation method.
+- Hardened `AllowlistedProductionRemediationClient.recover_uplink_idempotent` so unexpected transport exceptions fail closed as a rejected `ActionResult` rather than escaping across the incident-command boundary.
+- Unexpected exceptions are deliberately non-retryable: after a consequential provider call, execution state is uncertain and StageGuard must not issue another write merely because its adapter failed unexpectedly.
+- Added strict `TransportResult` runtime validation. Malformed provider-adapter responses fail closed and do not retry.
+- Preserved the existing bounded retry behavior for explicit `TimeoutError`/`OSError` cases and explicit typed `retryable=True` results.
+- Added regressions proving both an unexpected provider exception and a malformed transport response produce one provider call only, a rejected action result, and no retry despite `max_attempts=3`.
 - No credentials were read or used; no cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Production boundary hardening committed as `8a2bd8b89cfd8c39678d83d4a821ffec25373f33`.
-- Regression coverage committed as `a7ff660cee98f464385826fabc4aad12e3f85808`.
-- Static inspection confirms canonical IDs used by existing tests (`sg-` + 40 lowercase hex characters) remain accepted and malformed IDs are rejected before transport access.
+- Boundary hardening committed as `411df170fd85fff9b087ff1131111d87331b7a6a`.
+- Regression coverage committed as `ff3979f423612315926e8860d6ab33a6f16cb162`.
+- Static inspection confirms explicit retryable results retain the existing retry path while unknown adapter failures terminate after the first attempted mutation.
 - No green execution claim is made because this connector environment does not expose an executable checkout.
 
 ### Decisions
 
-1. Operation IDs cross a consequential provider boundary and therefore use a single canonical grammar rather than prefix/length heuristics.
-2. Lowercase hex matches StageGuard's deterministic hash-derived identity and avoids multiple textual representations of the same logical identifier.
-3. Mutation and reconciliation share the validator to prevent disagreement that could undermine no-replay recovery semantics.
+1. Unexpected exceptions after a production mutation attempt represent execution uncertainty, not a safe retry signal.
+2. Provider adapters must return the exact bounded `TransportResult` contract; duck-typed or malformed responses are rejected at the trust boundary.
+3. Failure detail remains generic so provider SDK exception text cannot leak credentials or sensitive backend detail into operator-visible state.
 
 ### Blockers / unknowns
 
@@ -62,4 +63,4 @@ Read `progress.md` completely first, then inspected the consolidated validation 
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and fix every concrete failure without weakening credential isolation, operation-identity safety, or gate ownership; once green, resume product-facing hardening from that trustworthy baseline.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and fix every concrete failure without weakening credential isolation, no-replay remediation semantics, or validation ownership; once green, continue product-facing production hardening from that trustworthy baseline.
