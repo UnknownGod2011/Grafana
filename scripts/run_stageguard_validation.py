@@ -20,6 +20,7 @@ GATES=(
  Gate("validation harness",("test_stageguard_validation_runner.py","test_validation_*.py")),
  Gate("runtime activation",("test_activation.py",)),
  Gate("durable state integrity",("test_*checkpoint*.py","test_*integrity*.py","test_*file_lock*.py","test_validation_durable_state_integrity.py")),
+ Gate("cloud durability simulation",("test_gcs_checkpoint.py","test_gcs_multiprocess_cas.py","test_fake_cloud_restart_acceptance.py")),
  Gate("retention safety",("test_retention_planner.py","test_retention_executor.py","test_retention_path_security.py","test_retention_coordinator_cli.py")),
  Gate("evidence and diagnosis",("test_telemetry.py","test_log_activation.py","test_log_evidence.py","test_investigator.py","test_correlated_investigator.py","test_briefing_runtime.py","test_gemini_commander.py")),
  Gate("operator readiness and UI",("test_bootstrap.py","test_incident_service.py","test_onboarding.py","test_readiness*.py","test_operator_*.py","test_preflight_cli.py","test_stageguard_doctor.py","test_command_line*.py")),
