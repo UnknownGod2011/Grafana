@@ -86,6 +86,12 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertEqual(s["GCE_METADATA_IP"],"127.0.0.1")
         self.assertEqual(s["ORDINARY_SETTING"],"safe")
         self.assertNotIn("metadata.google.internal",s.values()); self.assertNotIn("169.254.169.254",s.values())
+    def test_validation_environment_disables_ambient_aws_metadata_credentials(self):
+        source={"PATH":"/usr/bin","AWS_EC2_METADATA_DISABLED":"false","AWS_PROFILE":"production","AWS_ACCESS_KEY_ID":"secret","ORDINARY_SETTING":"safe"}
+        s=runner._validation_env(source)
+        self.assertEqual(s["AWS_EC2_METADATA_DISABLED"],"true")
+        self.assertNotIn("AWS_PROFILE",s); self.assertNotIn("AWS_ACCESS_KEY_ID",s)
+        self.assertEqual(s["ORDINARY_SETTING"],"safe")
     def test_validation_environment_drops_proxy_urls_and_credentials(self):
         source={"PATH":"/usr/bin","HTTP_PROXY":"http://alice:secret@proxy.example:8080","https_proxy":"https://bob:token@proxy.example:8443","ALL_PROXY":"socks5://proxy.example:1080","no_proxy":"metadata.google.internal","ORDINARY_SETTING":"safe"}
         s=runner._validation_env(source)
