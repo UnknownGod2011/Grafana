@@ -25,33 +25,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — ambient credential isolation hardening
+## Latest run — 2026-09-18 — cloud metadata credential isolation hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, `runtime/tests/test_validation_full_coverage.py`, and the repository tree. The validator already scrubbed StageGuard/Grafana/Gemini/Google credentials and common secret suffixes, but still inherited ambient credentials for adjacent developer/CI providers such as GitHub, AWS, Azure, OpenAI, Anthropic, and Hugging Face.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The dependency-light runner already isolated Google metadata/ADC paths and scrubbed AWS-prefixed ambient environment variables, but an AWS SDK imported by a future or transitive test could still attempt EC2 Instance Metadata Service credential discovery after the inherited `AWS_EC2_METADATA_DISABLED` value had been removed.
 
 ### Changes / actions
 
-- Hardened `scripts/run_stageguard_validation.py` so dependency-light subprocesses also drop environment variables prefixed with `AWS_`, `AZURE_`, `ANTHROPIC_`, `OPENAI_`, `GITHUB_`, `GH_`, `HF_`, and `HUGGINGFACE_`.
-- Expanded generic credential suffix scrubbing to `_ACCESS_KEY`, `_PRIVATE_KEY`, and `_CLIENT_SECRET` in addition to the existing token/API-key/password/secret suffixes.
-- Added `runtime/tests/test_validation_ambient_credentials.py` to pin case-insensitive scrubbing of adjacent-provider credentials and generic private/access/client-secret names.
-- Added a non-overreach regression proving ordinary non-secret provider configuration such as `GOOGLE_CLOUD_PROJECT` remains available to deterministic tests.
-- The new regression is automatically owned by the existing bounded `validation harness` selector (`test_validation_*.py`), preserving full-coverage ownership without a new wildcard family.
+- Added an explicit `AWS_EC2_METADATA_DISABLED=true` validation-environment override after credential scrubbing.
+- This keeps AWS-prefixed ambient credentials/profiles removed while making the post-scrub environment fail closed against AWS IMDS credential discovery.
+- Added a regression proving an inherited `AWS_EC2_METADATA_DISABLED=false`, `AWS_PROFILE`, and `AWS_ACCESS_KEY_ID` are replaced/removed correctly while ordinary configuration survives.
+- Preserved loopback networking because several dependency-light HTTP boundary tests intentionally use local servers; this change targets credential discovery rather than indiscriminately disabling sockets.
 - No credentials were read or used; no cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `3786006374ebfea66cda205791265fdef1a92ef1`.
-- Ambient-credential regression committed as `0fc786365ab6cc16b75b4f9d8f2b021c319c8deb`.
-- Static inspection confirms the new test matches the existing validation-harness ownership convention and does not require external services.
+- Runner hardening committed as `6d707935c2400b908bb02c53ce80bf01151a1a20`.
+- Regression committed as `0ac4a57db023419f16e8bf3ce8abaa52c652896a`.
+- Static inspection confirms the override is applied after AWS-prefixed environment scrubbing, so an unsafe inherited `false` value cannot survive.
 - No green execution claim is made because this connector environment still does not expose an executable checkout.
 
 ### Decisions
 
-1. Treat ambient third-party credentials as a validation-integrity risk even when StageGuard does not currently consume that provider; dependency-light tests should not accidentally become live integrations because a developer or CI runner happens to be authenticated.
-2. Keep non-secret provider configuration available rather than blanking all provider-prefixed environment variables indiscriminately.
-3. Preserve the existing isolated HOME/CLOUDSDK_CONFIG and metadata endpoint protections; this change is additive defense-in-depth.
+1. Credential isolation must cover SDK metadata fallback, not only explicit environment/file credentials.
+2. Keep deterministic loopback HTTP tests functional rather than introducing a coarse network ban into the existing validator.
+3. Continue treating dependency-light validation as fail-closed: future provider SDK imports should not silently acquire ambient machine identity.
 
 ### Blockers / unknowns
 
