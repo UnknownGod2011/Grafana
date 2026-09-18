@@ -14,7 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state, fake-cloud durability/restart behavior, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate.
 
 ## Retained validation baseline
 
@@ -25,42 +25,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — Cloud audit filter injection hardening
+## Latest run — 2026-09-18 — fake-cloud durability validation
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected the consolidated validation runner, runtime test inventory, `test_anchored_cloud_audit_reader.py`, `test_durable_audit_reader.py`, and `runtime/durable_audit_reader.py`. The audit reader already bounded filter literals and escaped quotes/backslashes, but raw C0/DEL control characters could still enter Cloud Logging filter text. The existing public-audit validation wildcard already owns audit tests, including the new security regression, so no new validation gate was necessary.
+Read `progress.md` completely first. Inspected the full repository tree, consolidated validation runner, `test_gcs_checkpoint.py`, `test_gcs_multiprocess_cas.py`, and `test_fake_cloud_restart_acceptance.py`. The GCS checkpoint suites implement in-memory generation-aware bucket/blob fakes (including a process-safe fake for CAS races), while fake-cloud restart acceptance patches the production bootstrap constructors to inject fake GCS and Cloud Logging implementations. These tests do not instantiate authenticated Google Cloud clients or require live resources.
 
 ### Changes / actions
 
-- Hardened `_literal()` in `runtime/durable_audit_reader.py` to reject C0 ASCII control characters and DEL before constructing Cloud Logging filter text.
-- Kept quote and backslash escaping for legitimate bounded identifiers.
-- Added `runtime/tests/test_audit_filter_security.py` covering quote/backslash containment, newline/carriage-return/tab/NUL/US/DEL rejection, no-query-on-rejection, and hostile logger-name rejection.
-- Did not broaden live-cloud behavior or instantiate Google Cloud clients; tests use a local fake logger.
+- Added an exact-filename `cloud durability simulation` production-validation gate for `test_gcs_checkpoint.py`, `test_gcs_multiprocess_cas.py`, and `test_fake_cloud_restart_acceptance.py`.
+- Positioned it immediately after durable-state integrity and before operator mutation/remediation/cloud-deployment boundaries.
+- Added `runtime/tests/test_validation_cloud_durability.py` to pin exact ownership, prohibit wildcard expansion, and preserve safety-critical ordering.
+- Deliberately did not admit `test_execution_gcs_multiprocess_cas.py`, `test_execution_reconciliation_gcs_multiprocess_cas.py`, or `scripts/gcs_checkpoint_race_acceptance.py` through this new gate; execution-family ownership remains separate and any genuinely live GCS acceptance remains outside this fake-cloud gate.
 - No credentials, cloud resources, Docker, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Audit reader hardening committed as `df312ee6bcbe69134d91d0b5bc395a588188ba56`.
-- Security regression committed as `445c50544299555891558fc258207532b7b6abfa`.
-- Static inspection confirms rejection happens before `list_entries`, while quotes/backslashes remain escaped inside a single incident literal.
+- Validation runner update committed as `65194442150a9ba1c98587e02d03c3229ad62055`.
+- Gate ownership/order regression committed as `e9be889ac8498b9c5b6eb0ea7e277d4d1c3c8957`.
+- Static inspection confirms the admitted checkpoint tests use local fake buckets/blobs and the restart acceptance patches production constructors before `build_runtime` creates cloud-backed services.
 - The connector environment does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
 
 ### Decisions
 
-1. Reject control characters instead of normalizing them: audit incident/log identifiers are security-sensitive filter operands, not free-form presentation text.
-2. Preserve ordinary spaces and Unicode while rejecting only raw C0/DEL controls, minimizing compatibility impact.
-3. Reuse the existing `public audit` validation ownership rather than adding another overlapping gate.
-4. Keep live Google Cloud acceptance explicitly separate from deterministic fake-logger regression tests.
+1. Treat fake-cloud restart as a production durability contract because it validates the real bootstrap/service lifecycle while replacing network clients at their construction boundary.
+2. Use exact filenames rather than `test_gcs*.py` or `*cloud*` wildcards so future live acceptance cannot silently enter dependency-light validation.
+3. Keep multiprocess fake-storage CAS in the deterministic gate because its shared state is local multiprocessing state, not GCS.
+4. Preserve separate execution-safety ownership for execution/reconciliation GCS-named tests rather than conflating state-store durability with mutation lifecycle behavior.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
-- Remaining unowned tests still need classification, especially fake-cloud restart, GCS/cloud-storage, simulator, and live Gemini acceptance families.
 - Historical full-suite failures/errors still need classification from an executable checkout.
+- Remaining unowned tests need classification, notably simulator and live Gemini acceptance families.
+- The execution-family wildcard should be audited to ensure every GCS-named execution test is also fake-only; if any can instantiate authenticated clients it must be excluded explicitly.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Classify the fake-cloud restart and GCS/cloud-storage durability tests. Admit only in-memory/fake-storage contracts to dependency-light production validation, while keeping anything that can instantiate authenticated Google Cloud clients behind an explicit live acceptance path.
+Audit the two GCS-named execution/reconciliation multiprocess tests currently selected by the broad execution-safety wildcard. Prove they are fake-only and pin them explicitly, or remove them from dependency-light validation if they can instantiate authenticated Google Cloud clients.
