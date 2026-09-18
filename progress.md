@@ -25,34 +25,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — validation full-coverage contract
+## Latest run — 2026-09-18 — ambient credential isolation hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, the complete runtime-test inventory exposed by the repository API, and an existing validation-ownership regression to preserve the repository's test-loading convention.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, `runtime/tests/test_validation_full_coverage.py`, and the repository tree. The validator already scrubbed StageGuard/Grafana/Gemini/Google credentials and common secret suffixes, but still inherited ambient credentials for adjacent developer/CI providers such as GitHub, AWS, Azure, OpenAI, Anthropic, and Hugging Face.
 
 ### Changes / actions
 
-- Audited the current `runtime/tests/test_*.py` inventory against the consolidated validator's gate selectors.
-- Added `runtime/tests/test_validation_full_coverage.py` as a validator-of-the-validator contract.
-- The new regression requires every safe runtime test to have at least one intentional production-validation gate owner, so adding a dependency-light test without classifying it becomes fail-visible immediately.
-- It also requires every declared gate to resolve at least one safe test, preventing stale/renamed patterns from silently turning a safety boundary into an empty gate.
-- It verifies the execution plan de-duplicates overlapping ownership so an intentionally cross-cutting test still runs at most once.
-- The new contract is itself automatically owned by the existing `validation harness` gate through the intentionally bounded `test_validation_*.py` selector.
-- No live/credentialed test was newly admitted merely to satisfy coverage; the coverage contract operates on the runner's existing definition of safe repository-local runtime tests.
-- No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
+- Hardened `scripts/run_stageguard_validation.py` so dependency-light subprocesses also drop environment variables prefixed with `AWS_`, `AZURE_`, `ANTHROPIC_`, `OPENAI_`, `GITHUB_`, `GH_`, `HF_`, and `HUGGINGFACE_`.
+- Expanded generic credential suffix scrubbing to `_ACCESS_KEY`, `_PRIVATE_KEY`, and `_CLIENT_SECRET` in addition to the existing token/API-key/password/secret suffixes.
+- Added `runtime/tests/test_validation_ambient_credentials.py` to pin case-insensitive scrubbing of adjacent-provider credentials and generic private/access/client-secret names.
+- Added a non-overreach regression proving ordinary non-secret provider configuration such as `GOOGLE_CLOUD_PROJECT` remains available to deterministic tests.
+- The new regression is automatically owned by the existing bounded `validation harness` selector (`test_validation_*.py`), preserving full-coverage ownership without a new wildcard family.
+- No credentials were read or used; no cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Repository API inventory was reconciled against the current gate patterns; no currently visible safe runtime test was identified as unowned after applying those selectors.
-- New full-coverage regression committed as `ee4e70227875c7c10955094b8120b903918889d7`.
-- No green execution claim is made because this connector environment does not expose an executable checkout; the new regression and consolidated runner still need repository execution.
+- Runner hardening committed as `3786006374ebfea66cda205791265fdef1a92ef1`.
+- Ambient-credential regression committed as `0fc786365ab6cc16b75b4f9d8f2b021c319c8deb`.
+- Static inspection confirms the new test matches the existing validation-harness ownership convention and does not require external services.
+- No green execution claim is made because this connector environment still does not expose an executable checkout.
 
 ### Decisions
 
-1. Make full ownership a permanent regression rather than relying on occasional manual `--require-full-coverage` audits.
-2. Preserve overlap where it expresses cross-cutting safety ownership, but require the execution plan to run each file once.
-3. Keep genuinely live/credentialed acceptance outside this dependency-light boundary rather than weakening credential isolation to achieve a cosmetic coverage number.
+1. Treat ambient third-party credentials as a validation-integrity risk even when StageGuard does not currently consume that provider; dependency-light tests should not accidentally become live integrations because a developer or CI runner happens to be authenticated.
+2. Keep non-secret provider configuration available rather than blanking all provider-prefixed environment variables indiscriminately.
+3. Preserve the existing isolated HOME/CLOUDSDK_CONFIG and metadata endpoint protections; this change is additive defense-in-depth.
 
 ### Blockers / unknowns
 
@@ -64,4 +63,4 @@ Read `progress.md` completely first, then inspected `scripts/run_stageguard_vali
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout; classify and fix every failure without weakening gate ownership or credential isolation, then use the resulting green dependency-light baseline to resume product-facing hardening.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and fix every concrete failure without weakening credential isolation or gate ownership; once green, resume product-facing hardening from that trustworthy baseline.
