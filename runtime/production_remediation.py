@@ -6,11 +6,19 @@ result metadata. A deployment-specific transport owns credentialed I/O.
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from remediation import ActionResult
+
+_OPERATION_ID_RE = re.compile(r"sg-[0-9a-f]{40}\Z")
+
+
+def _valid_operation_id(operation_id: str) -> bool:
+    """Accept only StageGuard's canonical, non-ambiguous operation identifier."""
+    return bool(_OPERATION_ID_RE.fullmatch(operation_id))
 
 
 @dataclass(frozen=True)
@@ -81,7 +89,7 @@ class AllowlistedProductionRemediationClient:
     def recover_uplink_idempotent(self, production_id: str, uplink: str, operation_id: str) -> ActionResult:
         if production_id != self._production_id or uplink != self._uplink:
             return self._result(False, operation_id, 0, None, "unsupported remediation target")
-        if not operation_id.startswith("sg-") or len(operation_id) != 43:
+        if not _valid_operation_id(operation_id):
             return self._result(False, operation_id, 0, None, "invalid remediation operation identity")
 
         request = RemediationRequest(operation_id, "recover_uplink", self._production_id, self._uplink)
@@ -102,7 +110,7 @@ class AllowlistedProductionRemediationClient:
 
     def reconcile_operation(self, operation_id: str) -> str:
         """Return bounded provider idempotency state without exposing provider detail."""
-        if not operation_id.startswith("sg-") or len(operation_id) != 43:
+        if not _valid_operation_id(operation_id):
             return "unknown"
         reconcile = getattr(self._transport, "reconcile", None)
         if not callable(reconcile):
