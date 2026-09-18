@@ -99,6 +99,27 @@ class AllowlistedProductionRemediationClient:
                 result = self._transport.execute(request, timeout_seconds=self._timeout_seconds)
             except (TimeoutError, OSError):
                 result = TransportResult(False, None, retryable=True)
+            except Exception:
+                # A provider adapter is an external trust boundary. Unexpected
+                # adapter faults must not crash the incident commander or be
+                # interpreted as permission to retry a potentially mutating call.
+                return self._result(
+                    False,
+                    operation_id,
+                    attempt,
+                    last_status,
+                    "production remediation transport fault",
+                )
+            if not isinstance(result, TransportResult):
+                # Reject malformed adapter responses without retrying: execution
+                # may already have occurred, so another write would be unsafe.
+                return self._result(
+                    False,
+                    operation_id,
+                    attempt,
+                    last_status,
+                    "invalid production remediation transport result",
+                )
             last_status = result.status_code
             if result.accepted:
                 return self._result(True, operation_id, attempt, last_status, "production remediation accepted")
