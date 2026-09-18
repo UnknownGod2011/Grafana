@@ -14,7 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state, fake-cloud durability/restart behavior, fake execution/reconciliation CAS concurrency, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate. Execution-safety ownership is exact-filename based so a newly added execution-named test cannot silently enter dependency-light validation.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state, fake-cloud durability/restart behavior, fake execution/reconciliation CAS concurrency, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate. Execution-safety and Cloud Run metrics-bridge ownership are exact-filename based so newly added tests cannot silently enter dependency-light validation.
 
 ## Retained validation baseline
 
@@ -25,42 +25,41 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — exact execution-safety ownership hardening
+## Latest run — 2026-09-18 — Cloud Run metrics-bridge validation ownership
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected the repository tree and consolidated validation runner. Enumerated the current execution-named tests. The general `execution safety` gate still used `test_*execution*.py`, which meant a future test with live network/cloud/remediation behavior could become executable in the dependency-light production validator solely because of its filename.
+Read `progress.md` completely first and inspected the repository tree, consolidated validation runner, existing cloud-runtime-metrics validation contract, and the five previously unowned metrics-bridge hardening suites: audience boundary, timeout/token bounds, inbound bridge authentication, redirect refusal, and sentinel-family validation. The repository inventory confirms these are distinct tests alongside the already-owned bridge and mocked acceptance contracts.
 
 ### Changes / actions
 
-- Replaced the broad `test_*execution*.py` ownership pattern with the exact current set of general execution-safety contracts.
-- Preserved the separately audited GCS multiprocess pair under the earlier `execution concurrency simulation` gate.
-- Preserved `test_api_execution_watchdog.py` under `operator concurrency` and validation contracts under the validation-harness owner.
-- Added `runtime/tests/test_validation_execution_safety_ownership.py` to assert the general execution gate contains no glob metacharacters, every current execution-named test has an intentional explicit execution owner, and the GCS multiprocess pair remains earliest-owned by the simulation gate.
-- This is fail-visible by design: adding a new execution test now leaves it unowned (and visible via `--list`, fatal with `--require-full-coverage`) until a maintainer classifies it instead of silently executing it.
+- Added `test_cloud_run_metrics_bridge_audience_boundary.py`, `test_cloud_run_metrics_bridge_bounds.py`, `test_cloud_run_metrics_bridge_inbound_auth.py`, `test_cloud_run_metrics_bridge_redirects.py`, and `test_cloud_run_metrics_bridge_sentinel_family.py` to the existing `cloud runtime metrics bridge` production-validation gate.
+- Kept the gate exact-filename based; no `test_cloud_run_metrics*.py` wildcard was introduced, so a future credentialed/live test cannot silently enter the dependency-light validator.
+- Strengthened `test_validation_cloud_runtime_metrics.py` to pin the complete seven-file audited set, require wildcard-free patterns, and preserve ordering before runtime observability.
+- Reviewed the hardening contracts: audience tests use injected token suppliers/openers; bounds/auth tests use local loopback servers and mocks; redirect tests use loopback HTTP servers only; sentinel tests are pure payload validation. None require Google credentials, Cloud Run, Grafana, Docker, or a live remediation target.
 - No credentials, Google Cloud resources, Grafana instances, Docker, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Repository tree enumeration identified the complete current execution-named family and was used to construct exact ownership.
-- Validation-runner hardening committed as `a9d85b6cb390b055c97e043991c03ca0bc8c0f46`.
-- Ownership regression committed as `80849a61cc9e19c37245768ca3c2c031a1db4030`.
-- The connector environment does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
+- Repository/test inventory confirmed all five hardening modules exist and were previously outside the exact two-file cloud metrics gate.
+- Metrics validation gate update committed as `652d82c070e8c8119645befc886ac152fc61a49c`.
+- Ownership regression update committed as `4fa4292be027803800fd93e656f072269677d574`.
+- The connector environment still does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
 
 ### Decisions
 
-1. Production validation must not use a filename wildcard at the mutation/execution safety boundary because future test naming is not a security classification.
-2. Existing execution contracts remain selected, but future additions require deliberate ownership review.
-3. Keep the two GCS multiprocess contracts under their previously audited fake-concurrency owner rather than duplicating them in the general execution gate.
+1. Security-sensitive Cloud Run bridge tests are safe for dependency-light validation only after explicit inspection; filename similarity is not sufficient classification.
+2. Keep credentialed/live Cloud Run acceptance outside this gate unless it is separately audited and intentionally owned.
+3. Preserve local loopback HTTP tests because they exercise real request/auth/redirect behavior without external network or cloud dependencies.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- Remaining unowned tests need classification, notably `test_simulator.py`, live Gemini acceptance, and several metrics-bridge hardening tests.
+- Remaining unowned tests need classification, notably `test_simulator.py` and live Gemini acceptance.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Classify the currently unowned dependency-light tests, starting with the Cloud Run metrics-bridge audience/bounds/inbound-auth/redirect/sentinel contracts, and explicitly add the safe deterministic ones to the `cloud runtime metrics bridge` gate without broad wildcards.
+Classify and explicitly own the deterministic telemetry simulator contract (`test_simulator.py`) in production validation, then audit the remaining unowned set so `--require-full-coverage` can become a meaningful local release criterion without admitting credentialed/live acceptance tests.
