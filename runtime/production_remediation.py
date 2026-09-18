@@ -40,14 +40,11 @@ def _valid_transport_result(result: object) -> bool:
     """Validate the provider result at runtime; dataclass annotations are not enforcement."""
     if not isinstance(result, TransportResult):
         return False
-    # bool is a subclass of int, so use exact types at this external trust boundary.
     if type(result.accepted) is not bool or type(result.retryable) is not bool:
         return False
     if result.status_code is not None:
         if type(result.status_code) is not int or not (100 <= result.status_code <= 599):
             return False
-    # An accepted mutation cannot simultaneously request a retry. Treat that
-    # contradictory provider response as execution uncertainty rather than success.
     if result.accepted and result.retryable:
         return False
     return True
@@ -58,18 +55,7 @@ class RemediationTransport(Protocol):
 
 
 class AllowlistedProductionRemediationClient:
-    """One-action, one-target production remediation adapter.
-
-    No URL, action, or target can be supplied by an incident/API caller. The
-    deployment injects a transport already bound to its credential and endpoint.
-    Retries are bounded and always reuse the same operation identity.
-
-    Production execution uncertainty is fail-closed: this adapter declares that
-    provider-side operation reconciliation is required. A custom transport may
-    expose ``reconcile(operation_id, timeout_seconds=...)`` returning one of
-    ``accepted``, ``not_found`` or ``unknown``. Without that capability the state
-    remains ``unknown`` and StageGuard will not clear an uncertain execution.
-    """
+    """One-action, one-target production remediation adapter."""
 
     requires_operation_reconciliation = True
 
@@ -105,9 +91,11 @@ class AllowlistedProductionRemediationClient:
 
     def recover_uplink_idempotent(self, production_id: str, uplink: str, operation_id: str) -> ActionResult:
         if production_id != self._production_id or uplink != self._uplink:
-            return self._result(False, operation_id, 0, None, "unsupported remediation target")
+            return self._result(False, operation_id if _valid_operation_id(operation_id) else "", 0, None, "unsupported remediation target")
         if not _valid_operation_id(operation_id):
-            return self._result(False, operation_id, 0, None, "invalid remediation operation identity")
+            # Do not reflect arbitrary caller objects into action metadata. Besides
+            # limiting untrusted data propagation, this keeps API serialization safe.
+            return self._result(False, "", 0, None, "invalid remediation operation identity")
 
         request = RemediationRequest(operation_id, "recover_uplink", self._production_id, self._uplink)
         last_status: int | None = None
