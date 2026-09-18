@@ -14,7 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state, fake-cloud durability/restart behavior, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates durable state, fake-cloud durability/restart behavior, fake execution/reconciliation CAS concurrency, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate.
 
 ## Retained validation baseline
 
@@ -25,43 +25,44 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — fake-cloud durability validation
+## Latest run — 2026-09-18 — fake execution concurrency validation audit
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected the full repository tree, consolidated validation runner, `test_gcs_checkpoint.py`, `test_gcs_multiprocess_cas.py`, and `test_fake_cloud_restart_acceptance.py`. The GCS checkpoint suites implement in-memory generation-aware bucket/blob fakes (including a process-safe fake for CAS races), while fake-cloud restart acceptance patches the production bootstrap constructors to inject fake GCS and Cloud Logging implementations. These tests do not instantiate authenticated Google Cloud clients or require live resources.
+Read `progress.md` completely first. Inspected the repository metadata/tree, consolidated validation runner, `test_execution_gcs_multiprocess_cas.py`, and `test_execution_reconciliation_gcs_multiprocess_cas.py`. Both GCS-named execution tests construct `GoogleCloudStorageCheckpointStore` only with the process-safe `SharedBucket` fake imported from `test_gcs_multiprocess_cas`; neither creates an authenticated Google Cloud client. Their remediation providers are local test doubles and their Grafana/Prometheus evidence sources are deterministic in-process fakes.
 
 ### Changes / actions
 
-- Added an exact-filename `cloud durability simulation` production-validation gate for `test_gcs_checkpoint.py`, `test_gcs_multiprocess_cas.py`, and `test_fake_cloud_restart_acceptance.py`.
-- Positioned it immediately after durable-state integrity and before operator mutation/remediation/cloud-deployment boundaries.
-- Added `runtime/tests/test_validation_cloud_durability.py` to pin exact ownership, prohibit wildcard expansion, and preserve safety-critical ordering.
-- Deliberately did not admit `test_execution_gcs_multiprocess_cas.py`, `test_execution_reconciliation_gcs_multiprocess_cas.py`, or `scripts/gcs_checkpoint_race_acceptance.py` through this new gate; execution-family ownership remains separate and any genuinely live GCS acceptance remains outside this fake-cloud gate.
-- No credentials, cloud resources, Docker, remediation targets, GitHub Actions, or unrelated repositories were touched.
+- Added an exact-filename `execution concurrency simulation` production-validation gate for `test_execution_gcs_multiprocess_cas.py` and `test_execution_reconciliation_gcs_multiprocess_cas.py`.
+- Positioned the explicit gate before the broad `execution safety` gate. The existing de-duplication contract therefore executes these two files under the explicit fake-concurrency owner and reports them as already covered when the broad wildcard is evaluated.
+- Added `runtime/tests/test_validation_execution_concurrency.py` to pin exact ownership, reject wildcard expansion in this gate, assert earliest-owner execution semantics, and preserve ordering after durability/remediation boundaries and before general execution safety.
+- Kept the broad execution-safety family for the remaining execution contracts; this change specifically removes ambiguity about the two GCS-named multiprocess tests without weakening existing coverage.
+- No credentials, Google Cloud resources, Grafana instances, Docker, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validation runner update committed as `65194442150a9ba1c98587e02d03c3229ad62055`.
-- Gate ownership/order regression committed as `e9be889ac8498b9c5b6eb0ea7e277d4d1c3c8957`.
-- Static inspection confirms the admitted checkpoint tests use local fake buckets/blobs and the restart acceptance patches production constructors before `build_runtime` creates cloud-backed services.
+- Static inspection proves both admitted tests use local multiprocessing state (`Manager` dictionaries/lists, locks, barriers, queues/events) and the `SharedBucket` fake rather than authenticated GCS.
+- Static inspection also confirms remediation is represented by `SharedCountingRemediation` / `ReconciliationOnlyRemediation`; reconciliation explicitly asserts that remediation execution must never occur.
+- Validation-runner update committed as `f9ed3dbc5bb8b67b992418600462a2a74cdae0c6`.
+- Ownership/order regression committed as `4308cd61924b1d94b84442712639debaf54efb8e`.
 - The connector environment does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
 
 ### Decisions
 
-1. Treat fake-cloud restart as a production durability contract because it validates the real bootstrap/service lifecycle while replacing network clients at their construction boundary.
-2. Use exact filenames rather than `test_gcs*.py` or `*cloud*` wildcards so future live acceptance cannot silently enter dependency-light validation.
-3. Keep multiprocess fake-storage CAS in the deterministic gate because its shared state is local multiprocessing state, not GCS.
-4. Preserve separate execution-safety ownership for execution/reconciliation GCS-named tests rather than conflating state-store durability with mutation lifecycle behavior.
+1. Keep these multiprocess contracts in dependency-light production validation because all storage/provider/evidence dependencies are local fakes despite the GCS-oriented class under test.
+2. Give them an exact explicit owner rather than relying solely on `test_*execution*.py`; this makes their fake-only security classification reviewable and prevents a future similarly named live test from being mistaken for the audited pair.
+3. Preserve the broad execution gate for other execution tests and rely on deterministic earliest-owner de-duplication for the audited pair.
+4. Do not classify `scripts/gcs_checkpoint_race_acceptance.py` as dependency-light without a separate audit; it remains outside this gate.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Remaining unowned tests need classification, notably simulator and live Gemini acceptance families.
-- The execution-family wildcard should be audited to ensure every GCS-named execution test is also fake-only; if any can instantiate authenticated clients it must be excluded explicitly.
+- The rest of the broad `test_*execution*.py` selection still merits a credential/network-construction audit; only the two GCS-named multiprocess contracts were proven fake-only in this run.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Audit the two GCS-named execution/reconciliation multiprocess tests currently selected by the broad execution-safety wildcard. Prove they are fake-only and pin them explicitly, or remove them from dependency-light validation if they can instantiate authenticated Google Cloud clients.
+Audit every remaining file selected by the broad `test_*execution*.py` production-validation pattern for network/client construction and mutation side effects, then replace broad ownership with explicit safety-classified groups where that materially reduces the risk of future live tests silently entering dependency-light validation.
