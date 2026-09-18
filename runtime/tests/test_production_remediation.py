@@ -170,6 +170,38 @@ class ProductionRemediationTests(unittest.TestCase):
         self.assertEqual([1.5, 1.5], transport.timeouts)
         self.assertEqual(2, result.metadata["attempt_count"])
 
+    def test_unexpected_transport_fault_fails_closed_without_retry(self):
+        transport = SequenceTransport([RuntimeError("provider SDK bug")])
+        client = AllowlistedProductionRemediationClient(
+            transport,
+            allowed_production_id="broadcast-alpha",
+            allowed_uplink="uplink-b",
+            max_attempts=3,
+            retry_delay_seconds=0,
+            sleep=lambda _: None,
+        )
+        result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", "sg-" + "c" * 40)
+        self.assertFalse(result.accepted)
+        self.assertEqual("production remediation transport fault", result.detail)
+        self.assertEqual(1, result.metadata["attempt_count"])
+        self.assertEqual(1, len(transport.requests))
+
+    def test_malformed_transport_result_fails_closed_without_retry(self):
+        transport = SequenceTransport([{"accepted": True}])
+        client = AllowlistedProductionRemediationClient(
+            transport,
+            allowed_production_id="broadcast-alpha",
+            allowed_uplink="uplink-b",
+            max_attempts=3,
+            retry_delay_seconds=0,
+            sleep=lambda _: None,
+        )
+        result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", "sg-" + "d" * 40)
+        self.assertFalse(result.accepted)
+        self.assertEqual("invalid production remediation transport result", result.detail)
+        self.assertEqual(1, result.metadata["attempt_count"])
+        self.assertEqual(1, len(transport.requests))
+
     def test_construction_rejects_unbounded_policy(self):
         transport = SequenceTransport([])
         with self.assertRaises(ValueError):
