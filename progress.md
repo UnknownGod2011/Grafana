@@ -25,32 +25,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — generic credential suffix isolation hardening
+## Latest run — 2026-09-18 — ambient credential-helper isolation hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, the runtime test inventory, and `runtime/tests/test_stageguard_validation_runner.py`. The dependency-light validator already removed provider-specific credential namespaces, generic token/API-key/password/secret/access-key/private-key/client-secret suffixes, Google ADC locations, proxy credentials, Python injection controls, and AWS/GCE metadata credential fallback. A remaining generic gap was environment variables conventionally named `*_AUTH_TOKEN`, `*_BEARER_TOKEN`, `*_CREDENTIAL`, or `*_CREDENTIALS` for providers not yet known to StageGuard.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The validator already stripped provider credential namespaces, generic secret suffixes, proxies, Python injection controls, Google ADC paths, and AWS/GCE metadata fallback. A remaining escape hatch was inherited credential/config helper channels such as SSH agent sockets, Git/SSH askpass helpers, `.netrc`, Docker config, and kubeconfig.
 
 ### Changes / actions
 
-- Extended generic case-insensitive credential suffix matching to `_AUTH_TOKEN`, `_BEARER_TOKEN`, `_CREDENTIAL`, and `_CREDENTIALS`.
-- Added `runtime/tests/test_validation_credential_suffixes.py` to pin those classifications and verify sanitization removes those secret-bearing values.
-- Added a non-overmatching regression proving configuration such as `MEDIA_CREDENTIAL_MODE` and `STAGEGUARD_REGION` survives sanitization.
-- The new test is automatically owned by the intentionally bounded `test_validation_*.py` validation-harness gate.
+- Added `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH`, `GIT_SSH_COMMAND`, `NETRC`, `DOCKER_CONFIG`, and `KUBECONFIG` to the exact sensitive-environment denylist.
+- Added `GIT_TERMINAL_PROMPT=0` as a forced validation override so a transitive Git invocation cannot fall back to an interactive credential prompt.
+- Added `runtime/tests/test_validation_credential_helpers.py` covering helper/config removal, case-insensitive classification, preservation of ordinary configuration, and the forced non-interactive Git setting.
+- The new regression is automatically owned by the intentionally bounded `test_validation_*.py` validation-harness gate.
 - No credentials were read or used; no cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `5b48c8f3865f23e6485aba773934f263c8b69d3c`.
-- Regression committed as `77a813526d795b9513e53ba8832f302030516a0d`.
-- Static inspection confirms matching remains suffix-bounded rather than substring-based, avoiding removal of ordinary variables merely containing the word `credential`.
+- Runner hardening committed as `b040e6a7b97e40b4dfe872e3194cf9e35ba1e3ca`.
+- Regression committed as `5aac59aaffb1c86a7568b976d38c097431e77807`.
+- Static inspection confirms the added channels are exact-name, case-insensitive matches and therefore do not broadly remove unrelated variables.
 - No green execution claim is made because this connector environment still does not expose an executable checkout.
 
 ### Decisions
 
-1. Dependency-light validation should fail closed for conventional secret-bearing environment names even when a future integration/provider is not yet enumerated explicitly.
-2. Generic matching remains suffix-based to reduce false positives against ordinary non-secret configuration.
-3. Provider-specific prefixes remain useful defense in depth because they also remove provider profile/config variables that may indirectly resolve credentials.
+1. Dependency-light validation must not inherit credential agents or external client configuration merely because no literal secret exists in the environment.
+2. Loopback networking remains available because several dependency-light HTTP boundary tests require local servers; credential discovery is blocked without pretending the runner is a network sandbox.
+3. Git terminal prompting is forced off independently of inherited values to preserve non-interactive behavior.
 
 ### Blockers / unknowns
 
