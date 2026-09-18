@@ -26,6 +26,10 @@ class ValidationCredentialHelperIsolationTests(unittest.TestCase):
             "NETRC": "/home/user/.netrc",
             "DOCKER_CONFIG": "/home/user/.docker",
             "KUBECONFIG": "/home/user/.kube/config",
+            "XDG_CONFIG_HOME": "/home/user/.config",
+            "XDG_DATA_HOME": "/home/user/.local/share",
+            "APPDATA": "C:/Users/user/AppData/Roaming",
+            "LOCALAPPDATA": "C:/Users/user/AppData/Local",
             "ORDINARY_SETTING": "safe",
         }
         sanitized = runner._validation_env(source)
@@ -34,12 +38,31 @@ class ValidationCredentialHelperIsolationTests(unittest.TestCase):
                 self.assertNotIn(name, sanitized)
         self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
+    def test_isolated_home_rehomes_cross_platform_config_roots(self):
+        source = {
+            "HOME": "/home/real-user",
+            "USERPROFILE": "C:/Users/real-user",
+            "XDG_CONFIG_HOME": "/home/real-user/.config",
+            "XDG_DATA_HOME": "/home/real-user/.local/share",
+            "APPDATA": "C:/Users/real-user/AppData/Roaming",
+            "LOCALAPPDATA": "C:/Users/real-user/AppData/Local",
+        }
+        isolated = "/tmp/stageguard-validation-test"
+        sanitized = runner._validation_env(source, isolated_home=isolated)
+        self.assertEqual(sanitized["HOME"], isolated)
+        self.assertEqual(sanitized["USERPROFILE"], isolated)
+        self.assertEqual(sanitized["XDG_CONFIG_HOME"], str(Path(isolated) / ".config"))
+        self.assertEqual(sanitized["XDG_DATA_HOME"], str(Path(isolated) / ".local" / "share"))
+        self.assertEqual(sanitized["APPDATA"], str(Path(isolated) / "AppData" / "Roaming"))
+        self.assertEqual(sanitized["LOCALAPPDATA"], str(Path(isolated) / "AppData" / "Local"))
+        self.assertEqual(sanitized["CLOUDSDK_CONFIG"], str(Path(isolated) / ".config" / "gcloud"))
+
     def test_git_cannot_fall_back_to_interactive_terminal_prompt(self):
         sanitized = runner._validation_env({"PATH": "/usr/bin", "GIT_TERMINAL_PROMPT": "1"})
         self.assertEqual(sanitized["GIT_TERMINAL_PROMPT"], "0")
 
     def test_matching_is_case_insensitive_for_helper_channels(self):
-        for name in ("ssh_auth_sock", "Git_AskPass", "netrc", "Docker_Config", "KubeConfig"):
+        for name in ("ssh_auth_sock", "Git_AskPass", "netrc", "Docker_Config", "KubeConfig", "xdg_config_home", "AppData", "localappdata"):
             with self.subTest(name=name):
                 self.assertTrue(runner._is_sensitive_env_name(name))
 
