@@ -36,6 +36,23 @@ class TransportResult:
     retryable: bool = False
 
 
+def _valid_transport_result(result: object) -> bool:
+    """Validate the provider result at runtime; dataclass annotations are not enforcement."""
+    if not isinstance(result, TransportResult):
+        return False
+    # bool is a subclass of int, so use exact types at this external trust boundary.
+    if type(result.accepted) is not bool or type(result.retryable) is not bool:
+        return False
+    if result.status_code is not None:
+        if type(result.status_code) is not int or not (100 <= result.status_code <= 599):
+            return False
+    # An accepted mutation cannot simultaneously request a retry. Treat that
+    # contradictory provider response as execution uncertainty rather than success.
+    if result.accepted and result.retryable:
+        return False
+    return True
+
+
 class RemediationTransport(Protocol):
     def execute(self, request: RemediationRequest, *, timeout_seconds: float) -> TransportResult: ...
 
@@ -110,9 +127,9 @@ class AllowlistedProductionRemediationClient:
                     last_status,
                     "production remediation transport fault",
                 )
-            if not isinstance(result, TransportResult):
-                # Reject malformed adapter responses without retrying: execution
-                # may already have occurred, so another write would be unsafe.
+            if not _valid_transport_result(result):
+                # Reject malformed/contradictory adapter responses without retrying:
+                # execution may already have occurred, so another write is unsafe.
                 return self._result(
                     False,
                     operation_id,
