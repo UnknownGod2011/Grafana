@@ -33,6 +33,7 @@ GATES=(
  Gate("cloud runtime metrics bridge",("test_cloud_run_metrics_bridge.py","test_cloud_run_metrics_acceptance.py")),
  Gate("runtime observability",("test_grafana_runtime_observability.py","test_recovery_observability.py","test_watchdog_*.py","test_observability_image_pins.py")),
  Gate("timeline disclosure",("test_timeline*.py","test_audit_timeline*.py")), Gate("public audit",("test_*audit*.py",)),
+ Gate("execution concurrency simulation",("test_execution_gcs_multiprocess_cas.py","test_execution_reconciliation_gcs_multiprocess_cas.py")),
  Gate("execution safety",("test_*execution*.py","test_local_execution_uncertainty_barrier.py")), Gate("Grafana MCP",("test_*mcp*.py",)),)
 def _safe_test_file(path):
  try:return path.parent.resolve(strict=True)==TESTS.resolve(strict=True) and not path.is_symlink() and path.is_file()
