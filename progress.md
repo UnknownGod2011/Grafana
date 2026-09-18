@@ -14,7 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
-- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates the deterministic telemetry simulator before evidence consumers, durable state, fake-cloud durability/restart behavior, fake execution/reconciliation CAS concurrency, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, and runtime-observability contracts, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate. Execution-safety, telemetry-simulator, and Cloud Run metrics-bridge ownership are exact-filename based so newly added tests cannot silently enter dependency-light validation.
+- Consolidated validation resolves only direct non-symlink files under `runtime/tests`, fails closed on empty gates, is non-interactive and timeout-bounded, scrubs live credentials/proxies/Python injection controls, isolates Google ADC/gcloud homes and metadata identity, validates the deterministic telemetry simulator before evidence consumers, durable state, fake-cloud durability/restart behavior, fake execution/reconciliation CAS concurrency, retention safety, evidence/diagnosis, operator readiness/UI, remediation, deterministic Cloud Run deployment and GCP deployment readiness, cloud runtime metrics bridging, runtime-observability contracts, restart/recovery and crash-reconciliation safety, executes overlapping selections once under their earliest owner, classifies subprocess launch failures as validation failures, and can audit/fail closed on safe runtime tests that are not owned by any production gate. Execution-safety, telemetry-simulator, and Cloud Run metrics-bridge ownership use exact admission for sensitive additions so newly added tests cannot silently enter dependency-light validation.
 
 ## Retained validation baseline
 
@@ -25,32 +25,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-18 — deterministic telemetry simulator validation ownership
+## Latest run — 2026-09-18 — restart/recovery validation classification
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the repository metadata, `runtime/tests` inventory, `runtime/tests/test_simulator.py`, and `scripts/run_stageguard_validation.py`. The simulator contract imports only the repository-local simulator module and exercises in-memory `SimulationState` fixtures; it does not require Docker, Grafana, Google Cloud, credentials, external networking, or remediation access.
+Read `progress.md` completely first, then inspected the consolidated validation runner and the current `runtime/tests` inventory. Focused inspection covered `test_recovery_recheck_restart.py`, `test_transition_failure_snapshot_authority.py`, and `test_subprocess_crash_recovery.py`, which were safe runtime contracts not explicitly admitted by their intended production gates.
 
 ### Changes / actions
 
-- Added an exact-filename `telemetry simulator` gate owning only `test_simulator.py`.
-- Positioned the gate immediately after runtime activation and before evidence/diagnosis consumers so deterministic source telemetry is validated before downstream interpretation contracts.
-- Added `test_validation_telemetry_simulator.py` to pin exact ownership, prohibit wildcard selectors for this gate, enforce ordering before evidence consumers, and ensure `test_simulator.py` has exactly one owner.
-- Kept live/credentialed acceptance outside dependency-light validation.
+- Added `test_recovery_recheck_restart.py` and `test_transition_failure_snapshot_authority.py` explicitly to the incident-lifecycle gate.
+- Added `test_subprocess_crash_recovery.py` explicitly to execution safety. It uses local multiprocessing, temporary files, POSIX SIGKILL fault injection, fake metrics, and reconciliation-only remediation; it does not contact a provider or cloud service.
+- Added `test_validation_restart_recovery_ownership.py` to pin these ownership decisions and prevent replacing them with broad restart/crash wildcards.
 - No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Manual contract inspection confirmed `test_simulator.py` is deterministic and dependency-light: it validates the fault fixture's four evidence classes, healthy packet-loss/fault state, and replayable reset behavior using only in-memory state.
-- Validation runner update committed as `56c8a0fa229a29b35d26ffb8ab5aef59681cf186`.
-- Ownership regression committed as `7a5589a15ede517ceed31eb9088af659691051d9`.
+- Manual inspection confirmed the restart recheck contract restores a local JSON checkpoint and proves recovery verification cannot replay remediation after restart.
+- Manual inspection confirmed transition-failure snapshot tests use in-memory audit/remediation and an injected failing checkpoint store to prove uncommitted approval/outcome state is not published.
+- Manual inspection confirmed subprocess crash recovery uses temporary local checkpoint/call-log files and a spawned child killed at controlled side-effect boundaries, then verifies reconciliation without remediation replay.
+- Validation runner update committed as `f4d7d4ea1d8cbf1d8e445549403263e37ad9dc01`.
+- Ownership regression committed as `6383944eafeb85b4c048ff7e99f742acc1ecbfec`.
 - The connector environment does not expose an executable checkout, so no new green-test claim is made and CI was intentionally not triggered as a substitute.
 
 ### Decisions
 
-1. The telemetry generator is part of the production validation chain because downstream Grafana/evidence tests are only meaningful if the deterministic source fixture itself remains stable.
-2. Use exact ownership for the simulator rather than a broad simulator wildcard; future simulator tests must be inspected before admission.
-3. Keep the simulator gate before evidence consumers to make validation output reflect the data-flow dependency.
+1. Restart recovery and persistence-failure authority are production lifecycle safety contracts and belong in dependency-light validation.
+2. Hard-crash reconciliation belongs in execution safety because it proves at-most-once provider dispatch across process death.
+3. Admit these tests by exact filename rather than broad restart/crash selectors so future integration tests require inspection before entry.
 
 ### Blockers / unknowns
 
@@ -63,4 +64,4 @@ Read `progress.md` completely first, then inspected the repository metadata, `ru
 
 ## Single best next step
 
-Audit the remaining unowned safe runtime-test inventory and explicitly classify each dependency-light contract versus intentionally live/credentialed acceptance; then add a regression that pins the intentional exclusion set so `--require-full-coverage` can become a meaningful local release criterion without accidentally pulling live integrations into validation.
+Continue the unowned-test audit, beginning with any remaining safe files not selected by `GATES`; explicitly classify dependency-light tests while creating a pinned intentional-exclusion set for genuinely credentialed/live acceptance, then make `--require-full-coverage` distinguish safe exclusions from accidental omissions.
