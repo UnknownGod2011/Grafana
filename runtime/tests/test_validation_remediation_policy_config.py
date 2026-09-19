@@ -31,11 +31,7 @@ class ProductionRemediationPolicyConfigTests(unittest.TestCase):
         for transport in (None, object(), type("BadTransport", (), {"execute": None})()):
             with self.subTest(transport=repr(transport)):
                 with self.assertRaises(ValueError):
-                    AllowlistedProductionRemediationClient(
-                        transport,
-                        allowed_production_id="broadcast-alpha",
-                        allowed_uplink="uplink-b",
-                    )
+                    AllowlistedProductionRemediationClient(transport, allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
 
     def test_allowlist_identity_requires_canonical_bounded_strings(self):
         for production_id, uplink in (
@@ -88,7 +84,7 @@ class ProductionRemediationPolicyConfigTests(unittest.TestCase):
         )
         result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", "sg-" + "a" * 40)
 
-        self.assertFalse(result.success)
+        self.assertFalse(result.accepted)
         self.assertEqual(transport.calls, 1)
         self.assertEqual(result.detail, "production remediation retry scheduling fault")
         self.assertEqual(result.metadata["attempt_count"], 1)
