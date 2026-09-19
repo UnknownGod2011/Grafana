@@ -26,32 +26,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation shell-startup isolation
+## Latest run — 2026-09-19 — language-runtime injection isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, and dynamic-loader controls. A remaining process-injection path existed for shell helpers: caller-supplied `BASH_ENV`, POSIX `ENV`, or zsh `ZDOTDIR` could point shell subprocesses at host-controlled startup code/configuration even though StageGuard's Python process itself was isolated.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, dynamic-loader controls, and shell startup hooks. A remaining process-injection class existed for non-Python language runtimes that validation or test helpers may invoke indirectly: Node, Ruby, Perl, and JVM startup environment controls could still inject modules/options/agents or caller-controlled search paths.
 
 ### Changes / actions
 
-- Added `BASH_ENV`, `ENV`, and `ZDOTDIR` to the case-insensitive validation environment denylist.
-- Added regression coverage for canonical, lowercase, and mixed-case forms of all three shell-startup controls.
-- Regression verifies the caller-selected startup path is absent while an ordinary environment setting remains intact.
-- Kept the change inside the existing dependency-light validation harness; no workflow, live service, or infrastructure path was modified.
+- Added `NODE_OPTIONS` and `NODE_PATH` to the validation environment denylist.
+- Added `RUBYOPT` and `RUBYLIB` to the denylist.
+- Added `PERL5OPT` and `PERL5LIB` to the denylist.
+- Added `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, and `CLASSPATH` to the denylist.
+- Added regression coverage for canonical, lowercase, and mixed-case forms of every new runtime-injection control while verifying ordinary settings survive sanitization.
+- Kept the change dependency-light and local to the validation trust boundary; no workflow, live service, or infrastructure path was modified.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `1f74eaef3ffecc6bd7e0d9de699efecce676248e`.
-- Regression coverage committed as `e9b4793ae7df562b1c5e81d914e61d74f4ef7202`.
-- Static inspection confirms shell-startup variables are rejected case-insensitively by `_is_sensitive_env_name()` before validation child environments are constructed.
+- Runner hardening committed as `b9549918b949f281225b08ecf4abc869609a74c4`.
+- Regression coverage committed as `1094c5b49e3b3bb02017ac1c68239c14eb2d6dce`.
+- Static inspection confirms all nine controls are matched case-insensitively by `_is_sensitive_env_name()` and removed before validation child environments are constructed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Shell startup-file controls are part of the validation trust boundary because repository tests can invoke shell helpers, and startup hooks execute before the intended shell command.
-2. The sanitizer removes only caller-provided startup redirection; it does not alter normal system shell installation or PATH behavior.
-3. `PATH` remains preserved for now because tests legitimately resolve system tools; replacing it requires a cross-platform executable allowlist rather than an unsafe ad-hoc value.
+1. Language-runtime startup controls belong to the validation trust boundary because repository tests can invoke heterogeneous tooling indirectly, and these variables act before application-level safety checks.
+2. The sanitizer blocks targeted code/module/classpath injection controls without removing the executables themselves, preserving legitimate dependency-light tool discovery.
+3. `PATH` remains preserved because tests legitimately resolve system tools; replacing it safely still requires a cross-platform executable allowlist rather than an ad-hoc path.
 
 ### Blockers / unknowns
 
