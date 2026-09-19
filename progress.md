@@ -26,30 +26,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — .NET runtime injection isolation
+## Latest run — 2026-09-20 — Go/Rust toolchain isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, dynamic-loader controls, shell startup hooks, and Node/Ruby/Perl/JVM startup controls. A remaining startup-code injection class existed for .NET tooling invoked directly or indirectly by repository tests.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the top-level README/status. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, dynamic-loader controls, shell startup hooks, and Python/Node/Ruby/Perl/JVM/.NET startup controls. A remaining toolchain injection class existed for Go and Rust tooling invoked directly or indirectly by repository tests.
 
 ### Changes / actions
 
-- Added `DOTNET_STARTUP_HOOKS`, `DOTNET_ADDITIONAL_DEPS`, and `DOTNET_SHARED_STORE` to the validation environment denylist.
-- Added `CORECLR_PROFILER`, `CORECLR_PROFILER_PATH`, and `CORECLR_ENABLE_PROFILING` to prevent inherited profiler-based native code loading.
-- Added regression coverage for canonical, lowercase, and mixed-case forms of all six .NET/CoreCLR controls while verifying ordinary settings survive sanitization.
-- Kept the change local to the validation trust boundary; no workflow, live service, cloud resource, Docker environment, or remediation target was touched.
+- Added `GOENV`, `GOFLAGS`, `GOTOOLCHAIN`, and `GOWORK` to the validation denylist so a caller cannot redirect Go environment/workspace/toolchain behavior inside validation children.
+- Added `CARGO_HOME`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS`, and `RUSTDOCFLAGS` so Cargo/rustc cannot inherit caller-selected config roots, executable wrappers, or compiler/doc flags.
+- Added regression coverage for canonical, lowercase, and mixed-case forms of all nine controls while verifying ordinary settings survive sanitization.
+- Kept filtering targeted instead of broadly deleting every `GO*`, `RUST*`, or `CARGO*` variable, minimizing accidental disruption of benign cross-platform test configuration.
+- No workflow, live service, cloud resource, Docker environment, Grafana instance, or remediation target was touched.
 
 ### Checks / results
 
-- Runner hardening committed as `e5097fca78ecfc1e17316ff3faebfe417246f325`.
-- Regression coverage committed as `d14e4433bc886958423fd1995c7a413d37c8d190`.
-- Static inspection confirms all six controls are matched case-insensitively by `_is_sensitive_env_name()` and removed before validation child environments are constructed.
+- Runner hardening committed as `66f9468794cf17e5e83e127dffa204dfbbf225d9`.
+- Regression coverage committed as `50a7ff05aa5baba5cfc718b1e4f401d5aa6550f6`.
+- Static inspection confirms the nine controls are matched case-insensitively by `_is_sensitive_env_name()` and removed before validation child environments are constructed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. .NET startup hooks/dependency stores and CoreCLR profiler controls belong to the same validation trust boundary as the already-blocked JVM/Node/Ruby/Perl startup controls because they can cause code to load before intended validation logic.
-2. The sanitizer remains targeted rather than deleting all `DOTNET_*`/`CORECLR_*` variables, avoiding unnecessary disruption of benign runtime configuration.
+1. Go workspace/env/toolchain selectors and Rust executable-wrapper/config controls belong inside the validation trust boundary because subprocess tests may invoke these toolchains even though StageGuard's core runtime is Python.
+2. The sanitizer remains explicit and auditable rather than adopting broad language-prefix deletion that could break legitimate test behavior.
 3. `PATH` remains preserved because tests legitimately resolve system tools; replacing it safely requires a cross-platform executable allowlist rather than an ad-hoc path.
 
 ### Blockers / unknowns
