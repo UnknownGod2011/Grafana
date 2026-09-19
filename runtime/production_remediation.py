@@ -53,8 +53,13 @@ class TransportResult:
 
 
 def _valid_transport_result(result: object) -> bool:
-    """Validate the provider result at runtime; dataclass annotations are not enforcement."""
-    if not isinstance(result, TransportResult):
+    """Validate the exact provider-result contract at runtime.
+
+    Provider transports are an external trust boundary. Accepting subclasses here
+    would allow an adapter to override field access with descriptors/properties and
+    run provider-controlled code while StageGuard is validating a mutation result.
+    """
+    if type(result) is not TransportResult:
         return False
     if type(result.accepted) is not bool or type(result.retryable) is not bool:
         return False
