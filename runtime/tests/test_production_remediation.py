@@ -214,6 +214,28 @@ class ProductionRemediationTests(unittest.TestCase):
                 self.assertIsNone(result.metadata["transport_status"])
                 self.assertEqual(1, len(transport.requests))
 
+    def test_transport_result_subclass_is_rejected_without_retry(self):
+        class ProviderControlledResult(TransportResult):
+            pass
+
+        transport = SequenceTransport([ProviderControlledResult(True, 202, False)])
+        client = AllowlistedProductionRemediationClient(
+            transport,
+            allowed_production_id="broadcast-alpha",
+            allowed_uplink="uplink-b",
+            max_attempts=3,
+            retry_delay_seconds=0,
+            sleep=lambda _: None,
+        )
+        result = client.recover_uplink_idempotent(
+            "broadcast-alpha", "uplink-b", "sg-" + "e" * 40
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual("invalid production remediation transport result", result.detail)
+        self.assertEqual(1, result.metadata["attempt_count"])
+        self.assertIsNone(result.metadata["transport_status"])
+        self.assertEqual(1, len(transport.requests))
+
     def test_construction_rejects_unbounded_policy(self):
         transport = SequenceTransport([])
         with self.assertRaises(ValueError):
