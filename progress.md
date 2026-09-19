@@ -26,33 +26,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation home credential-discovery isolation
+## Latest run — 2026-09-19 — validation Git configuration isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The prior run correctly scrubbed ambient `CLOUDSDK_CONFIG`, but helper-level `_validation_env()` calls without `isolated_home` still preserved `HOME` and `USERPROFILE`. That leaves default per-user credential/config discovery reachable to SDKs that fall back to the user's home directory even after explicit credential variables and Cloud SDK configuration are removed. The production `main()` path was already safer because it replaces those homes with a temporary directory.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and `runtime/tests/test_stageguard_validation_runner.py`. Home, Cloud SDK, proxy, SSH-agent, askpass, and common cloud credential channels were already isolated. One remaining process-level configuration channel was ambient Git configuration: Git supports `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`, which can inject credential helpers, authorization headers, URL rewrites, or other host-controlled behavior into child Git invocations even with an isolated HOME.
 
 ### Changes / actions
 
-- Added `HOME` and `USERPROFILE` to the exact sensitive-environment denylist.
-- Preserved production behavior: supplying `isolated_home` still reinstalls only temporary `HOME`, `USERPROFILE`, XDG/AppData roots, and `CLOUDSDK_CONFIG` after ambient values are scrubbed.
-- Added `runtime/tests/test_validation_home_isolation.py`, automatically owned by the existing `validation harness` gate via `test_validation_*.py`.
-- Added regressions proving helper-level validation drops HOME/USERPROFILE plus other credential-discovery roots, matching is case-insensitive, and isolated execution reinstalls only ephemeral roots.
+- Added the case-insensitive `GIT_CONFIG_` family to the validation environment denylist.
+- This covers global/system config redirects and Git's environment-provided key/value configuration injection without changing ordinary `PATH` or the runner's deliberate `GIT_TERMINAL_PROMPT=0` safety override.
+- Extended `runtime/tests/test_validation_home_isolation.py` with regressions for global/system config, credential-helper injection, authorization-header injection, and mixed-case environment names.
+- Kept the tests under the existing `validation harness` ownership pattern; no CI workflow was added or triggered.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validation-runner hardening committed as `3be59f9ff22301a4b986d940523bc8d3eca62726`.
-- Regression coverage committed as `4836d13639c1eff803766ddc5d8cc4171e667bf6`.
-- Static inspection confirms ambient home roots are removed before optional isolated-home overrides are installed.
+- Runner hardening committed as `3b3293a7982b1f7183194c3b6b5ae4052a2f5b48`.
+- Regression coverage committed as `8f6685ec2e91f0d37160453d2675ed7e7e838a37`.
+- Static inspection confirms `_is_sensitive_env_name()` now removes the entire `GIT_CONFIG_` family case-insensitively before child test processes are launched.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. `HOME` and `USERPROFILE` are credential-discovery channels in a credential-isolated validation process, not harmless environment metadata.
-2. Helper-level isolation must be safe independently of `main()` so future callers cannot accidentally regain real-user credential discovery.
-3. The main runner continues to provide an ephemeral home rather than leaving HOME absent, preserving deterministic SDK/tool behavior while isolating user state.
-4. The new regression uses the existing validation-harness ownership pattern, avoiding a new gate or CI workflow.
+1. Environment-injected Git configuration is part of the credential/process trust boundary because it can select helpers or inject request headers independently of HOME.
+2. Prefix-level filtering is preferable to enumerating Git's numbered KEY/VALUE variables and closes future variants in the same documented environment family.
+3. `GIT_TERMINAL_PROMPT=0` remains an explicit safe override because it prevents validation from becoming interactive.
+4. This hardening belongs in the existing dependency-light validation harness rather than a new workflow, preserving the project's low-noise CI policy.
 
 ### Blockers / unknowns
 
