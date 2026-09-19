@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Production remediation accepts only canonical operation IDs, canonical bounded target identities at configuration/runtime boundaries, a construction-validated frozen execution callable, an exact `TransportResult` execution-result type with strictly validated fields, strictly validated reconciliation states, and bounded finite policy configuration. Provider descriptor faults fail closed.
+- Production remediation accepts only canonical operation IDs, canonical bounded target identities at configuration/runtime boundaries, construction-frozen execution and reconciliation capabilities, an exact `TransportResult` execution-result type with strictly validated fields, strictly validated reconciliation states, and bounded finite policy configuration. Provider descriptor faults fail closed.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 
@@ -26,34 +26,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — remediation transport callable-boundary hardening
+## Latest run — 2026-09-19 — reconciliation capability freeze
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected the repository tree, `scripts/run_stageguard_validation.py`, `runtime/tests/test_stageguard_validation_runner.py`, `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, and `runtime/tests/test_validation_remediation_boundary.py`. The production adapter validated `transport.execute` during construction but re-read `self._transport.execute` during every mutation, leaving a mutable/provider-controlled descriptor able to change behavior after validation. Reconciliation also performed its `getattr(..., "reconcile")` outside the exception boundary.
+Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, and `runtime/tests/test_validation_remediation_boundary.py`. The mutation callable had already been frozen at construction, but reconciliation still re-read the provider-controlled `reconcile` descriptor on every uncertainty-barrier check. Because reconciliation participates in StageGuard's durable no-replay decision, this left a check/use inconsistency: a mutable descriptor could change reconciliation behavior between calls.
 
 ### Changes / actions
 
-- Production remediation now captures and freezes the validated bound `execute` callable during construction and invokes that callable for all mutation attempts instead of re-reading a provider-controlled attribute.
-- Construction now converts an exception raised while resolving `transport.execute` into a bounded `ValueError`, rather than leaking arbitrary provider descriptor behavior.
-- Reconciliation now includes lookup of the optional provider `reconcile` method inside the fail-closed exception boundary; a raising descriptor resolves to `unknown`.
-- Added validation-owned regressions for a mutable `execute` descriptor, a raising `execute` descriptor, and a raising `reconcile` descriptor.
-- The mutable-descriptor regression proves the execution attribute is resolved exactly once, while the captured callable still performs the accepted provider request.
+- Production remediation now resolves the optional provider `reconcile` capability once during construction and freezes the resulting bound callable alongside `execute`.
+- A raising or non-callable reconciliation descriptor is treated as unavailable; all subsequent reconciliation checks deterministically return `unknown` without re-reading provider-controlled attributes.
+- `reconcile_operation` now invokes only the frozen capability and retains exact operation-ID validation, exception containment, exact-string state validation, and the closed `accepted` / `not_found` protocol.
+- Added a mutable reconciliation descriptor regression proving two reconciliation checks use one descriptor lookup while invoking the same captured callable twice.
+- Strengthened the raising reconciliation descriptor regression to prove the hostile descriptor is resolved once and is never retried during later incident-state checks.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runtime hardening committed as `5642c01975a2840ed710cc91ecc94de045ddee4d`.
-- Boundary regressions committed as `e267f31b6b9d7ce154afceb032f606864d907f24`.
-- Static inspection confirms the mutation path calls `self._execute(...)`, not `self._transport.execute(...)`, and reconciliation lookup is exception-bounded.
+- Runtime reconciliation hardening committed as `30dac8e58e9dca408f42e00adce0f133aecd9955`.
+- Validation-owned regressions committed as `9ccda7f50a4ec0665e0710eb95654d6abcef48b3`.
+- Static inspection confirms `reconcile_operation` uses `self._reconcile` and performs no provider attribute lookup.
 - No green execution claim is made: this connector runner can modify and inspect repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. A production provider transport is an external trust boundary even after object construction; method lookup itself is not assumed inert.
-2. The execution capability is frozen once after validation so mutable descriptors cannot create a check/use split at the mutation boundary.
-3. Reconciliation remains optional, but malformed/raising provider lookup behavior maps to `unknown` rather than escaping the incident commander.
-4. Regressions remain in the existing validation-owned remediation boundary to avoid adding CI surfaces.
+1. Provider reconciliation is read-only but security-critical because it controls whether StageGuard may resolve an ambiguous production mutation without replaying it.
+2. Provider capabilities are frozen at construction so mutable descriptors cannot alter either mutation or uncertainty-reconciliation behavior after validation.
+3. Optional reconciliation remains fail-closed: absence, malformed capability, descriptor faults, call faults, or malformed states all map to `unknown`.
+4. Regression coverage remains in the existing consolidated remediation boundary rather than creating another CI surface.
 
 ### Blockers / unknowns
 
@@ -65,4 +65,4 @@ Read `progress.md` completely first, then inspected the repository tree, `script
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure without weakening credential isolation, no-replay semantics, or the frozen provider-callable boundary; then perform the pinned Grafana MCP 1.4.1 read-only smoke when Docker/Grafana access is available.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure without weakening credential isolation, no-replay semantics, or frozen provider capabilities; then perform the pinned Grafana MCP 1.4.1 read-only smoke when Docker/Grafana access is available.
