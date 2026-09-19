@@ -10,7 +10,7 @@ class NoCallTransport:
 
 
 class ProductionRemediationPolicyConfigTests(unittest.TestCase):
-    def test_allowlist_identity_requires_nonempty_strings(self):
+    def test_allowlist_identity_requires_canonical_bounded_strings(self):
         for production_id, uplink in (
             (None, "uplink-b"),
             (123, "uplink-b"),
@@ -18,8 +18,16 @@ class ProductionRemediationPolicyConfigTests(unittest.TestCase):
             ("broadcast-alpha", None),
             ("broadcast-alpha", 123),
             ("broadcast-alpha", b"uplink-b"),
-            ("   ", "uplink-b"),
-            ("broadcast-alpha", "\t"),
+            ("", "uplink-b"),
+            (" broadcast-alpha", "uplink-b"),
+            ("broadcast-alpha ", "uplink-b"),
+            ("broadcast\nalpha", "uplink-b"),
+            ("broadcast\x7falpha", "uplink-b"),
+            ("x" * 129, "uplink-b"),
+            ("broadcast-alpha", " uplink-b"),
+            ("broadcast-alpha", "uplink-b\t"),
+            ("broadcast-alpha", "uplink\rb"),
+            ("broadcast-alpha", "x" * 129),
         ):
             with self.subTest(production_id=repr(production_id), uplink=repr(uplink)):
                 with self.assertRaises(ValueError):
@@ -28,6 +36,13 @@ class ProductionRemediationPolicyConfigTests(unittest.TestCase):
                         allowed_production_id=production_id,
                         allowed_uplink=uplink,
                     )
+
+    def test_allowlist_identity_accepts_boundary_length(self):
+        AllowlistedProductionRemediationClient(
+            NoCallTransport(),
+            allowed_production_id="p" * 128,
+            allowed_uplink="u" * 128,
+        )
 
     def test_numeric_policy_rejects_bool_nonfinite_and_wrong_types(self):
         cases = (
