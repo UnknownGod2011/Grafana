@@ -16,12 +16,7 @@ _spec.loader.exec_module(runner)
 
 class ValidationHomeIsolationTests(unittest.TestCase):
     def test_helper_without_isolated_home_does_not_inherit_credential_discovery_homes(self):
-        source = {
-            "PATH": "/usr/bin", "HOME": "/real/home", "USERPROFILE": "C:/Users/real",
-            "CLOUDSDK_CONFIG": "/real/gcloud", "XDG_CONFIG_HOME": "/real/xdg-config",
-            "XDG_DATA_HOME": "/real/xdg-data", "APPDATA": "C:/Users/real/AppData/Roaming",
-            "LOCALAPPDATA": "C:/Users/real/AppData/Local", "ORDINARY_SETTING": "safe",
-        }
+        source = {"PATH": "/usr/bin", "HOME": "/real/home", "USERPROFILE": "C:/Users/real", "CLOUDSDK_CONFIG": "/real/gcloud", "XDG_CONFIG_HOME": "/real/xdg-config", "XDG_DATA_HOME": "/real/xdg-data", "APPDATA": "C:/Users/real/AppData/Roaming", "LOCALAPPDATA": "C:/Users/real/AppData/Local", "ORDINARY_SETTING": "safe"}
         sanitized = runner._validation_env(source)
         for name in ("HOME", "USERPROFILE", "CLOUDSDK_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA"):
             with self.subTest(name=name): self.assertNotIn(name, sanitized)
@@ -70,24 +65,27 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                 with self.subTest(name=name):
                     source = {"PATH": "/usr/bin", name: "/host/untrusted-loader-payload", "ORDINARY_SETTING": "safe"}
                     sanitized = runner._validation_env(source)
-                    self.assertTrue(runner._is_sensitive_env_name(name))
-                    self.assertNotIn(name, sanitized)
-                    self.assertNotIn("/host/untrusted-loader-payload", sanitized.values())
-                    self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-loader-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_shell_startup_injection_is_removed_case_insensitively(self):
-        # Non-interactive bash reads BASH_ENV; POSIX shells may read ENV, and zsh
-        # uses ZDOTDIR to relocate startup files. Validation tests invoke shell
-        # helpers, so none may inherit caller-selected startup code/configuration.
         for canonical in ("BASH_ENV", "ENV", "ZDOTDIR"):
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
                     source = {"PATH": "/usr/bin", name: "/host/untrusted-shell-startup", "ORDINARY_SETTING": "safe"}
                     sanitized = runner._validation_env(source)
-                    self.assertTrue(runner._is_sensitive_env_name(name))
-                    self.assertNotIn(name, sanitized)
-                    self.assertNotIn("/host/untrusted-shell-startup", sanitized.values())
-                    self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-shell-startup", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
+    def test_language_runtime_injection_is_removed_case_insensitively(self):
+        # Validation may invoke Node, Ruby, Perl, or JVM tooling indirectly. These
+        # variables can inject startup code, modules, agents, or class paths before
+        # the intended command runs, so they must not cross the validation boundary.
+        names = ("NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-runtime-payload", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-runtime-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
 
 if __name__ == "__main__":
