@@ -66,18 +66,23 @@ class RemediationValidationBoundaryTests(unittest.TestCase):
     def test_runtime_targets_reject_noncanonical_strings_before_transport(self):
         operation_id = "sg-" + "b" * 40
         invalid_targets = ("", " broadcast-alpha", "broadcast-alpha ", "broadcast\nalpha", "x" * 129)
-        for invalid in invalid_targets:
-            with self.subTest(invalid=repr(invalid)):
-                transport = RecordingTransport()
-                client = AllowlistedProductionRemediationClient(
-                    transport,
-                    allowed_production_id="broadcast-alpha",
-                    allowed_uplink="uplink-b",
-                    sleep=lambda _: None,
-                )
-                result = client.recover_uplink_idempotent(invalid, "uplink-b", operation_id)
-                self.assertFalse(result.accepted)
-                self.assertEqual(0, result.metadata["attempt_count"])
-                self.assertEqual([], transport.requests)
+        for field in ("production_id", "uplink"):
+            for invalid in invalid_targets:
+                with self.subTest(field=field, invalid=repr(invalid)):
+                    transport = RecordingTransport()
+                    client = AllowlistedProductionRemediationClient(
+                        transport,
+                        allowed_production_id="broadcast-alpha",
+                        allowed_uplink="uplink-b",
+                        sleep=lambda _: None,
+                    )
+                    production_id = invalid if field == "production_id" else "broadcast-alpha"
+                    uplink = invalid if field == "uplink" else "uplink-b"
+                    result = client.recover_uplink_idempotent(production_id, uplink, operation_id)
+                    self.assertFalse(result.accepted)
+                    self.assertEqual("unsupported remediation target", result.detail)
+                    self.assertEqual(0, result.metadata["attempt_count"])
+                    self.assertEqual(operation_id, result.metadata["operation_id"])
+                    self.assertEqual([], transport.requests)
 
 if __name__ == "__main__": unittest.main()
