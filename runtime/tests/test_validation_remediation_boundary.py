@@ -43,12 +43,36 @@ class MutableExecuteTransport:
         return accepted
 
 
-class RaisingReconcileTransport:
+class MutableReconcileTransport:
+    """Transport whose reconciliation descriptor must be resolved only once."""
+    def __init__(self):
+        self.lookups = 0
+        self.calls = []
+
     def execute(self, request, *, timeout_seconds):
         return TransportResult(False, 503, False)
 
     @property
     def reconcile(self):
+        self.lookups += 1
+        if self.lookups > 1:
+            raise AssertionError("reconciliation path re-read mutable transport.reconcile")
+        def accepted(operation_id, *, timeout_seconds):
+            self.calls.append((operation_id, timeout_seconds))
+            return "accepted"
+        return accepted
+
+
+class RaisingReconcileTransport:
+    def __init__(self):
+        self.lookups = 0
+
+    def execute(self, request, *, timeout_seconds):
+        return TransportResult(False, 503, False)
+
+    @property
+    def reconcile(self):
+        self.lookups += 1
         raise RuntimeError("provider descriptor fault")
 
 
@@ -113,12 +137,25 @@ class RemediationValidationBoundaryTests(unittest.TestCase):
         self.assertEqual(1, len(transport.calls))
         self.assertEqual(202, result.metadata["transport_status"])
 
+    def test_validated_reconcile_callable_is_frozen_for_uncertainty_barrier(self):
+        transport = MutableReconcileTransport()
+        client = AllowlistedProductionRemediationClient(transport, allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
+        operation_id = "sg-" + "d" * 40
+        self.assertEqual("accepted", client.reconcile_operation(operation_id))
+        self.assertEqual("accepted", client.reconcile_operation(operation_id))
+        self.assertEqual(1, transport.lookups)
+        self.assertEqual([(operation_id, 3.0), (operation_id, 3.0)], transport.calls)
+
     def test_raising_execute_descriptor_is_rejected_at_construction(self):
         with self.assertRaises(ValueError):
             AllowlistedProductionRemediationClient(RaisingExecuteTransport(), allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
 
-    def test_raising_reconcile_descriptor_fails_closed(self):
-        client = AllowlistedProductionRemediationClient(RaisingReconcileTransport(), allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
-        self.assertEqual("unknown", client.reconcile_operation("sg-" + "d" * 40))
+    def test_raising_reconcile_descriptor_fails_closed_and_is_not_retried(self):
+        transport = RaisingReconcileTransport()
+        client = AllowlistedProductionRemediationClient(transport, allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
+        operation_id = "sg-" + "e" * 40
+        self.assertEqual("unknown", client.reconcile_operation(operation_id))
+        self.assertEqual("unknown", client.reconcile_operation(operation_id))
+        self.assertEqual(1, transport.lookups)
 
 if __name__ == "__main__": unittest.main()
