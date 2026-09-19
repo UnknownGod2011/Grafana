@@ -26,32 +26,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored tests have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — remediation transport/reconciliation contract hardening
+## Latest run — 2026-09-19 — retry scheduling fail-closed hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/production_remediation.py` and `runtime/tests/test_validation_remediation_policy_config.py`. The production client validated execution results but did not validate at construction time that the injected transport exposed a callable `execute` method. More importantly, `reconcile_operation` accepted an untyped provider return and performed set membership outside its exception boundary; unhashable malformed states such as a list or dictionary could therefore raise `TypeError` through the incident reconciliation path.
+Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, its validation-owned policy tests, and `runtime/remediation.py` to confirm the `ActionResult` contract. The production adapter correctly bounded retryable provider results but invoked the injected sleep/scheduler hook outside the governed exception boundary. A scheduler fault could therefore escape the incident-command path after the first provider call rather than returning a controlled failed action.
 
 ### Changes / actions
 
-- Production remediation construction now requires the transport to expose a callable `execute` method, failing before any incident can reach a misconfigured provider adapter.
-- Reconciliation now requires an exact string result before checking the two allowed states (`accepted`, `not_found`). Non-string, malformed, differently cased, or control-suffixed states fail closed to `unknown`.
-- Added validation-owned regressions for missing/non-callable execute transports and malformed reconciliation states including `None`, bool/int, list, dict, bytes, wrong case, and newline-suffixed strings.
-- Added positive reconciliation checks for both canonical states.
+- Wrapped the inter-attempt sleep hook in the production remediation fail-closed boundary.
+- A sleep/scheduler exception now returns a rejected `ActionResult` with StageGuard-owned metadata from the first provider attempt and never performs a second provider mutation attempt.
+- Added a regression using a retryable `503` transport and a throwing sleep hook; it asserts exactly one provider call, rejected action state, attempt count `1`, retained bounded status `503`, and generic operator detail.
+- Inspected the canonical `ActionResult` dataclass and corrected the new regression to assert its actual `accepted` field rather than a nonexistent `success` alias.
 - No CI workflow was added or triggered deliberately; no credentials, cloud resources, Docker, Grafana instances, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runtime hardening committed as `351cda63d3fdf4fd413b59bdc70b2099c16ba411`.
-- Regression coverage committed as `0a46770fbf4a3f9e69e51ad9ae02cf619bf2a78b`.
-- Static inspection confirms unhashable provider reconciliation values can no longer escape the fail-closed reconciliation boundary.
+- Runtime hardening committed as `da93377200f353e7974283f97208f400bf5c3a8c`.
+- Regression coverage committed as `c386f3d5d4dcf0b4957988c0c5284eeda2821f4c`, with the contract assertion correction in `5b7091fa368d640d503c4dc10951f014910d6d9b`.
+- Static inspection confirms a retry scheduling fault cannot escape the production remediation boundary or cause a second transport execution.
 - No green execution claim is made because this connector environment does not expose an executable checkout.
 
 ### Decisions
 
-1. Provider adapters are runtime trust boundaries; Python Protocol/type annotations alone are not sufficient validation.
-2. Reconciliation is intentionally a tiny exact-value protocol. Unknown or malformed provider states must never advance execution state.
-3. Construction-time validation is preferable for structural transport misconfiguration, while provider runtime faults continue to fail closed during execution/reconciliation.
+1. Retry scheduling is part of the mutation boundary: failure between attempts must fail closed rather than escape or proceed to another provider call.
+2. The adapter retains only StageGuard-owned bounded metadata from the completed attempt; scheduler exception text is not exposed.
+3. No-replay safety takes precedence over exhausting configured retries when local retry machinery itself is unreliable.
 
 ### Blockers / unknowns
 
