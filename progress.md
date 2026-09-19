@@ -26,32 +26,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — Go/Rust toolchain isolation
+## Latest run — 2026-09-20 — JVM build-tool isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the top-level README/status. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, dynamic-loader controls, shell startup hooks, and Python/Node/Ruby/Perl/JVM/.NET startup controls. A remaining toolchain injection class existed for Go and Rust tooling invoked directly or indirectly by repository tests.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated cloud credentials/config, credential discovery homes, proxies, Git config, TLS key/trust overrides, dynamic loaders, shell startup, language runtimes, .NET, and Go/Rust toolchain controls. Maven and Gradle still had ambient configuration/startup channels that could affect child processes.
 
 ### Changes / actions
 
-- Added `GOENV`, `GOFLAGS`, `GOTOOLCHAIN`, and `GOWORK` to the validation denylist so a caller cannot redirect Go environment/workspace/toolchain behavior inside validation children.
-- Added `CARGO_HOME`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS`, and `RUSTDOCFLAGS` so Cargo/rustc cannot inherit caller-selected config roots, executable wrappers, or compiler/doc flags.
-- Added regression coverage for canonical, lowercase, and mixed-case forms of all nine controls while verifying ordinary settings survive sanitization.
-- Kept filtering targeted instead of broadly deleting every `GO*`, `RUST*`, or `CARGO*` variable, minimizing accidental disruption of benign cross-platform test configuration.
-- No workflow, live service, cloud resource, Docker environment, Grafana instance, or remediation target was touched.
+- Added `MAVEN_OPTS`, `MAVEN_ARGS`, and `MAVEN_USER_HOME` to the validation denylist. Maven options can carry system properties or extension-classpath controls, while a caller-selected Maven home can expose host settings/configuration.
+- Added `GRADLE_OPTS` and `GRADLE_USER_HOME`; a caller-selected Gradle user home can expose init scripts and other host-controlled build configuration to validation children.
+- Added case-insensitive regression coverage for all five variables while verifying an ordinary setting remains intact.
+- Kept filtering targeted rather than deleting broad `MAVEN_*`/`GRADLE_*` prefixes, reducing accidental disruption of benign build metadata.
+- No workflow, live service, cloud resource, Docker environment, Grafana instance, remediation target, or credentials were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `66f9468794cf17e5e83e127dffa204dfbbf225d9`.
-- Regression coverage committed as `50a7ff05aa5baba5cfc718b1e4f401d5aa6550f6`.
-- Static inspection confirms the nine controls are matched case-insensitively by `_is_sensitive_env_name()` and removed before validation child environments are constructed.
-- No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
+- Runner hardening committed as `9d7e8d7e2506ee01f24a59b53b3f91a9a22f1230`.
+- Regression coverage committed as `2ce1cd013529158748c24d2ff3d17316d01e2544`.
+- Static inspection confirms the five new controls are matched case-insensitively by `_is_sensitive_env_name()` and therefore removed before validation subprocess environments are constructed.
+- No green execution claim is made: this connector runner can inspect and modify repository files but does not expose an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Go workspace/env/toolchain selectors and Rust executable-wrapper/config controls belong inside the validation trust boundary because subprocess tests may invoke these toolchains even though StageGuard's core runtime is Python.
-2. The sanitizer remains explicit and auditable rather than adopting broad language-prefix deletion that could break legitimate test behavior.
-3. `PATH` remains preserved because tests legitimately resolve system tools; replacing it safely requires a cross-platform executable allowlist rather than an ad-hoc path.
+1. Maven/Gradle startup/configuration controls belong inside the validation trust boundary because repository tests or helper scripts may invoke JVM build tools even though StageGuard's core runtime is Python.
+2. The sanitizer remains explicit and auditable instead of using broad ecosystem prefixes.
+3. `PATH` remains preserved because tests legitimately resolve system tools; safe replacement requires a deliberate cross-platform executable allowlist.
 
 ### Blockers / unknowns
 
