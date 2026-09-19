@@ -9,7 +9,25 @@ class NoCallTransport:
         raise AssertionError("configuration validation must happen before transport")
 
 
+class ReconcileTransport(NoCallTransport):
+    def __init__(self, state):
+        self.state = state
+
+    def reconcile(self, operation_id, *, timeout_seconds):
+        return self.state
+
+
 class ProductionRemediationPolicyConfigTests(unittest.TestCase):
+    def test_transport_must_expose_callable_execute(self):
+        for transport in (None, object(), type("BadTransport", (), {"execute": None})()):
+            with self.subTest(transport=repr(transport)):
+                with self.assertRaises(ValueError):
+                    AllowlistedProductionRemediationClient(
+                        transport,
+                        allowed_production_id="broadcast-alpha",
+                        allowed_uplink="uplink-b",
+                    )
+
     def test_allowlist_identity_requires_canonical_bounded_strings(self):
         for production_id, uplink in (
             (None, "uplink-b"),
@@ -87,6 +105,27 @@ class ProductionRemediationPolicyConfigTests(unittest.TestCase):
                 allowed_uplink="uplink-b",
                 sleep=None,
             )
+
+    def test_reconciliation_state_must_be_exact_bounded_contract_string(self):
+        operation_id = "sg-" + "a" * 40
+        malformed_states = (None, True, 1, [], {}, b"accepted", "ACCEPTED", "accepted\n")
+        for state in malformed_states:
+            with self.subTest(state=repr(state)):
+                client = AllowlistedProductionRemediationClient(
+                    ReconcileTransport(state),
+                    allowed_production_id="broadcast-alpha",
+                    allowed_uplink="uplink-b",
+                )
+                self.assertEqual(client.reconcile_operation(operation_id), "unknown")
+
+        for state in ("accepted", "not_found"):
+            with self.subTest(state=state):
+                client = AllowlistedProductionRemediationClient(
+                    ReconcileTransport(state),
+                    allowed_production_id="broadcast-alpha",
+                    allowed_uplink="uplink-b",
+                )
+                self.assertEqual(client.reconcile_operation(operation_id), state)
 
 
 if __name__ == "__main__":
