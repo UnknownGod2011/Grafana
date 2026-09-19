@@ -29,13 +29,8 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         }
         sanitized = runner._validation_env(source)
         for name in (
-            "HOME",
-            "USERPROFILE",
-            "CLOUDSDK_CONFIG",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "APPDATA",
-            "LOCALAPPDATA",
+            "HOME", "USERPROFILE", "CLOUDSDK_CONFIG", "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA",
         ):
             with self.subTest(name=name):
                 self.assertNotIn(name, sanitized)
@@ -48,12 +43,7 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                 self.assertTrue(runner._is_sensitive_env_name(name))
 
     def test_isolated_home_reinstalls_only_ephemeral_discovery_roots(self):
-        source = {
-            "HOME": "/real/home",
-            "USERPROFILE": "C:/Users/real",
-            "CLOUDSDK_CONFIG": "/real/gcloud",
-            "ORDINARY_SETTING": "safe",
-        }
+        source = {"HOME": "/real/home", "USERPROFILE": "C:/Users/real", "CLOUDSDK_CONFIG": "/real/gcloud", "ORDINARY_SETTING": "safe"}
         isolated = "/tmp/stageguard-validation-home"
         sanitized = runner._validation_env(source, isolated_home=isolated)
         self.assertEqual(sanitized["HOME"], isolated)
@@ -66,15 +56,11 @@ class ValidationHomeIsolationTests(unittest.TestCase):
 
     def test_git_config_environment_injection_is_removed(self):
         source = {
-            "PATH": "/usr/bin",
-            "GIT_CONFIG_GLOBAL": "/real/home/.gitconfig",
-            "GIT_CONFIG_SYSTEM": "/etc/host-gitconfig",
-            "GIT_CONFIG_COUNT": "2",
-            "GIT_CONFIG_KEY_0": "credential.helper",
-            "GIT_CONFIG_VALUE_0": "!credential-helper-with-host-access",
+            "PATH": "/usr/bin", "GIT_CONFIG_GLOBAL": "/real/home/.gitconfig",
+            "GIT_CONFIG_SYSTEM": "/etc/host-gitconfig", "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "!credential-helper-with-host-access",
             "git_config_key_1": "http.https://example.invalid/.extraHeader",
-            "git_config_value_1": "Authorization: Bearer secret",
-            "ORDINARY_SETTING": "safe",
+            "git_config_value_1": "Authorization: Bearer secret", "ORDINARY_SETTING": "safe",
         }
         sanitized = runner._validation_env(source)
         for name in set(source) - {"PATH", "ORDINARY_SETTING"}:
@@ -97,6 +83,18 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                 self.assertTrue(runner._is_sensitive_env_name(name))
                 self.assertNotIn("/real/home/tls-secrets.log", sanitized.values())
                 self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
+    def test_tls_trust_override_environment_is_removed_case_insensitively(self):
+        names = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/attacker-controlled-ca.pem", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name))
+                    self.assertNotIn(name, sanitized)
+                    self.assertNotIn("/host/attacker-controlled-ca.pem", sanitized.values())
+                    self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
 
 if __name__ == "__main__":
