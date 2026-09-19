@@ -26,34 +26,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — language-runtime injection isolation
+## Latest run — 2026-09-19 — .NET runtime injection isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, dynamic-loader controls, and shell startup hooks. A remaining process-injection class existed for non-Python language runtimes that validation or test helpers may invoke indirectly: Node, Ruby, Perl, and JVM startup environment controls could still inject modules/options/agents or caller-controlled search paths.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, dynamic-loader controls, shell startup hooks, and Node/Ruby/Perl/JVM startup controls. A remaining startup-code injection class existed for .NET tooling invoked directly or indirectly by repository tests.
 
 ### Changes / actions
 
-- Added `NODE_OPTIONS` and `NODE_PATH` to the validation environment denylist.
-- Added `RUBYOPT` and `RUBYLIB` to the denylist.
-- Added `PERL5OPT` and `PERL5LIB` to the denylist.
-- Added `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, and `CLASSPATH` to the denylist.
-- Added regression coverage for canonical, lowercase, and mixed-case forms of every new runtime-injection control while verifying ordinary settings survive sanitization.
-- Kept the change dependency-light and local to the validation trust boundary; no workflow, live service, or infrastructure path was modified.
-- No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
+- Added `DOTNET_STARTUP_HOOKS`, `DOTNET_ADDITIONAL_DEPS`, and `DOTNET_SHARED_STORE` to the validation environment denylist.
+- Added `CORECLR_PROFILER`, `CORECLR_PROFILER_PATH`, and `CORECLR_ENABLE_PROFILING` to prevent inherited profiler-based native code loading.
+- Added regression coverage for canonical, lowercase, and mixed-case forms of all six .NET/CoreCLR controls while verifying ordinary settings survive sanitization.
+- Kept the change local to the validation trust boundary; no workflow, live service, cloud resource, Docker environment, or remediation target was touched.
 
 ### Checks / results
 
-- Runner hardening committed as `b9549918b949f281225b08ecf4abc869609a74c4`.
-- Regression coverage committed as `1094c5b49e3b3bb02017ac1c68239c14eb2d6dce`.
-- Static inspection confirms all nine controls are matched case-insensitively by `_is_sensitive_env_name()` and removed before validation child environments are constructed.
+- Runner hardening committed as `e5097fca78ecfc1e17316ff3faebfe417246f325`.
+- Regression coverage committed as `d14e4433bc886958423fd1995c7a413d37c8d190`.
+- Static inspection confirms all six controls are matched case-insensitively by `_is_sensitive_env_name()` and removed before validation child environments are constructed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Language-runtime startup controls belong to the validation trust boundary because repository tests can invoke heterogeneous tooling indirectly, and these variables act before application-level safety checks.
-2. The sanitizer blocks targeted code/module/classpath injection controls without removing the executables themselves, preserving legitimate dependency-light tool discovery.
-3. `PATH` remains preserved because tests legitimately resolve system tools; replacing it safely still requires a cross-platform executable allowlist rather than an ad-hoc path.
+1. .NET startup hooks/dependency stores and CoreCLR profiler controls belong to the same validation trust boundary as the already-blocked JVM/Node/Ruby/Perl startup controls because they can cause code to load before intended validation logic.
+2. The sanitizer remains targeted rather than deleting all `DOTNET_*`/`CORECLR_*` variables, avoiding unnecessary disruption of benign runtime configuration.
+3. `PATH` remains preserved because tests legitimately resolve system tools; replacing it safely requires a cross-platform executable allowlist rather than an ad-hoc path.
 
 ### Blockers / unknowns
 
