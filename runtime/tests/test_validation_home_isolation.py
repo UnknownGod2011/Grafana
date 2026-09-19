@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,10 +30,27 @@ class ValidationHomeIsolationTests(unittest.TestCase):
 
     def test_isolated_home_reinstalls_only_ephemeral_discovery_roots(self):
         source = {"HOME": "/real/home", "USERPROFILE": "C:/Users/real", "CLOUDSDK_CONFIG": "/real/gcloud", "ORDINARY_SETTING": "safe"}
-        isolated = "/tmp/stageguard-validation-home"; sanitized = runner._validation_env(source, isolated_home=isolated)
-        self.assertEqual(sanitized["HOME"], isolated); self.assertEqual(sanitized["USERPROFILE"], isolated)
-        self.assertEqual(sanitized["CLOUDSDK_CONFIG"], str(Path(isolated) / ".config" / "gcloud")); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
-        self.assertNotIn("/real/home", sanitized.values()); self.assertNotIn("C:/Users/real", sanitized.values()); self.assertNotIn("/real/gcloud", sanitized.values())
+        with tempfile.TemporaryDirectory() as isolated:
+            sanitized = runner._validation_env(source, isolated_home=isolated)
+            self.assertEqual(sanitized["HOME"], isolated); self.assertEqual(sanitized["USERPROFILE"], isolated)
+            self.assertEqual(sanitized["CLOUDSDK_CONFIG"], str(Path(isolated) / ".config" / "gcloud")); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+            self.assertNotIn("/real/home", sanitized.values()); self.assertNotIn("C:/Users/real", sanitized.values()); self.assertNotIn("/real/gcloud", sanitized.values())
+
+    def test_host_temporary_directories_are_removed_and_replaced_inside_isolated_home(self):
+        source = {"TMPDIR": "/host/tmpdir", "TMP": "C:/host/tmp", "TEMP": "C:/host/temp", "ORDINARY_SETTING": "safe"}
+        sanitized = runner._validation_env(source)
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            with self.subTest(name=name): self.assertNotIn(name, sanitized)
+        with tempfile.TemporaryDirectory() as isolated:
+            sanitized = runner._validation_env(source, isolated_home=isolated)
+            expected = str(Path(isolated) / "tmp")
+            self.assertEqual(sanitized["TMPDIR"], expected); self.assertEqual(sanitized["TMP"], expected); self.assertEqual(sanitized["TEMP"], expected)
+            self.assertTrue(Path(expected).is_dir()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+            self.assertFalse(any(value in sanitized.values() for value in ("/host/tmpdir", "C:/host/tmp", "C:/host/temp")))
+
+    def test_temporary_directory_names_are_sensitive_case_insensitively(self):
+        for name in ("TMPDIR", "tmpdir", "Tmp", "TEMP", "temp"):
+            with self.subTest(name=name): self.assertTrue(runner._is_sensitive_env_name(name))
 
     def test_git_config_environment_injection_is_removed(self):
         source = {"PATH": "/usr/bin", "GIT_CONFIG_GLOBAL": "/real/home/.gitconfig", "GIT_CONFIG_SYSTEM": "/etc/host-gitconfig", "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "!credential-helper-with-host-access", "git_config_key_1": "http.https://example.invalid/.extraHeader", "git_config_value_1": "Authorization: Bearer secret", "ORDINARY_SETTING": "safe"}
@@ -63,16 +81,14 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
-                    source = {"PATH": "/usr/bin", name: "/host/untrusted-loader-payload", "ORDINARY_SETTING": "safe"}
-                    sanitized = runner._validation_env(source)
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-loader-payload", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-loader-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_shell_startup_injection_is_removed_case_insensitively(self):
         for canonical in ("BASH_ENV", "ENV", "ZDOTDIR"):
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
-                    source = {"PATH": "/usr/bin", name: "/host/untrusted-shell-startup", "ORDINARY_SETTING": "safe"}
-                    sanitized = runner._validation_env(source)
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-shell-startup", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-shell-startup", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_language_runtime_injection_is_removed_case_insensitively(self):
@@ -80,20 +96,15 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
-                    source = {"PATH": "/usr/bin", name: "/host/untrusted-runtime-payload", "ORDINARY_SETTING": "safe"}
-                    sanitized = runner._validation_env(source)
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-runtime-payload", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-runtime-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_jvm_build_tool_injection_is_removed_case_insensitively(self):
-        # Maven options can inject extension classpaths/system properties, and
-        # Maven/Gradle home overrides can expose caller-controlled settings or
-        # init scripts to validation subprocesses.
         names = ("MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_USER_HOME", "GRADLE_OPTS", "GRADLE_USER_HOME")
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
-                    source = {"PATH": "/usr/bin", name: "/host/untrusted-jvm-build-tool-payload", "ORDINARY_SETTING": "safe"}
-                    sanitized = runner._validation_env(source)
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-jvm-build-tool-payload", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-jvm-build-tool-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_dotnet_runtime_injection_is_removed_case_insensitively(self):
@@ -101,8 +112,7 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
-                    source = {"PATH": "/usr/bin", name: "/host/untrusted-dotnet-payload", "ORDINARY_SETTING": "safe"}
-                    sanitized = runner._validation_env(source)
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-dotnet-payload", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-dotnet-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_go_and_rust_toolchain_injection_is_removed_case_insensitively(self):
@@ -110,8 +120,7 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
                 with self.subTest(name=name):
-                    source = {"PATH": "/usr/bin", name: "/host/untrusted-toolchain-payload", "ORDINARY_SETTING": "safe"}
-                    sanitized = runner._validation_env(source)
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-toolchain-payload", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-toolchain-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
 
