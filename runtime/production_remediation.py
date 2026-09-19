@@ -86,6 +86,9 @@ class AllowlistedProductionRemediationClient:
         retry_delay_seconds: float = 0.25,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        execute = getattr(transport, "execute", None)
+        if not callable(execute):
+            raise ValueError("transport must provide a callable execute method")
         if not _valid_allowlist_identity(allowed_production_id):
             raise ValueError("allowlisted production must be a canonical string of 1-128 characters without surrounding whitespace or controls")
         if not _valid_allowlist_identity(allowed_uplink):
@@ -145,6 +148,8 @@ class AllowlistedProductionRemediationClient:
         try:
             state = reconcile(operation_id, timeout_seconds=self._timeout_seconds)
         except Exception:
+            return "unknown"
+        if type(state) is not str:
             return "unknown"
         return state if state in {"accepted", "not_found"} else "unknown"
 
