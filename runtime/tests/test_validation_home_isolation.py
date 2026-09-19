@@ -84,6 +84,18 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-runtime-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
+    def test_jvm_build_tool_injection_is_removed_case_insensitively(self):
+        # Maven options can inject extension classpaths/system properties, and
+        # Maven/Gradle home overrides can expose caller-controlled settings or
+        # init scripts to validation subprocesses.
+        names = ("MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_USER_HOME", "GRADLE_OPTS", "GRADLE_USER_HOME")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-jvm-build-tool-payload", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-jvm-build-tool-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
     def test_dotnet_runtime_injection_is_removed_case_insensitively(self):
         names = ("DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "DOTNET_SHARED_STORE", "CORECLR_PROFILER", "CORECLR_PROFILER_PATH", "CORECLR_ENABLE_PROFILING")
         for canonical in names:
@@ -94,8 +106,6 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-dotnet-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_go_and_rust_toolchain_injection_is_removed_case_insensitively(self):
-        # Go can consume caller-selected env/workspace/toolchain flags, while
-        # Cargo/rustc can execute wrappers or consume caller-selected config.
         names = ("GOENV", "GOFLAGS", "GOTOOLCHAIN", "GOWORK", "CARGO_HOME", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS", "RUSTDOCFLAGS")
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
