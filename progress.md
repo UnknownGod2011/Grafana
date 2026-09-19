@@ -13,7 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Production remediation accepts only canonical operation IDs, canonical bounded target identities, callable provider transports, an exact `TransportResult` execution-result type with strictly validated fields, strictly validated reconciliation states, and bounded finite policy configuration; malformed runtime identities/configuration fail closed before transport.
+- Production remediation accepts only canonical operation IDs, canonical bounded target identities at both configuration and runtime boundaries, callable provider transports, an exact `TransportResult` execution-result type with strictly validated fields, strictly validated reconciliation states, and bounded finite policy configuration; malformed runtime identities/configuration fail closed before transport.
 - Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 
@@ -26,35 +26,36 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — exact provider result regression ownership
+## Latest run — 2026-09-19 — runtime remediation target identity hardening
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_remediation_boundary.py`, `runtime/tests/test_production_remediation.py`, and the repository tree. The prior run had correctly tightened the provider result boundary from `isinstance` to exact `TransportResult` type matching, but explicitly left the corresponding regression unresolved until its validation-owned test location could be identified.
+Read `progress.md` completely first, inspected the repository root and `runtime/tests`, then reviewed `runtime/production_remediation.py` and `runtime/tests/test_production_remediation.py`. The production adapter already validated configured allowlist identities, operation IDs, provider result types, reconciliation states, retry scheduling, and finite policy values. Runtime `production_id`/`uplink` arguments, however, were compared to trusted strings before exact runtime type/canonical-form validation.
 
 ### Changes / actions
 
-- Resolved the existing validation ownership: `test_production_remediation.py` is already selected by the `remediation adapter boundary` gate in `scripts/run_stageguard_validation.py`, and the validation-boundary contract explicitly requires that file.
-- Added `test_transport_result_subclass_is_rejected_without_retry` to `runtime/tests/test_production_remediation.py`.
-- The regression supplies a provider-controlled subclass carrying an apparently successful `202` result and proves StageGuard rejects it, records exactly one provider attempt, preserves `transport_status=None`, and does not retry or transition to accepted state.
-- Kept the test inside the existing owned policy suite rather than creating a new standalone test island.
+- Hardened `recover_uplink_idempotent` so both runtime target identities must pass the same exact-string, 1-128 character, no-surrounding-whitespace/no-control-character canonical validator used at construction.
+- Validation now occurs before equality comparison. This prevents a caller-controlled Python object with custom `__eq__` behavior from executing inside the production mutation boundary and prevents malformed string identities from reaching provider transport.
+- Invalid runtime targets fail closed with zero provider attempts; a canonical operation ID is retained only as bounded correlation metadata, while malformed operation IDs are still replaced by the empty identity.
+- Attempted to obtain an executable checkout and run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; the container cannot resolve `github.com`, so cloning failed before any test execution. This is an environment/network limitation, not a test result.
 - No CI workflow was added or triggered deliberately; no credentials, cloud resources, Docker, Grafana instances, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Regression committed as `735d10bf4dcc7b01dcb7101095c31a1123e0ba22`.
-- Static inspection confirms the regression matches the exact-type check in `_valid_transport_result` and is owned by the consolidated remediation gate.
-- No green execution claim is made because this connector environment does not expose an executable checkout. The new regression and the full validation runner still require repository execution.
+- Runtime target hardening committed as `4c03444b8c7dae62f4068df7fe11811b67deb214`.
+- Static inspection confirms malformed runtime target objects are rejected before equality and before `transport.execute`.
+- No green execution claim is made. The attempted executable validation was blocked at repository clone by DNS/network isolation in the runner.
 
 ### Decisions
 
-1. The exact provider-result protocol is now both implemented and regression-specified in an already-owned validation file.
-2. A provider result subclass that looks successful is deliberately treated as malformed execution evidence; it cannot become an accepted remediation result.
-3. Security regressions should continue to be placed in existing validation-owned files whenever ownership is already defined.
+1. Python type annotations are not a production trust boundary; runtime mutation inputs must be validated before invoking comparison or provider behavior.
+2. The configured allowlist and runtime target identity use the same canonical identity grammar to avoid normalization ambiguity.
+3. Invalid runtime target identity remains a target rejection rather than an operation-identity error; no mutation is attempted in either case.
 
 ### Blockers / unknowns
 
-- The consolidated runner still requires execution in a real checkout.
+- The consolidated runner still requires execution in a real checkout; this runner's container cannot resolve GitHub.
+- A dedicated regression for hostile/non-string runtime target objects should be added to the already validation-owned `runtime/tests/test_production_remediation.py` and executed when an executable checkout is available.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside this dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -62,4 +63,4 @@ Read `progress.md` completely first, then inspected `runtime/production_remediat
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and fix every concrete failure, starting with the remediation adapter boundary, without weakening credential isolation, no-replay remediation semantics, or validation ownership.
+Add the runtime-target hostile-object regression to the existing remediation adapter boundary suite, then run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure without weakening credential isolation or no-replay semantics.
