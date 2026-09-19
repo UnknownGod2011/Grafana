@@ -26,34 +26,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — reconciliation capability freeze
+## Latest run — 2026-09-19 — validation Cloud SDK credential isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, and `runtime/tests/test_validation_remediation_boundary.py`. The mutation callable had already been frozen at construction, but reconciliation still re-read the provider-controlled `reconcile` descriptor on every uncertainty-barrier check. Because reconciliation participates in StageGuard's durable no-replay decision, this left a check/use inconsistency: a mutable descriptor could change reconciliation behavior between calls.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and its self-tests in `runtime/tests/test_stageguard_validation_runner.py`. The consolidated validation runner already scrubbed explicit Google credentials, metadata endpoints, proxy credentials, and many tool-specific configuration roots. However, `CLOUDSDK_CONFIG` was only redirected when an isolated home was supplied; direct callers of `_validation_env()` without `isolated_home` could retain an ambient gcloud configuration directory containing ADC or cached account credentials.
 
 ### Changes / actions
 
-- Production remediation now resolves the optional provider `reconcile` capability once during construction and freezes the resulting bound callable alongside `execute`.
-- A raising or non-callable reconciliation descriptor is treated as unavailable; all subsequent reconciliation checks deterministically return `unknown` without re-reading provider-controlled attributes.
-- `reconcile_operation` now invokes only the frozen capability and retains exact operation-ID validation, exception containment, exact-string state validation, and the closed `accepted` / `not_found` protocol.
-- Added a mutable reconciliation descriptor regression proving two reconciliation checks use one descriptor lookup while invoking the same captured callable twice.
-- Strengthened the raising reconciliation descriptor regression to prove the hostile descriptor is resolved once and is never retried during later incident-state checks.
+- Added `CLOUDSDK_CONFIG` to the exact sensitive-environment denylist so validation never inherits the caller's gcloud configuration root.
+- Preserved the existing isolated-home behavior: when the production runner creates its temporary home it explicitly replaces `CLOUDSDK_CONFIG` with a path under that temporary directory after scrubbing the ambient value.
+- Added regression coverage proving `_validation_env()` drops an ambient `CLOUDSDK_CONFIG` even when no isolated home is requested.
+- Extended case-insensitive sensitive-name coverage to include `cloudsdk_config`.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runtime reconciliation hardening committed as `30dac8e58e9dca408f42e00adce0f133aecd9955`.
-- Validation-owned regressions committed as `9ccda7f50a4ec0665e0710eb95654d6abcef48b3`.
-- Static inspection confirms `reconcile_operation` uses `self._reconcile` and performs no provider attribute lookup.
-- No green execution claim is made: this connector runner can modify and inspect repository files but does not provide an executable checkout for the Python suite.
+- Validation-runner hardening committed as `c6b6ca5d34bb7200afa58147fea2c5056050e44d`.
+- Regression coverage committed as `76e16f29f30981f4caa588ce1a5e0af1fd569270`.
+- Static inspection confirms ambient `CLOUDSDK_CONFIG` is removed before the optional isolated-home override is installed.
+- No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Provider reconciliation is read-only but security-critical because it controls whether StageGuard may resolve an ambiguous production mutation without replaying it.
-2. Provider capabilities are frozen at construction so mutable descriptors cannot alter either mutation or uncertainty-reconciliation behavior after validation.
-3. Optional reconciliation remains fail-closed: absence, malformed capability, descriptor faults, call faults, or malformed states all map to `unknown`.
-4. Regression coverage remains in the existing consolidated remediation boundary rather than creating another CI surface.
+1. Credential isolation must hold for helper-level validation calls as well as the main runner; relying on `main()` always supplying an isolated home leaves a reusable security helper with surprising behavior.
+2. Cloud SDK configuration is treated as a credential-discovery channel, not ordinary configuration, because gcloud/ADC state can be discovered from that directory without an explicit token environment variable.
+3. The production runner continues to use a temporary gcloud root rather than simply omitting the variable, preventing fallback discovery through a real user home.
+4. No CI workflow was added or triggered; validation remains intentionally local and quiet.
 
 ### Blockers / unknowns
 
