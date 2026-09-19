@@ -64,6 +64,30 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         self.assertNotIn("C:/Users/real", sanitized.values())
         self.assertNotIn("/real/gcloud", sanitized.values())
 
+    def test_git_config_environment_injection_is_removed(self):
+        source = {
+            "PATH": "/usr/bin",
+            "GIT_CONFIG_GLOBAL": "/real/home/.gitconfig",
+            "GIT_CONFIG_SYSTEM": "/etc/host-gitconfig",
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "!credential-helper-with-host-access",
+            "git_config_key_1": "http.https://example.invalid/.extraHeader",
+            "git_config_value_1": "Authorization: Bearer secret",
+            "ORDINARY_SETTING": "safe",
+        }
+        sanitized = runner._validation_env(source)
+        for name in set(source) - {"PATH", "ORDINARY_SETTING"}:
+            with self.subTest(name=name):
+                self.assertNotIn(name, sanitized)
+        self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+        self.assertFalse(any("credential-helper" in value or "Bearer secret" in value for value in sanitized.values()))
+
+    def test_git_config_prefix_is_sensitive_case_insensitively(self):
+        for name in ("GIT_CONFIG_GLOBAL", "git_config_system", "Git_Config_Count", "git_config_key_0", "GIT_CONFIG_VALUE_0"):
+            with self.subTest(name=name):
+                self.assertTrue(runner._is_sensitive_env_name(name))
+
 
 if __name__ == "__main__":
     unittest.main()
