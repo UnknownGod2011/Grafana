@@ -101,6 +101,15 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     source = {"PATH": "/usr/bin", name: "/host/untrusted-shell-startup", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-shell-startup", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
+    def test_bash_exported_functions_and_behavior_controls_are_removed_case_insensitively(self):
+        source = {"PATH": "/usr/bin", "BASH_FUNC_git%%": "() { echo injected; }", "bash_func_curl%%": "() { echo injected; }", "BASHOPTS": "sourcepath", "shellopts": "xtrace", "CdPaTh": "/host/untrusted-cdpath", "ORDINARY_SETTING": "safe"}
+        sanitized = runner._validation_env(source)
+        for name in set(source) - {"PATH", "ORDINARY_SETTING"}:
+            with self.subTest(name=name):
+                self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized)
+        self.assertFalse(any("injected" in value or "/host/untrusted-cdpath" in value for value in sanitized.values()))
+        self.assertEqual(sanitized["PATH"], "/usr/bin"); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
     def test_language_runtime_injection_is_removed_case_insensitively(self):
         names = ("NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH")
         for canonical in names:
