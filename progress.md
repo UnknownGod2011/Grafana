@@ -26,33 +26,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation Cloud SDK credential isolation
+## Latest run — 2026-09-19 — validation home credential-discovery isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and its self-tests in `runtime/tests/test_stageguard_validation_runner.py`. The consolidated validation runner already scrubbed explicit Google credentials, metadata endpoints, proxy credentials, and many tool-specific configuration roots. However, `CLOUDSDK_CONFIG` was only redirected when an isolated home was supplied; direct callers of `_validation_env()` without `isolated_home` could retain an ambient gcloud configuration directory containing ADC or cached account credentials.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_stageguard_validation_runner.py`. The prior run correctly scrubbed ambient `CLOUDSDK_CONFIG`, but helper-level `_validation_env()` calls without `isolated_home` still preserved `HOME` and `USERPROFILE`. That leaves default per-user credential/config discovery reachable to SDKs that fall back to the user's home directory even after explicit credential variables and Cloud SDK configuration are removed. The production `main()` path was already safer because it replaces those homes with a temporary directory.
 
 ### Changes / actions
 
-- Added `CLOUDSDK_CONFIG` to the exact sensitive-environment denylist so validation never inherits the caller's gcloud configuration root.
-- Preserved the existing isolated-home behavior: when the production runner creates its temporary home it explicitly replaces `CLOUDSDK_CONFIG` with a path under that temporary directory after scrubbing the ambient value.
-- Added regression coverage proving `_validation_env()` drops an ambient `CLOUDSDK_CONFIG` even when no isolated home is requested.
-- Extended case-insensitive sensitive-name coverage to include `cloudsdk_config`.
+- Added `HOME` and `USERPROFILE` to the exact sensitive-environment denylist.
+- Preserved production behavior: supplying `isolated_home` still reinstalls only temporary `HOME`, `USERPROFILE`, XDG/AppData roots, and `CLOUDSDK_CONFIG` after ambient values are scrubbed.
+- Added `runtime/tests/test_validation_home_isolation.py`, automatically owned by the existing `validation harness` gate via `test_validation_*.py`.
+- Added regressions proving helper-level validation drops HOME/USERPROFILE plus other credential-discovery roots, matching is case-insensitive, and isolated execution reinstalls only ephemeral roots.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Validation-runner hardening committed as `c6b6ca5d34bb7200afa58147fea2c5056050e44d`.
-- Regression coverage committed as `76e16f29f30981f4caa588ce1a5e0af1fd569270`.
-- Static inspection confirms ambient `CLOUDSDK_CONFIG` is removed before the optional isolated-home override is installed.
+- Validation-runner hardening committed as `3be59f9ff22301a4b986d940523bc8d3eca62726`.
+- Regression coverage committed as `4836d13639c1eff803766ddc5d8cc4171e667bf6`.
+- Static inspection confirms ambient home roots are removed before optional isolated-home overrides are installed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Credential isolation must hold for helper-level validation calls as well as the main runner; relying on `main()` always supplying an isolated home leaves a reusable security helper with surprising behavior.
-2. Cloud SDK configuration is treated as a credential-discovery channel, not ordinary configuration, because gcloud/ADC state can be discovered from that directory without an explicit token environment variable.
-3. The production runner continues to use a temporary gcloud root rather than simply omitting the variable, preventing fallback discovery through a real user home.
-4. No CI workflow was added or triggered; validation remains intentionally local and quiet.
+1. `HOME` and `USERPROFILE` are credential-discovery channels in a credential-isolated validation process, not harmless environment metadata.
+2. Helper-level isolation must be safe independently of `main()` so future callers cannot accidentally regain real-user credential discovery.
+3. The main runner continues to provide an ephemeral home rather than leaving HOME absent, preserving deterministic SDK/tool behavior while isolating user state.
+4. The new regression uses the existing validation-harness ownership pattern, avoiding a new gate or CI workflow.
 
 ### Blockers / unknowns
 
