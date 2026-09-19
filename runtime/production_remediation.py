@@ -15,11 +15,21 @@ from typing import Callable, Protocol
 from remediation import ActionResult
 
 _OPERATION_ID_RE = re.compile(r"sg-[0-9a-f]{40}\Z")
+_MAX_ALLOWLIST_ID_LENGTH = 128
 
 
 def _valid_operation_id(operation_id: object) -> bool:
     """Accept only StageGuard's canonical, non-ambiguous operation identifier."""
     return type(operation_id) is str and bool(_OPERATION_ID_RE.fullmatch(operation_id))
+
+
+def _valid_allowlist_identity(value: object) -> bool:
+    """Require a bounded canonical identity safe to pass to provider transports."""
+    if type(value) is not str or not value or len(value) > _MAX_ALLOWLIST_ID_LENGTH:
+        return False
+    if value != value.strip():
+        return False
+    return not any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
 
 
 def _bounded_number(value: object, minimum: float, maximum: float) -> bool:
@@ -76,10 +86,10 @@ class AllowlistedProductionRemediationClient:
         retry_delay_seconds: float = 0.25,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if type(allowed_production_id) is not str or not allowed_production_id.strip():
-            raise ValueError("allowlisted production is required and must be a string")
-        if type(allowed_uplink) is not str or not allowed_uplink.strip():
-            raise ValueError("allowlisted uplink is required and must be a string")
+        if not _valid_allowlist_identity(allowed_production_id):
+            raise ValueError("allowlisted production must be a canonical string of 1-128 characters without surrounding whitespace or controls")
+        if not _valid_allowlist_identity(allowed_uplink):
+            raise ValueError("allowlisted uplink must be a canonical string of 1-128 characters without surrounding whitespace or controls")
         if not _bounded_number(timeout_seconds, 0.1, 10.0):
             raise ValueError("timeout_seconds must be a finite number between 0.1 and 10")
         if type(max_attempts) is not int or max_attempts not in {1, 2, 3}:
@@ -103,8 +113,6 @@ class AllowlistedProductionRemediationClient:
         if production_id != self._production_id or uplink != self._uplink:
             return self._result(False, operation_id if _valid_operation_id(operation_id) else "", 0, None, "unsupported remediation target")
         if not _valid_operation_id(operation_id):
-            # Do not reflect arbitrary caller objects into action metadata. Besides
-            # limiting untrusted data propagation, this keeps API serialization safe.
             return self._result(False, "", 0, None, "invalid remediation operation identity")
 
         request = RemediationRequest(operation_id, "recover_uplink", self._production_id, self._uplink)
