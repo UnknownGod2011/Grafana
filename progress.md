@@ -26,33 +26,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation dynamic-loader isolation
+## Latest run — 2026-09-19 — validation shell-startup isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The harness already isolated credential/config homes, proxies, cloud credentials, Git configuration, TLS key logging, and TLS trust overrides. A higher-impact process-injection gap remained: Linux `LD_PRELOAD`/`LD_LIBRARY_PATH` and macOS `DYLD_*` variables could be inherited by validation children, allowing host-selected dynamic libraries or search paths to affect the Python test processes before application-level isolation applies.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated credential/config homes, cloud credentials, proxies, Git configuration, TLS key logging/trust overrides, and dynamic-loader controls. A remaining process-injection path existed for shell helpers: caller-supplied `BASH_ENV`, POSIX `ENV`, or zsh `ZDOTDIR` could point shell subprocesses at host-controlled startup code/configuration even though StageGuard's Python process itself was isolated.
 
 ### Changes / actions
 
-- Added `LD_PRELOAD` and `LD_LIBRARY_PATH` to the case-insensitive validation environment denylist.
-- Added the `DYLD_` family to the case-insensitive sensitive-prefix denylist, covering macOS loader controls such as `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, and `DYLD_FRAMEWORK_PATH` without relying on an incomplete enumeration.
-- Added regression coverage for canonical, lowercase, and mixed-case forms of Linux and representative macOS loader variables.
-- Regression asserts the hostile loader path is absent while an ordinary environment setting remains intact.
-- Kept the work inside the existing validation-harness ownership surface; no CI workflow was created or triggered.
+- Added `BASH_ENV`, `ENV`, and `ZDOTDIR` to the case-insensitive validation environment denylist.
+- Added regression coverage for canonical, lowercase, and mixed-case forms of all three shell-startup controls.
+- Regression verifies the caller-selected startup path is absent while an ordinary environment setting remains intact.
+- Kept the change inside the existing dependency-light validation harness; no workflow, live service, or infrastructure path was modified.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `f8ec8369924369f8304676d96dc1f8bd830f92b2`.
-- Regression coverage committed as `bc35f76a0d887ccb4167dee657832e3038ba66e5`.
-- Static inspection confirms loader variables are rejected case-insensitively by `_is_sensitive_env_name()` before validation child environments are constructed.
+- Runner hardening committed as `1f74eaef3ffecc6bd7e0d9de699efecce676248e`.
+- Regression coverage committed as `e9b4793ae7df562b1c5e81d914e61d74f4ef7202`.
+- Static inspection confirms shell-startup variables are rejected case-insensitively by `_is_sensitive_env_name()` before validation child environments are constructed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Dynamic-loader environment controls belong to the validation isolation boundary because they can alter executable behavior before Python test code or StageGuard safety checks run.
-2. `DYLD_` is denied as a family rather than enumerating individual variables, reducing the risk of leaving an alternate Apple loader-control channel open.
-3. Normal system loader configuration remains untouched; only caller-supplied process environment overrides are removed.
+1. Shell startup-file controls are part of the validation trust boundary because repository tests can invoke shell helpers, and startup hooks execute before the intended shell command.
+2. The sanitizer removes only caller-provided startup redirection; it does not alter normal system shell installation or PATH behavior.
+3. `PATH` remains preserved for now because tests legitimately resolve system tools; replacing it requires a cross-platform executable allowlist rather than an unsafe ad-hoc value.
 
 ### Blockers / unknowns
 
