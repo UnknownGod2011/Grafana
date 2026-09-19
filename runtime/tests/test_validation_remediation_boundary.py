@@ -8,7 +8,7 @@ spec = importlib.util.spec_from_file_location("stageguard_validation_remediation
 assert spec is not None and spec.loader is not None
 validator = importlib.util.module_from_spec(spec); sys.modules[spec.name] = validator; spec.loader.exec_module(validator)
 sys.path.insert(0, str(ROOT / "runtime"))
-from production_remediation import AllowlistedProductionRemediationClient
+from production_remediation import AllowlistedProductionRemediationClient, TransportResult
 
 
 class HostileIdentity:
@@ -24,6 +24,38 @@ class RecordingTransport:
     def execute(self, request, *, timeout_seconds):
         self.requests.append((request, timeout_seconds))
         raise AssertionError("invalid target reached remediation transport")
+
+
+class MutableExecuteTransport:
+    """Transport whose execute attribute changes after the constructor validates it."""
+    def __init__(self):
+        self.lookups = 0
+        self.calls = []
+
+    @property
+    def execute(self):
+        self.lookups += 1
+        if self.lookups > 1:
+            raise AssertionError("production path re-read mutable transport.execute")
+        def accepted(request, *, timeout_seconds):
+            self.calls.append((request, timeout_seconds))
+            return TransportResult(True, 202, False)
+        return accepted
+
+
+class RaisingReconcileTransport:
+    def execute(self, request, *, timeout_seconds):
+        return TransportResult(False, 503, False)
+
+    @property
+    def reconcile(self):
+        raise RuntimeError("provider descriptor fault")
+
+
+class RaisingExecuteTransport:
+    @property
+    def execute(self):
+        raise RuntimeError("provider descriptor fault")
 
 
 class RemediationValidationBoundaryTests(unittest.TestCase):
@@ -44,18 +76,10 @@ class RemediationValidationBoundaryTests(unittest.TestCase):
 
     def test_runtime_targets_reject_hostile_objects_before_comparison_or_transport(self):
         operation_id = "sg-" + "a" * 40
-        for production_id, uplink in (
-            (HostileIdentity(), "uplink-b"),
-            ("broadcast-alpha", HostileIdentity()),
-        ):
+        for production_id, uplink in ((HostileIdentity(), "uplink-b"), ("broadcast-alpha", HostileIdentity())):
             with self.subTest(production_id=type(production_id).__name__, uplink=type(uplink).__name__):
                 transport = RecordingTransport()
-                client = AllowlistedProductionRemediationClient(
-                    transport,
-                    allowed_production_id="broadcast-alpha",
-                    allowed_uplink="uplink-b",
-                    sleep=lambda _: None,
-                )
+                client = AllowlistedProductionRemediationClient(transport, allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b", sleep=lambda _: None)
                 result = client.recover_uplink_idempotent(production_id, uplink, operation_id)
                 self.assertFalse(result.accepted)
                 self.assertEqual("unsupported remediation target", result.detail)
@@ -70,12 +94,7 @@ class RemediationValidationBoundaryTests(unittest.TestCase):
             for invalid in invalid_targets:
                 with self.subTest(field=field, invalid=repr(invalid)):
                     transport = RecordingTransport()
-                    client = AllowlistedProductionRemediationClient(
-                        transport,
-                        allowed_production_id="broadcast-alpha",
-                        allowed_uplink="uplink-b",
-                        sleep=lambda _: None,
-                    )
+                    client = AllowlistedProductionRemediationClient(transport, allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b", sleep=lambda _: None)
                     production_id = invalid if field == "production_id" else "broadcast-alpha"
                     uplink = invalid if field == "uplink" else "uplink-b"
                     result = client.recover_uplink_idempotent(production_id, uplink, operation_id)
@@ -84,5 +103,22 @@ class RemediationValidationBoundaryTests(unittest.TestCase):
                     self.assertEqual(0, result.metadata["attempt_count"])
                     self.assertEqual(operation_id, result.metadata["operation_id"])
                     self.assertEqual([], transport.requests)
+
+    def test_validated_execute_callable_is_frozen_for_mutation_path(self):
+        transport = MutableExecuteTransport()
+        client = AllowlistedProductionRemediationClient(transport, allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b", sleep=lambda _: None)
+        result = client.recover_uplink_idempotent("broadcast-alpha", "uplink-b", "sg-" + "c" * 40)
+        self.assertTrue(result.accepted)
+        self.assertEqual(1, transport.lookups)
+        self.assertEqual(1, len(transport.calls))
+        self.assertEqual(202, result.metadata["transport_status"])
+
+    def test_raising_execute_descriptor_is_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            AllowlistedProductionRemediationClient(RaisingExecuteTransport(), allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
+
+    def test_raising_reconcile_descriptor_fails_closed(self):
+        client = AllowlistedProductionRemediationClient(RaisingReconcileTransport(), allowed_production_id="broadcast-alpha", allowed_uplink="uplink-b")
+        self.assertEqual("unknown", client.reconcile_operation("sg-" + "d" * 40))
 
 if __name__ == "__main__": unittest.main()
