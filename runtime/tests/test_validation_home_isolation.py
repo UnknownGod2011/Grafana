@@ -88,6 +88,16 @@ class ValidationHomeIsolationTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(runner._is_sensitive_env_name(name))
 
+    def test_tls_session_key_logging_is_removed_case_insensitively(self):
+        for name in ("SSLKEYLOGFILE", "sslkeylogfile", "SslKeyLogFile"):
+            with self.subTest(name=name):
+                source = {"PATH": "/usr/bin", name: "/real/home/tls-secrets.log", "ORDINARY_SETTING": "safe"}
+                sanitized = runner._validation_env(source)
+                self.assertNotIn(name, sanitized)
+                self.assertTrue(runner._is_sensitive_env_name(name))
+                self.assertNotIn("/real/home/tls-secrets.log", sanitized.values())
+                self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
 
 if __name__ == "__main__":
     unittest.main()
