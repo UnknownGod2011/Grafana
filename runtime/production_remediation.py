@@ -91,7 +91,10 @@ class AllowlistedProductionRemediationClient:
         retry_delay_seconds: float = 0.25,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        execute = getattr(transport, "execute", None)
+        try:
+            execute = getattr(transport, "execute", None)
+        except Exception as exc:
+            raise ValueError("transport must provide a callable execute method") from exc
         if not callable(execute):
             raise ValueError("transport must provide a callable execute method")
         if not _valid_allowlist_identity(allowed_production_id):
@@ -107,6 +110,10 @@ class AllowlistedProductionRemediationClient:
         if not callable(sleep):
             raise ValueError("sleep must be callable")
         self._transport = transport
+        # Freeze the validated bound execution callable. Re-reading transport.execute
+        # during a production mutation would let a mutable descriptor change behavior
+        # after construction and bypass the callable check above.
+        self._execute = execute
         self._production_id = allowed_production_id
         self._uplink = allowed_uplink
         self._timeout_seconds = timeout_seconds
@@ -132,7 +139,7 @@ class AllowlistedProductionRemediationClient:
         last_status: int | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
-                result = self._transport.execute(request, timeout_seconds=self._timeout_seconds)
+                result = self._execute(request, timeout_seconds=self._timeout_seconds)
             except (TimeoutError, OSError):
                 result = TransportResult(False, None, retryable=True)
             except Exception:
@@ -147,9 +154,6 @@ class AllowlistedProductionRemediationClient:
             try:
                 self._sleep(self._retry_delay_seconds)
             except Exception:
-                # A broken scheduler/sleep hook must not escape the governed boundary or
-                # cause a second mutation attempt. The first provider result remains the
-                # only execution evidence available to the caller.
                 return self._result(False, operation_id, attempt, last_status, "production remediation retry scheduling fault")
 
         return self._result(False, operation_id, self._max_attempts, last_status, "production remediation failed")
@@ -158,7 +162,10 @@ class AllowlistedProductionRemediationClient:
         """Return bounded provider idempotency state without exposing provider detail."""
         if not _valid_operation_id(operation_id):
             return "unknown"
-        reconcile = getattr(self._transport, "reconcile", None)
+        try:
+            reconcile = getattr(self._transport, "reconcile", None)
+        except Exception:
+            return "unknown"
         if not callable(reconcile):
             return "unknown"
         try:
