@@ -97,6 +97,17 @@ class AllowlistedProductionRemediationClient:
             raise ValueError("transport must provide a callable execute method") from exc
         if not callable(execute):
             raise ValueError("transport must provide a callable execute method")
+        # Reconciliation is optional at the transport interface, but when present it
+        # participates in the durable no-replay barrier. Resolve it once here just as
+        # execute is resolved once: a mutable descriptor must not be able to swap the
+        # reconciliation implementation between operation-state checks. Descriptor
+        # faults or non-callables mean reconciliation is unavailable and fail closed.
+        try:
+            reconcile = getattr(transport, "reconcile", None)
+        except Exception:
+            reconcile = None
+        if not callable(reconcile):
+            reconcile = None
         if not _valid_allowlist_identity(allowed_production_id):
             raise ValueError("allowlisted production must be a canonical string of 1-128 characters without surrounding whitespace or controls")
         if not _valid_allowlist_identity(allowed_uplink):
@@ -110,10 +121,10 @@ class AllowlistedProductionRemediationClient:
         if not callable(sleep):
             raise ValueError("sleep must be callable")
         self._transport = transport
-        # Freeze the validated bound execution callable. Re-reading transport.execute
-        # during a production mutation would let a mutable descriptor change behavior
-        # after construction and bypass the callable check above.
+        # Freeze validated provider capabilities. Re-reading provider-controlled
+        # descriptors during incident handling would create a check/use split.
         self._execute = execute
+        self._reconcile = reconcile
         self._production_id = allowed_production_id
         self._uplink = allowed_uplink
         self._timeout_seconds = timeout_seconds
@@ -160,16 +171,10 @@ class AllowlistedProductionRemediationClient:
 
     def reconcile_operation(self, operation_id: str) -> str:
         """Return bounded provider idempotency state without exposing provider detail."""
-        if not _valid_operation_id(operation_id):
+        if not _valid_operation_id(operation_id) or self._reconcile is None:
             return "unknown"
         try:
-            reconcile = getattr(self._transport, "reconcile", None)
-        except Exception:
-            return "unknown"
-        if not callable(reconcile):
-            return "unknown"
-        try:
-            state = reconcile(operation_id, timeout_seconds=self._timeout_seconds)
+            state = self._reconcile(operation_id, timeout_seconds=self._timeout_seconds)
         except Exception:
             return "unknown"
         if type(state) is not str:
