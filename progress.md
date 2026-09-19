@@ -26,32 +26,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — JVM build-tool isolation
+## Latest run — 2026-09-20 — validation temporary-directory isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation environment already isolated cloud credentials/config, credential discovery homes, proxies, Git config, TLS key/trust overrides, dynamic loaders, shell startup, language runtimes, .NET, and Go/Rust toolchain controls. Maven and Gradle still had ambient configuration/startup channels that could affect child processes.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The runner already isolated credential/configuration homes and many startup/injection channels, but still inherited host `TMPDIR`, `TMP`, and `TEMP`. That allowed validation children and libraries using the platform temporary-directory API to write into or consume a caller-selected host temporary tree rather than the disposable validation boundary.
 
 ### Changes / actions
 
-- Added `MAVEN_OPTS`, `MAVEN_ARGS`, and `MAVEN_USER_HOME` to the validation denylist. Maven options can carry system properties or extension-classpath controls, while a caller-selected Maven home can expose host settings/configuration.
-- Added `GRADLE_OPTS` and `GRADLE_USER_HOME`; a caller-selected Gradle user home can expose init scripts and other host-controlled build configuration to validation children.
-- Added case-insensitive regression coverage for all five variables while verifying an ordinary setting remains intact.
-- Kept filtering targeted rather than deleting broad `MAVEN_*`/`GRADLE_*` prefixes, reducing accidental disruption of benign build metadata.
+- Added `TMPDIR`, `TMP`, and `TEMP` to the case-insensitive validation denylist so helper-level sanitized environments never retain caller-selected temporary roots.
+- When an isolated validation home is supplied, create a dedicated `<isolated-home>/tmp` directory and explicitly set all three temporary-directory variables to that ephemeral path.
+- Added regression coverage proving host temporary roots are removed without an isolated home, replaced by the disposable path with one, and recognized case-insensitively.
+- Updated the prior isolated-home regression to use a real temporary directory because `_validation_env()` now intentionally creates its private temporary child.
+- Preserved `PATH` and ordinary environment settings; no broad environment purge was introduced.
 - No workflow, live service, cloud resource, Docker environment, Grafana instance, remediation target, or credentials were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `9d7e8d7e2506ee01f24a59b53b3f91a9a22f1230`.
-- Regression coverage committed as `2ce1cd013529158748c24d2ff3d17316d01e2544`.
-- Static inspection confirms the five new controls are matched case-insensitively by `_is_sensitive_env_name()` and therefore removed before validation subprocess environments are constructed.
+- Runner hardening committed as `f0634875b7330ae5dc35ea7157a48a25696f2fa0`.
+- Regression coverage committed as `459dc4d8e6196e3c9ff1ba48d5320fe6447041ec`.
+- Static inspection confirms host temp variables are removed before validation subprocess construction and the replacement directory is nested beneath the already disposable `TemporaryDirectory` validation home.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not expose an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Maven/Gradle startup/configuration controls belong inside the validation trust boundary because repository tests or helper scripts may invoke JVM build tools even though StageGuard's core runtime is Python.
-2. The sanitizer remains explicit and auditable instead of using broad ecosystem prefixes.
-3. `PATH` remains preserved because tests legitimately resolve system tools; safe replacement requires a deliberate cross-platform executable allowlist.
+1. Temporary filesystem location is part of the validation isolation boundary: tests and subprocesses should not accidentally consume host-controlled temp state or leave validation artifacts outside the disposable root.
+2. The runner explicitly sets all three common temp variables for cross-platform child-process behavior instead of relying on the parent Python process's cached `tempfile` choice.
+3. The replacement temp root is created before subprocess launch and is automatically removed with the enclosing validation home.
 
 ### Blockers / unknowns
 
