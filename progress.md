@@ -26,32 +26,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — Python validation startup isolation
+## Latest run — 2026-09-20 — Bash validation environment isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The runner already removed `PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONINSPECT`, and `PYTHONBREAKPOINT` and forced `PYTHONNOUSERSITE=1`, but still inherited several Python interpreter controls that could influence validation startup or redirect interpreter filesystem state.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the runtime test inventory. The validation runner already isolated shell startup files through `BASH_ENV`, `ENV`, and `ZDOTDIR`, but still allowed inherited Bash exported functions and behavior/path controls to cross into validation subprocesses.
 
 ### Changes / actions
 
-- Added `PYTHONWARNINGS`, `PYTHONUSERBASE`, `PYTHONPYCACHEPREFIX`, and `PYTHONEXECUTABLE` to the case-insensitive validation denylist.
-- This prevents inherited warning-filter/import behavior, host user-base discovery, caller-selected bytecode-cache roots, and executable-path overrides from crossing into validation subprocesses.
-- Added regression coverage for canonical, lowercase, and mixed-case spellings while confirming `PATH` and ordinary environment configuration remain intact.
-- Kept the change deliberately narrow rather than replacing the environment with a brittle global allowlist.
+- Added the case-insensitive `BASH_FUNC_` prefix to the validation denylist so exported Bash functions such as `BASH_FUNC_git%%` or `BASH_FUNC_curl%%` cannot override commands inside shell-based validation helpers.
+- Added `BASHOPTS`, `SHELLOPTS`, and `CDPATH` to the case-insensitive denylist to prevent caller-selected shell behavior or directory-resolution semantics from influencing validation scripts.
+- Added regression coverage for canonical and mixed/lower-case exported-function and shell-control names, while explicitly confirming `PATH` and ordinary environment configuration remain intact.
+- Kept the change scoped to ambient shell injection channels rather than replacing `PATH`, because StageGuard's cross-platform validation legitimately resolves system executables.
 - No workflow, live service, cloud resource, Docker environment, Grafana instance, remediation target, or credentials were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `17c7664314ec70d6a694d5b48a0586fb16c61226`.
-- Regression coverage committed as `aa08ee864a02660fe0b5ee0a73c74723953ab5a6`.
-- Static inspection confirms these controls are removed by the same case-insensitive sanitizer before validation subprocess construction.
+- Runner hardening committed as `7ec76d94e276c607dd49baf5e7f8841553e40f51`.
+- Regression coverage committed as `2e3576f4526904987d0ebad368da0a9da13f513b`.
+- Static inspection confirms exported Bash function names are rejected through the same uppercase prefix matcher and the three behavior controls through the exact-name matcher before subprocess construction.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not expose an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Python-specific startup/path controls belong inside the same validation isolation boundary as credential homes, shell startup files, dynamic loaders, and language toolchain hooks.
-2. `PYTHONNOUSERSITE=1` and `PYTHONDONTWRITEBYTECODE=1` remain explicit safe overrides; potentially host-directed Python path/startup controls are removed instead of rewritten.
-3. `PATH` remains available because the repository has cross-platform tests that legitimately discover system executables; hardening it safely requires an explicit executable-resolution design rather than an arbitrary replacement.
+1. Shell startup-file isolation is insufficient by itself because Bash can import function definitions directly from specially named environment variables.
+2. Exported shell functions are treated as executable ambient state and therefore belong inside the same fail-closed validation boundary as dynamic-loader and language-runtime hooks.
+3. `PATH` remains available until StageGuard has an explicit cross-platform executable-resolution policy; removing it ad hoc would reduce validation fidelity and could break legitimate tests.
 
 ### Blockers / unknowns
 
