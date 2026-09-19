@@ -26,33 +26,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation Git configuration isolation
+## Latest run — 2026-09-19 — validation TLS key-log isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and `runtime/tests/test_stageguard_validation_runner.py`. Home, Cloud SDK, proxy, SSH-agent, askpass, and common cloud credential channels were already isolated. One remaining process-level configuration channel was ambient Git configuration: Git supports `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`, which can inject credential helpers, authorization headers, URL rewrites, or other host-controlled behavior into child Git invocations even with an isolated HOME.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The harness already isolated home/config roots, Cloud SDK, proxies, SSH/askpass, common cloud credentials, and environment-injected Git configuration. One remaining host-controlled exfiltration channel was `SSLKEYLOGFILE`: Python/OpenSSL-capable clients can honor this environment variable and write TLS session secrets to a caller-selected host path, which violates the intent of credential-isolated validation even when no live service is deliberately contacted.
 
 ### Changes / actions
 
-- Added the case-insensitive `GIT_CONFIG_` family to the validation environment denylist.
-- This covers global/system config redirects and Git's environment-provided key/value configuration injection without changing ordinary `PATH` or the runner's deliberate `GIT_TERMINAL_PROMPT=0` safety override.
-- Extended `runtime/tests/test_validation_home_isolation.py` with regressions for global/system config, credential-helper injection, authorization-header injection, and mixed-case environment names.
-- Kept the tests under the existing `validation harness` ownership pattern; no CI workflow was added or triggered.
+- Added `SSLKEYLOGFILE` to the case-insensitive validation environment denylist.
+- Added regression coverage proving upper-, lower-, and mixed-case spellings are classified as sensitive, removed from child environments, and cannot retain the caller-selected key-log path.
+- Kept the regression under the existing `validation harness` ownership pattern; no CI workflow was added or triggered.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `3b3293a7982b1f7183194c3b6b5ae4052a2f5b48`.
-- Regression coverage committed as `8f6685ec2e91f0d37160453d2675ed7e7e838a37`.
-- Static inspection confirms `_is_sensitive_env_name()` now removes the entire `GIT_CONFIG_` family case-insensitively before child test processes are launched.
+- Runner hardening committed as `7f4f95abe7779f60d44f5f533008b724824bc3a5`.
+- Regression coverage committed as `607e87f55a30319514d984df6de6d80d4ac6203f`.
+- Static inspection confirms `_is_sensitive_env_name()` now removes `SSLKEYLOGFILE` case-insensitively before child test processes are launched.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Environment-injected Git configuration is part of the credential/process trust boundary because it can select helpers or inject request headers independently of HOME.
-2. Prefix-level filtering is preferable to enumerating Git's numbered KEY/VALUE variables and closes future variants in the same documented environment family.
-3. `GIT_TERMINAL_PROMPT=0` remains an explicit safe override because it prevents validation from becoming interactive.
-4. This hardening belongs in the existing dependency-light validation harness rather than a new workflow, preserving the project's low-noise CI policy.
+1. TLS session-key logging is part of the validation secret boundary because it can export cryptographic session material to an ambient caller-selected file independently of application logging.
+2. The variable is removed rather than redirected: dependency-light validation has no legitimate need to retain TLS secrets, and creating an ephemeral key log would unnecessarily preserve sensitive material.
+3. This remains validation-harness hardening rather than a runtime product behavior change.
 
 ### Blockers / unknowns
 
