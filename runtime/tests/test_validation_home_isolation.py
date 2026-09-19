@@ -52,6 +52,16 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for name in ("TMPDIR", "tmpdir", "Tmp", "TEMP", "temp"):
             with self.subTest(name=name): self.assertTrue(runner._is_sensitive_env_name(name))
 
+    def test_python_startup_and_host_path_controls_are_removed_case_insensitively(self):
+        names = ("PYTHONWARNINGS", "PYTHONUSERBASE", "PYTHONPYCACHEPREFIX", "PYTHONEXECUTABLE")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-python-control", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized)
+                    self.assertNotIn("/host/untrusted-python-control", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
     def test_git_config_environment_injection_is_removed(self):
         source = {"PATH": "/usr/bin", "GIT_CONFIG_GLOBAL": "/real/home/.gitconfig", "GIT_CONFIG_SYSTEM": "/etc/host-gitconfig", "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "!credential-helper-with-host-access", "git_config_key_1": "http.https://example.invalid/.extraHeader", "git_config_value_1": "Authorization: Bearer secret", "ORDINARY_SETTING": "safe"}
         sanitized = runner._validation_env(source)
