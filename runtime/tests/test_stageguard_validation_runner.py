@@ -107,10 +107,15 @@ class StageGuardValidationRunnerTests(unittest.TestCase):
         self.assertEqual(s["CLOUDSDK_CONFIG"],str(Path("/tmp/stageguard-isolated")/".config"/"gcloud"))
         self.assertEqual(s["ORDINARY_SETTING"],"safe")
         self.assertNotIn("/real/home",s.values()); self.assertNotIn("C:/Users/real",s.values()); self.assertNotIn("/real/gcloud",s.values())
+    def test_validation_environment_drops_cloudsdk_config_without_isolated_home(self):
+        source={"PATH":"/usr/bin","CLOUDSDK_CONFIG":"/real/gcloud","ORDINARY_SETTING":"safe"}
+        s=runner._validation_env(source)
+        self.assertNotIn("CLOUDSDK_CONFIG",s)
+        self.assertEqual(s["ORDINARY_SETTING"],"safe")
     def test_validation_environment_does_not_mutate_source(self):
         source={"GRAFANA_TOKEN":"secret","SAFE":"value"}; original=dict(source); sanitized=runner._validation_env(source); self.assertEqual(source,original); self.assertIsNot(sanitized,source)
     def test_sensitive_environment_matching_is_case_insensitive(self):
-        for n in ("grafana_token","Gemini_Api_Key","my_secret","foo_PASSWORD","pythonpath","PythonStartup","google_credentials","Google_Cloud_Keyfile_Json","gce_metadata_host","Gce_Metadata_Ip","http_proxy","Https_Proxy","all_proxy","No_Proxy"): self.assertTrue(runner._is_sensitive_env_name(n))
+        for n in ("grafana_token","Gemini_Api_Key","my_secret","foo_PASSWORD","pythonpath","PythonStartup","google_credentials","Google_Cloud_Keyfile_Json","cloudsdk_config","gce_metadata_host","Gce_Metadata_Ip","http_proxy","Https_Proxy","all_proxy","No_Proxy"): self.assertTrue(runner._is_sensitive_env_name(n))
     def test_test_file_subprocess_has_no_interactive_stdin(self):
         path=runner.TESTS/"test_timeline_projection.py"; env={"PATH":"/usr/bin"}; completed=mock.Mock(returncode=0)
         with mock.patch.object(subprocess,"run",return_value=completed) as run: self.assertEqual(runner._run_test_file(path,timeout=5.0,env=env),0)
