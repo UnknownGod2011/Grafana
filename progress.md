@@ -26,32 +26,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — hostile runtime remediation target regression
+## Latest run — 2026-09-19 — symmetric malformed runtime target regression
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, `runtime/tests/test_validation_remediation_boundary.py`, and `scripts/run_stageguard_validation.py`. The previous run had hardened runtime target identities before equality comparison, but the explicit hostile-object regression was still missing.
+Read `progress.md` completely first, then inspected the repository tree, `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, and `runtime/tests/test_validation_remediation_boundary.py`. The runtime implementation validates both production and uplink identities through the same canonical trust boundary, while the malformed-string regression exercised only the production-ID position.
 
 ### Changes / actions
 
-- Added a regression to the already validation-owned remediation boundary contract using a caller-controlled object whose `__eq__` raises if invoked.
-- Covered both hostile production-ID and hostile uplink positions. Each must be rejected as an unsupported target with zero provider attempts while preserving a valid operation ID only as bounded correlation metadata.
-- Added malformed runtime-string cases for empty, surrounding whitespace, embedded control characters, and overlength identities, all requiring zero provider calls.
-- Used a transport that raises if execution is attempted, so the regression proves malformed targets cannot cross the provider mutation boundary.
-- Kept the test inside `test_validation_remediation_boundary.py`, which is already selected by both the validation-harness pattern and remediation-boundary ownership contract; no new unowned test file or CI workflow was introduced.
-- No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
+- Expanded the validation-owned runtime-target regression so every malformed canonical-string case is exercised independently in both `production_id` and `uplink` positions.
+- Covered empty strings, leading/trailing whitespace, embedded control characters, and overlength identities symmetrically.
+- Strengthened each case to assert the rejection detail, zero provider attempts, preservation of the already-valid bounded operation ID as correlation metadata, and no transport contact.
+- Kept the hostile-object regression for both identity positions unchanged; its raising `__eq__` continues to prove validation occurs before equality comparison.
+- No new test surface or workflow was created, and no credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Regression committed as `6dd2dbef41c31af6766367aaad1d38dcbc2d4de2`.
-- Static contract inspection confirms runtime target validation occurs before equality and before `transport.execute`.
+- Symmetric malformed-target regression committed as `cbf0ec8ee99711ad56ddbc2235e3d97d04d3fbc5`.
+- Static inspection confirms both runtime target arguments pass through `_valid_allowlist_identity` before equality and before `transport.execute`.
 - No green execution claim is made: this connector runner can modify and inspect repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Hostile-object behavior is tested directly rather than inferred from type annotations or implementation shape.
-2. The regression asserts zero mutation attempts, making provider non-contact part of the safety contract.
-3. Malformed canonical strings are covered alongside hostile objects because both enter through the same runtime trust boundary.
+1. Both runtime identity positions are treated as independent untrusted inputs even though they currently share one validator.
+2. Provider non-contact remains an explicit safety assertion rather than an implementation assumption.
+3. The regression stays in the existing consolidated remediation-boundary gate to avoid validation ownership drift and noisy CI expansion.
 
 ### Blockers / unknowns
 
