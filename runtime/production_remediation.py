@@ -134,7 +134,13 @@ class AllowlistedProductionRemediationClient:
                 return self._result(True, operation_id, attempt, last_status, "production remediation accepted")
             if not result.retryable or attempt >= self._max_attempts:
                 return self._result(False, operation_id, attempt, last_status, "production remediation rejected or failed")
-            self._sleep(self._retry_delay_seconds)
+            try:
+                self._sleep(self._retry_delay_seconds)
+            except Exception:
+                # A broken scheduler/sleep hook must not escape the governed boundary or
+                # cause a second mutation attempt. The first provider result remains the
+                # only execution evidence available to the caller.
+                return self._result(False, operation_id, attempt, last_status, "production remediation retry scheduling fault")
 
         return self._result(False, operation_id, self._max_attempts, last_status, "production remediation failed")
 
