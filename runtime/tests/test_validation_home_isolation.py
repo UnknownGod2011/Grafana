@@ -75,6 +75,20 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     self.assertNotIn("/host/untrusted-loader-payload", sanitized.values())
                     self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
+    def test_shell_startup_injection_is_removed_case_insensitively(self):
+        # Non-interactive bash reads BASH_ENV; POSIX shells may read ENV, and zsh
+        # uses ZDOTDIR to relocate startup files. Validation tests invoke shell
+        # helpers, so none may inherit caller-selected startup code/configuration.
+        for canonical in ("BASH_ENV", "ENV", "ZDOTDIR"):
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-shell-startup", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name))
+                    self.assertNotIn(name, sanitized)
+                    self.assertNotIn("/host/untrusted-shell-startup", sanitized.values())
+                    self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
 
 if __name__ == "__main__":
     unittest.main()
