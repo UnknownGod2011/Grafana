@@ -26,31 +26,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation TLS key-log isolation
+## Latest run — 2026-09-19 — validation TLS trust-store isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The harness already isolated home/config roots, Cloud SDK, proxies, SSH/askpass, common cloud credentials, and environment-injected Git configuration. One remaining host-controlled exfiltration channel was `SSLKEYLOGFILE`: Python/OpenSSL-capable clients can honor this environment variable and write TLS session secrets to a caller-selected host path, which violates the intent of credential-isolated validation even when no live service is deliberately contacted.
+Read `progress.md` completely first, inspected the repository tree, searched for unfinished implementation markers, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation harness already removed credential/config homes, proxies, cloud credentials, injected Git configuration, and TLS session-key logging. A remaining process-level trust override existed: `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE` could point child TLS clients at caller-controlled CA material even inside the isolated validation home.
 
 ### Changes / actions
 
-- Added `SSLKEYLOGFILE` to the case-insensitive validation environment denylist.
-- Added regression coverage proving upper-, lower-, and mixed-case spellings are classified as sensitive, removed from child environments, and cannot retain the caller-selected key-log path.
-- Kept the regression under the existing `validation harness` ownership pattern; no CI workflow was added or triggered.
+- Added `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE` to the case-insensitive validation environment denylist.
+- Added regression coverage for canonical, lower-case, and mixed-case spellings of all four trust-store override variables.
+- The regression verifies the host path is absent from the sanitized child environment while ordinary environment settings remain intact.
+- Kept this under the existing `validation harness` ownership pattern; no CI workflow was created or triggered.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `7f4f95abe7779f60d44f5f533008b724824bc3a5`.
-- Regression coverage committed as `607e87f55a30319514d984df6de6d80d4ac6203f`.
-- Static inspection confirms `_is_sensitive_env_name()` now removes `SSLKEYLOGFILE` case-insensitively before child test processes are launched.
+- Runner hardening committed as `caf814793ba6d0b76ec26f7f3e490cbd6bae0a8e`.
+- Regression coverage committed as `290a26d9384a94022fcc9f7d92f8d1602b4d5f06`.
+- Static inspection confirms all four TLS trust override variables are removed case-insensitively before validation child processes are launched.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. TLS session-key logging is part of the validation secret boundary because it can export cryptographic session material to an ambient caller-selected file independently of application logging.
-2. The variable is removed rather than redirected: dependency-light validation has no legitimate need to retain TLS secrets, and creating an ephemeral key log would unnecessarily preserve sensitive material.
-3. This remains validation-harness hardening rather than a runtime product behavior change.
+1. Host-selected TLS trust roots are part of the validation isolation boundary: they can alter certificate verification independently of application configuration and can make a hostile/intercepting endpoint appear trusted.
+2. Trust overrides are removed rather than redirected. Validation that genuinely needs custom trust should declare and construct that trust explicitly in the relevant test fixture instead of inheriting ambient machine state.
+3. System/default TLS trust remains available; this change removes only explicit environment overrides and therefore does not intentionally disable normal certificate verification.
 
 ### Blockers / unknowns
 
