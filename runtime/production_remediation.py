@@ -118,6 +118,11 @@ class AllowlistedProductionRemediationClient:
         return ActionResult(False, "idempotency context is required for production remediation")
 
     def recover_uplink_idempotent(self, production_id: str, uplink: str, operation_id: str) -> ActionResult:
+        # Runtime callers are not trusted merely because the public API is typed.
+        # Validate exact canonical strings before equality so caller-controlled
+        # objects cannot execute custom __eq__ behavior inside the mutation boundary.
+        if not _valid_allowlist_identity(production_id) or not _valid_allowlist_identity(uplink):
+            return self._result(False, operation_id if _valid_operation_id(operation_id) else "", 0, None, "unsupported remediation target")
         if production_id != self._production_id or uplink != self._uplink:
             return self._result(False, operation_id if _valid_operation_id(operation_id) else "", 0, None, "unsupported remediation target")
         if not _valid_operation_id(operation_id):
