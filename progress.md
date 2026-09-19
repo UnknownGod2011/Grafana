@@ -26,32 +26,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — validation TLS trust-store isolation
+## Latest run — 2026-09-19 — validation dynamic-loader isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, inspected the repository tree, searched for unfinished implementation markers, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The validation harness already removed credential/config homes, proxies, cloud credentials, injected Git configuration, and TLS session-key logging. A remaining process-level trust override existed: `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE` could point child TLS clients at caller-controlled CA material even inside the isolated validation home.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The harness already isolated credential/config homes, proxies, cloud credentials, Git configuration, TLS key logging, and TLS trust overrides. A higher-impact process-injection gap remained: Linux `LD_PRELOAD`/`LD_LIBRARY_PATH` and macOS `DYLD_*` variables could be inherited by validation children, allowing host-selected dynamic libraries or search paths to affect the Python test processes before application-level isolation applies.
 
 ### Changes / actions
 
-- Added `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE` to the case-insensitive validation environment denylist.
-- Added regression coverage for canonical, lower-case, and mixed-case spellings of all four trust-store override variables.
-- The regression verifies the host path is absent from the sanitized child environment while ordinary environment settings remain intact.
-- Kept this under the existing `validation harness` ownership pattern; no CI workflow was created or triggered.
+- Added `LD_PRELOAD` and `LD_LIBRARY_PATH` to the case-insensitive validation environment denylist.
+- Added the `DYLD_` family to the case-insensitive sensitive-prefix denylist, covering macOS loader controls such as `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, and `DYLD_FRAMEWORK_PATH` without relying on an incomplete enumeration.
+- Added regression coverage for canonical, lowercase, and mixed-case forms of Linux and representative macOS loader variables.
+- Regression asserts the hostile loader path is absent while an ordinary environment setting remains intact.
+- Kept the work inside the existing validation-harness ownership surface; no CI workflow was created or triggered.
 - No credentials, live remediation targets, Grafana instances, Docker, cloud resources, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runner hardening committed as `caf814793ba6d0b76ec26f7f3e490cbd6bae0a8e`.
-- Regression coverage committed as `290a26d9384a94022fcc9f7d92f8d1602b4d5f06`.
-- Static inspection confirms all four TLS trust override variables are removed case-insensitively before validation child processes are launched.
+- Runner hardening committed as `f8ec8369924369f8304676d96dc1f8bd830f92b2`.
+- Regression coverage committed as `bc35f76a0d887ccb4167dee657832e3038ba66e5`.
+- Static inspection confirms loader variables are rejected case-insensitively by `_is_sensitive_env_name()` before validation child environments are constructed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Host-selected TLS trust roots are part of the validation isolation boundary: they can alter certificate verification independently of application configuration and can make a hostile/intercepting endpoint appear trusted.
-2. Trust overrides are removed rather than redirected. Validation that genuinely needs custom trust should declare and construct that trust explicitly in the relevant test fixture instead of inheriting ambient machine state.
-3. System/default TLS trust remains available; this change removes only explicit environment overrides and therefore does not intentionally disable normal certificate verification.
+1. Dynamic-loader environment controls belong to the validation isolation boundary because they can alter executable behavior before Python test code or StageGuard safety checks run.
+2. `DYLD_` is denied as a family rather than enumerating individual variables, reducing the risk of leaving an alternate Apple loader-control channel open.
+3. Normal system loader configuration remains untouched; only caller-supplied process environment overrides are removed.
 
 ### Blockers / unknowns
 
