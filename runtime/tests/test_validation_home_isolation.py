@@ -76,9 +76,6 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-shell-startup", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_language_runtime_injection_is_removed_case_insensitively(self):
-        # Validation may invoke Node, Ruby, Perl, or JVM tooling indirectly. These
-        # variables can inject startup code, modules, agents, or class paths before
-        # the intended command runs, so they must not cross the validation boundary.
         names = ("NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH")
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
@@ -86,6 +83,17 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     source = {"PATH": "/usr/bin", name: "/host/untrusted-runtime-payload", "ORDINARY_SETTING": "safe"}
                     sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-runtime-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
+    def test_dotnet_runtime_injection_is_removed_case_insensitively(self):
+        # .NET startup hooks, additional dependency stores, and CoreCLR profiler
+        # controls can load caller-selected managed/native code before test code.
+        names = ("DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "DOTNET_SHARED_STORE", "CORECLR_PROFILER", "CORECLR_PROFILER_PATH", "CORECLR_ENABLE_PROFILING")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-dotnet-payload", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-dotnet-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
 
 if __name__ == "__main__":
