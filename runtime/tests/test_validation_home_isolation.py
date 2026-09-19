@@ -85,8 +85,6 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-runtime-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
     def test_dotnet_runtime_injection_is_removed_case_insensitively(self):
-        # .NET startup hooks, additional dependency stores, and CoreCLR profiler
-        # controls can load caller-selected managed/native code before test code.
         names = ("DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "DOTNET_SHARED_STORE", "CORECLR_PROFILER", "CORECLR_PROFILER_PATH", "CORECLR_ENABLE_PROFILING")
         for canonical in names:
             for name in (canonical, canonical.lower(), canonical.title()):
@@ -94,6 +92,17 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     source = {"PATH": "/usr/bin", name: "/host/untrusted-dotnet-payload", "ORDINARY_SETTING": "safe"}
                     sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-dotnet-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
+    def test_go_and_rust_toolchain_injection_is_removed_case_insensitively(self):
+        # Go can consume caller-selected env/workspace/toolchain flags, while
+        # Cargo/rustc can execute wrappers or consume caller-selected config.
+        names = ("GOENV", "GOFLAGS", "GOTOOLCHAIN", "GOWORK", "CARGO_HOME", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS", "RUSTDOCFLAGS")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-toolchain-payload", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-toolchain-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
 
 if __name__ == "__main__":
