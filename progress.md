@@ -26,36 +26,36 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — runtime remediation target identity hardening
+## Latest run — 2026-09-19 — hostile runtime remediation target regression
 
 ### Inspected at start
 
-Read `progress.md` completely first, inspected the repository root and `runtime/tests`, then reviewed `runtime/production_remediation.py` and `runtime/tests/test_production_remediation.py`. The production adapter already validated configured allowlist identities, operation IDs, provider result types, reconciliation states, retry scheduling, and finite policy values. Runtime `production_id`/`uplink` arguments, however, were compared to trusted strings before exact runtime type/canonical-form validation.
+Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `runtime/tests/test_production_remediation.py`, `runtime/tests/test_validation_remediation_boundary.py`, and `scripts/run_stageguard_validation.py`. The previous run had hardened runtime target identities before equality comparison, but the explicit hostile-object regression was still missing.
 
 ### Changes / actions
 
-- Hardened `recover_uplink_idempotent` so both runtime target identities must pass the same exact-string, 1-128 character, no-surrounding-whitespace/no-control-character canonical validator used at construction.
-- Validation now occurs before equality comparison. This prevents a caller-controlled Python object with custom `__eq__` behavior from executing inside the production mutation boundary and prevents malformed string identities from reaching provider transport.
-- Invalid runtime targets fail closed with zero provider attempts; a canonical operation ID is retained only as bounded correlation metadata, while malformed operation IDs are still replaced by the empty identity.
-- Attempted to obtain an executable checkout and run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; the container cannot resolve `github.com`, so cloning failed before any test execution. This is an environment/network limitation, not a test result.
-- No CI workflow was added or triggered deliberately; no credentials, cloud resources, Docker, Grafana instances, remediation targets, or unrelated repositories were touched.
+- Added a regression to the already validation-owned remediation boundary contract using a caller-controlled object whose `__eq__` raises if invoked.
+- Covered both hostile production-ID and hostile uplink positions. Each must be rejected as an unsupported target with zero provider attempts while preserving a valid operation ID only as bounded correlation metadata.
+- Added malformed runtime-string cases for empty, surrounding whitespace, embedded control characters, and overlength identities, all requiring zero provider calls.
+- Used a transport that raises if execution is attempted, so the regression proves malformed targets cannot cross the provider mutation boundary.
+- Kept the test inside `test_validation_remediation_boundary.py`, which is already selected by both the validation-harness pattern and remediation-boundary ownership contract; no new unowned test file or CI workflow was introduced.
+- No credentials, cloud resources, Docker, Grafana instances, remediation targets, GitHub Actions, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runtime target hardening committed as `4c03444b8c7dae62f4068df7fe11811b67deb214`.
-- Static inspection confirms malformed runtime target objects are rejected before equality and before `transport.execute`.
-- No green execution claim is made. The attempted executable validation was blocked at repository clone by DNS/network isolation in the runner.
+- Regression committed as `6dd2dbef41c31af6766367aaad1d38dcbc2d4de2`.
+- Static contract inspection confirms runtime target validation occurs before equality and before `transport.execute`.
+- No green execution claim is made: this connector runner can modify and inspect repository files but does not provide an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Python type annotations are not a production trust boundary; runtime mutation inputs must be validated before invoking comparison or provider behavior.
-2. The configured allowlist and runtime target identity use the same canonical identity grammar to avoid normalization ambiguity.
-3. Invalid runtime target identity remains a target rejection rather than an operation-identity error; no mutation is attempted in either case.
+1. Hostile-object behavior is tested directly rather than inferred from type annotations or implementation shape.
+2. The regression asserts zero mutation attempts, making provider non-contact part of the safety contract.
+3. Malformed canonical strings are covered alongside hostile objects because both enter through the same runtime trust boundary.
 
 ### Blockers / unknowns
 
-- The consolidated runner still requires execution in a real checkout; this runner's container cannot resolve GitHub.
-- A dedicated regression for hostile/non-string runtime target objects should be added to the already validation-owned `runtime/tests/test_production_remediation.py` and executed when an executable checkout is available.
+- The consolidated runner still requires execution in a real checkout; current connector-authored changes remain unexecuted here.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside this dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
@@ -63,4 +63,4 @@ Read `progress.md` completely first, inspected the repository root and `runtime/
 
 ## Single best next step
 
-Add the runtime-target hostile-object regression to the existing remediation adapter boundary suite, then run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure without weakening credential isolation or no-replay semantics.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout, classify and fix every concrete failure without weakening credential isolation/no-replay semantics, then perform the pinned Grafana MCP 1.4.1 read-only smoke when Docker/Grafana access is available.
