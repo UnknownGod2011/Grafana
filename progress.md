@@ -26,40 +26,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-19 — exact provider result boundary
+## Latest run — 2026-09-19 — exact provider result regression ownership
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `runtime/production_remediation.py` and the repository tree. The production adapter already validated `TransportResult` field values at runtime, but used `isinstance(result, TransportResult)`. Because the provider transport is an external trust boundary, accepting arbitrary subclasses unnecessarily expands the mutation-result protocol and permits subclass-defined attribute behavior to execute during validation.
+Read `progress.md` completely first, then inspected `runtime/production_remediation.py`, `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_remediation_boundary.py`, `runtime/tests/test_production_remediation.py`, and the repository tree. The prior run had correctly tightened the provider result boundary from `isinstance` to exact `TransportResult` type matching, but explicitly left the corresponding regression unresolved until its validation-owned test location could be identified.
 
 ### Changes / actions
 
-- Tightened `_valid_transport_result` from subclass acceptance to exact `TransportResult` type acceptance.
-- Documented the trust-boundary rationale directly at the validator: provider-controlled subclasses must not be able to redefine field access while StageGuard validates the result of a production mutation.
-- Preserved all existing strict field checks: exact booleans, bounded integer HTTP status or `None`, and rejection of contradictory accepted+retryable results.
+- Resolved the existing validation ownership: `test_production_remediation.py` is already selected by the `remediation adapter boundary` gate in `scripts/run_stageguard_validation.py`, and the validation-boundary contract explicitly requires that file.
+- Added `test_transport_result_subclass_is_rejected_without_retry` to `runtime/tests/test_production_remediation.py`.
+- The regression supplies a provider-controlled subclass carrying an apparently successful `202` result and proves StageGuard rejects it, records exactly one provider attempt, preserves `transport_status=None`, and does not retry or transition to accepted state.
+- Kept the test inside the existing owned policy suite rather than creating a new standalone test island.
 - No CI workflow was added or triggered deliberately; no credentials, cloud resources, Docker, Grafana instances, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 
-- Runtime hardening committed as `8b50ec2c23b26e91e8884338d9cca0d7589dfa18`.
-- Static inspection confirms provider-result subclasses now fail closed through the existing invalid-result path after exactly one provider call and cannot reach retry scheduling or accepted-action state.
-- No green execution claim is made because this connector environment does not expose an executable checkout. A dedicated regression was not added blindly because the repository's validation-owned test filename could not be reliably resolved from the connector's truncated tree/code-search responses; the next executable validation pass should add/confirm that case in the existing owned policy suite rather than creating an unowned test island.
+- Regression committed as `735d10bf4dcc7b01dcb7101095c31a1123e0ba22`.
+- Static inspection confirms the regression matches the exact-type check in `_valid_transport_result` and is owned by the consolidated remediation gate.
+- No green execution claim is made because this connector environment does not expose an executable checkout. The new regression and the full validation runner still require repository execution.
 
 ### Decisions
 
-1. Provider execution results are a closed protocol, not an extensibility point: only StageGuard's exact immutable result carrier is accepted.
-2. Duck typing/subclassing remains appropriate for the transport itself, but not for the security-sensitive mutation result crossing back into StageGuard.
-3. Validation ownership is preserved rather than adding a new standalone test file that the consolidated runner may not execute.
+1. The exact provider-result protocol is now both implemented and regression-specified in an already-owned validation file.
+2. A provider result subclass that looks successful is deliberately treated as malformed execution evidence; it cannot become an accepted remediation result.
+3. Security regressions should continue to be placed in existing validation-owned files whenever ownership is already defined.
 
 ### Blockers / unknowns
 
 - The consolidated runner still requires execution in a real checkout.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- Historical validation ownership should be used to place an exact-type regression for `TransportResult` subclasses.
 - Live Gemini acceptance remains intentionally credentialed and outside this dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 - Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout, add/confirm a validation-owned regression proving a `TransportResult` subclass fails closed after exactly one provider call, and fix every concrete failure without weakening credential isolation, no-replay remediation semantics, or validation ownership.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first available executable checkout and fix every concrete failure, starting with the remediation adapter boundary, without weakening credential isolation, no-replay remediation semantics, or validation ownership.
