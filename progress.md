@@ -13,8 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
 - Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
 - Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Production remediation accepts only canonical operation IDs, canonical bounded target identities at configuration/runtime boundaries, construction-frozen execution and reconciliation capabilities, an exact `TransportResult` execution-result type with strictly validated fields, strictly validated reconciliation states, and bounded finite policy configuration. Provider descriptor faults fail closed.
-- Cloud Logging audit filters treat incident/log identifiers as bounded literals and reject raw control characters before issuing queries.
+- Production remediation accepts only canonical operation IDs, bounded canonical target identities, frozen execution/reconciliation capabilities, exact validated transport/reconciliation result types, and bounded finite policy configuration.
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 
 ## Retained validation baseline
@@ -24,38 +23,39 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
 - Historical live Docker rehearsal: PASS twice consecutively, predating latest hardening/recovery work.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
-- Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
+- Connector-authored changes since the last executable checkout are not treated as passing tests.
 
-## Latest run — 2026-09-20 — system Git configuration isolation implemented
+## Latest run — 2026-09-20 — system Git attributes isolation implemented
 
 ### Inspected at start
 
-Read `progress.md` completely first. Inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. Confirmed the prior run's finding: caller-provided `GIT_CONFIG_*` values were removed and HOME was isolated, but Git's machine/system configuration remained eligible for discovery because the runner did not install Git's documented no-system-config environment control.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/run_stageguard_validation.py`, the validation test inventory, and `runtime/tests/test_validation_git_system_config_isolation.py`. The previous run had closed system Git configuration discovery with `GIT_CONFIG_NOSYSTEM=1`, but system-wide Git attributes remained ambient host state: Git can consult the system gitattributes file unless `GIT_ATTR_NOSYSTEM` is set.
 
 ### Exact changes made
 
-- Added trusted `GIT_CONFIG_NOSYSTEM=1` to `VALIDATION_ENV_OVERRIDES` in `scripts/run_stageguard_validation.py`.
-- Kept `GIT_CONFIG_` in the case-insensitive sensitive prefix set, so a caller-provided `GIT_CONFIG_NOSYSTEM=0` is stripped before the trusted value is installed.
-- Added `runtime/tests/test_validation_git_system_config_isolation.py` with focused regression coverage proving hostile system/global Git config paths are removed, the trusted no-system override is reinstalled, Git remains non-interactive (`GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`), and ordinary configuration plus PATH survive.
-- Added mixed-case sensitivity coverage for `GIT_CONFIG_NOSYSTEM`.
+- Added `GIT_ATTR_` to the validation runner's case-insensitive sensitive environment prefixes so caller-provided Git attribute controls cannot survive sanitization.
+- Added trusted `GIT_ATTR_NOSYSTEM=1` after filtering, alongside the existing trusted `GIT_CONFIG_NOSYSTEM=1` override.
+- Extended `runtime/tests/test_validation_git_system_config_isolation.py` to cover hostile Git attribute controls, attempted `GIT_ATTR_NOSYSTEM=0`, canonical/lower/mixed-case sensitivity, preservation of ordinary configuration and PATH, and retention of the trusted non-interactive Git settings.
+- Runner implementation commit: `9695db6299780622c33686cb5fcf0c1181dec2ae`.
+- Regression-test commit: `0465df0dbdafb7013f49e219692c1a81b949fa08`.
 - No credentials, live Grafana instance, remediation target, Docker/cloud resources, or GitHub Actions workflow were touched.
 
 ### Checks / results
 
-- Static inspection and repository edits completed successfully.
-- No executable checkout is exposed by this connector, so the new tests and consolidated suite were not executed and no green test claim is made.
-- The new test filename matches the existing `test_validation_*.py` validation-harness gate, so it is owned by the consolidated runner rather than becoming an intentionally unowned test.
+- Repository inspection and static edits completed successfully.
+- This connector does not expose an executable checkout, so the modified tests and consolidated validation suite were not executed; no new green-suite claim is made.
+- The modified regression file remains owned by the existing `test_validation_*.py` validation-harness gate.
 
 ### Decisions
 
-1. System Git configuration is ambient host state and must not influence the isolated production validation process.
-2. `GIT_CONFIG_NOSYSTEM=1` is installed only after caller environment filtering; callers cannot disable it through inherited environment state.
-3. Retain isolated HOME for user/global configuration and retain PATH until a portable executable-resolution replacement is proven safe.
-4. Prefer a focused new regression file over broad unrelated test churn; the validation gate already owns it by pattern.
+1. System-wide Git attributes are ambient host policy and must not affect an isolated production validation process, just as system Git configuration must not.
+2. Caller-supplied `GIT_ATTR_*` values are stripped before the trusted no-system-attributes value is installed, preventing inherited environment state from disabling the boundary.
+3. PATH remains intentionally preserved until a cross-platform executable-resolution replacement can be proven safe; this run did not broaden into speculative PATH hardening.
+4. The change is intentionally narrow and covered in the existing Git ambient-state regression module rather than creating another overlapping test file.
 
 ### Blockers / unknowns
 
-- This connector can inspect/update repository text but cannot execute the repository test suite.
+- The repository connector can inspect/update text but cannot execute the test suite.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
