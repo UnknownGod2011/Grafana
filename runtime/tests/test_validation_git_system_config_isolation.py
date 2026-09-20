@@ -15,28 +15,40 @@ _spec.loader.exec_module(runner)
 
 
 class ValidationGitSystemConfigIsolationTests(unittest.TestCase):
-    def test_host_git_config_controls_are_replaced_by_trusted_no_system_override(self):
+    def test_host_git_config_and_attribute_controls_are_replaced_by_trusted_overrides(self):
         source = {
             "PATH": "/usr/bin",
             "GIT_CONFIG_NOSYSTEM": "0",
             "git_config_system": "/host/attacker.gitconfig",
             "GIT_CONFIG_GLOBAL": "/host/user.gitconfig",
+            "GIT_ATTR_NOSYSTEM": "0",
+            "git_attr_host_control": "/host/attributes",
             "ORDINARY_SETTING": "safe",
         }
         sanitized = runner._validation_env(source)
 
         self.assertEqual(sanitized["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(sanitized["GIT_ATTR_NOSYSTEM"], "1")
         self.assertNotIn("git_config_system", sanitized)
         self.assertNotIn("GIT_CONFIG_GLOBAL", sanitized)
+        self.assertNotIn("git_attr_host_control", sanitized)
         self.assertNotIn("/host/attacker.gitconfig", sanitized.values())
         self.assertNotIn("/host/user.gitconfig", sanitized.values())
+        self.assertNotIn("/host/attributes", sanitized.values())
         self.assertEqual(sanitized["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(sanitized["GIT_PAGER"], "cat")
         self.assertEqual(sanitized["PATH"], "/usr/bin")
         self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
-    def test_git_config_no_system_is_sensitive_case_insensitively(self):
-        for name in ("GIT_CONFIG_NOSYSTEM", "git_config_nosystem", "Git_Config_NoSystem"):
+    def test_git_system_controls_are_sensitive_case_insensitively(self):
+        for name in (
+            "GIT_CONFIG_NOSYSTEM",
+            "git_config_nosystem",
+            "Git_Config_NoSystem",
+            "GIT_ATTR_NOSYSTEM",
+            "git_attr_nosystem",
+            "Git_Attr_NoSystem",
+        ):
             with self.subTest(name=name):
                 self.assertTrue(runner._is_sensitive_env_name(name))
 
