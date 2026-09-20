@@ -1,0 +1,74 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Authoritative StageGuard lifecycle invariant. Green only when the runtime reports state=ok. Missing data is intentionally not mapped to healthy.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "SAFE"}, "1": {"text": "UNSAFE"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "max(stageguard_lifecycle_safety_state{state!=\"ok\"})", "legendFormat": "unsafe", "range": true, "refId": "A"}],
+      "title": "Lifecycle safety",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "One-hot lifecycle state exported by StageGuard. Exactly one state should be 1. This exposes the reason for a fail-closed lifecycle boundary without reproducing application safety logic in Grafana.",
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []},
+      "gridPos": {"h": 9, "w": 16, "x": 8, "y": 0},
+      "id": 2,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "stageguard_lifecycle_safety_state", "legendFormat": "{{state}}", "range": true, "refId": "A"}],
+      "title": "Lifecycle state timeline",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Age of the newest lifecycle-safety sample. A missing series is rendered as a very large age so transport/export failure is visible rather than appearing healthy.",
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 30}, {"color": "red", "value": 45}]}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 7},
+      "id": 3,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "max(time() - timestamp(stageguard_lifecycle_safety_state)) or vector(1000000000) * absent(stageguard_lifecycle_safety_state)", "legendFormat": "sample age", "range": true, "refId": "A"}],
+      "title": "Lifecycle telemetry freshness",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Transport health for the StageGuard runtime scrape. This is evidence availability, not lifecycle safety by itself.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "SCRAPE FAILING"}, "1": {"text": "scrape healthy"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 9},
+      "id": 4,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "min(up{job=\"stageguard-runtime-watchdog\"})", "legendFormat": "scrape health", "range": true, "refId": "A"}],
+      "title": "Runtime evidence transport",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "stageguard-prometheus"},
+      "description": "Recovery remains a separate proof obligation. Provider acceptance is never treated as recovery and an unsafe lifecycle state must not be cleared by replaying remediation.",
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "not verified"}, "1": {"text": "RECOVERED"}}, "type": "value"}], "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 9},
+      "id": 5,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "stageguard_recovery_verified", "legendFormat": "verified", "range": true, "refId": "A"}],
+      "title": "Recovery proof",
+      "type": "stat"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["stageguard", "lifecycle", "safety", "grafana", "telemetry"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "StageGuard Lifecycle Safety",
+  "uid": "stageguard-lifecycle-safety",
+  "version": 1
+}
