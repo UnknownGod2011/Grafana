@@ -73,6 +73,16 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for name in ("GIT_CONFIG_GLOBAL", "git_config_system", "Git_Config_Count", "git_config_key_0", "GIT_CONFIG_VALUE_0"):
             with self.subTest(name=name): self.assertTrue(runner._is_sensitive_env_name(name))
 
+    def test_git_executable_helper_and_template_controls_are_removed_case_insensitively(self):
+        names = ("GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_TEMPLATE_DIR")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-git-helper", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized)
+                    self.assertNotIn("/host/untrusted-git-helper", sanitized.values()); self.assertEqual(sanitized["PATH"], "/usr/bin"); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
     def test_pager_editor_and_less_hooks_are_sanitized_noninteractively(self):
         source = {"PATH": "/usr/bin", "GIT_PAGER": "/host/evil-git-pager", "pager": "/host/evil-pager", "ManPager": "/host/evil-manpager", "SYSTEMD_PAGER": "/host/evil-systemd-pager", "EDITOR": "/host/evil-editor", "visual": "/host/evil-visual", "LESSOPEN": "|/host/evil-less %s", "lessclose": "/host/evil-less-close %s", "ORDINARY_SETTING": "safe"}
         sanitized = runner._validation_env(source)
