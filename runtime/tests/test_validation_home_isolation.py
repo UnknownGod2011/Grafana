@@ -153,6 +153,16 @@ class ValidationHomeIsolationTests(unittest.TestCase):
                     source = {"PATH": "/usr/bin", name: "/host/untrusted-toolchain-payload", "ORDINARY_SETTING": "safe"}; sanitized = runner._validation_env(source)
                     self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized); self.assertNotIn("/host/untrusted-toolchain-payload", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
 
+    def test_make_environment_injection_is_removed_case_insensitively(self):
+        names = ("MAKEFLAGS", "MFLAGS", "MAKEFILES")
+        for canonical in names:
+            for name in (canonical, canonical.lower(), canonical.title()):
+                with self.subTest(name=name):
+                    source = {"PATH": "/usr/bin", name: "/host/untrusted-make-control", "ORDINARY_SETTING": "safe"}
+                    sanitized = runner._validation_env(source)
+                    self.assertTrue(runner._is_sensitive_env_name(name)); self.assertNotIn(name, sanitized)
+                    self.assertNotIn("/host/untrusted-make-control", sanitized.values()); self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
 
 if __name__ == "__main__":
     unittest.main()
