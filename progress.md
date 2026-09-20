@@ -25,42 +25,45 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Connector-authored changes since the last executable checkout are not treated as passing tests.
 
-## Latest run — 2026-09-20 — inherited Git repository-state isolation implemented
+## Latest run — 2026-09-20 — non-interactive local acceptance path implemented
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_git_system_config_isolation.py`. The runner already isolated Git credentials, helpers, config, attributes, editors and pagers, but the allow-by-omission approach still left Git repository-discovery and object-store controls such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, and `GIT_NAMESPACE` inherited from the caller. Those can redirect Git commands away from the checked-out StageGuard repository or toward caller-controlled object/index state.
+Read `progress.md` completely before deciding what to change. Inspected the consolidated validation runner, repository test inventory, Docker Compose stack, README, scripts inventory, and `scripts/demo_release.py`. Confirmed that the local stack already pins `grafana/mcp-grafana:1.4.1` and that the release rehearsal proves healthy Prometheus evidence, starts the real local stack/MCP smoke through `demo_local.up`, injects the deterministic fault, and waits for fault evidence. The remaining orchestration problem was that the rehearsal always called `input()`, so the strongest local Docker/Grafana/MCP acceptance path could not run unattended from a terminal, development agent, or local pre-release script without adding GitHub Actions usage.
 
 ### Exact changes made
 
-- Broadened the case-insensitive sensitive environment prefix from the partial `GIT_CONFIG_`/`GIT_ATTR_` families to all inherited `GIT_*` variables.
-- Kept the explicit trusted post-sanitization Git overrides: `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, and `GIT_PAGER=cat`.
-- Extended `runtime/tests/test_validation_git_system_config_isolation.py` with hostile repository, worktree, index, object-store, discovery, namespace, config, and attribute controls in canonical/lower/mixed-case forms.
-- Regression assertions continue to preserve `PATH` and ordinary non-sensitive environment configuration while ensuring hostile Git values cannot survive sanitization.
-- Runner implementation commit: `d0218d3efcc81aadcbc0e8248175f2cfe5ffd037`.
-- Regression-test commit: `606f28f6b41e9a2e8c2ffcc966abb1a472b26faa`.
-- No credentials, live Grafana instance, remediation target, Docker/cloud resources, or GitHub Actions workflow were touched.
+- Added `--non-interactive` to `scripts/demo_release.py`.
+- Non-interactive mode skips only the human recording/operator pause; it does not skip stack recreation, startup, the Grafana MCP smoke performed by local startup, healthy baseline evidence gates, deterministic fault injection, or post-fault Prometheus evidence gates.
+- Preserved the existing interactive behavior as the default.
+- Reworded recording-specific terminal output so the same command is meaningful as a general local acceptance rehearsal.
+- Added `runtime/tests/test_validation_demo_release_noninteractive.py` with regression coverage proving non-interactive mode never reads stdin, interactive mode still pauses, and the non-interactive main path runs baseline gates before one deterministic fault injection and then fault gates.
+- Named the regression under the existing `test_validation_*.py` ownership pattern so `--require-full-coverage` does not introduce an unowned test.
+- Removed the transient duplicate test filename created before assigning it to the validation-harness gate.
+- Implementation commit: `e31a4ee60eceb60aba15dbf160cde0d2685d566f`.
+- Validation-owned regression commit: `4ac418c263fc7c7b60121c678f2c5758249d6359` (duplicate cleanup: `8cb7cbed41423eb73f575f64c39aee1693b40e83`).
+- No credentials, live Grafana instance, remediation target, cloud resource, or GitHub Actions workflow was touched. Repository Actions history remains empty, so this work adds no CI noise/storage consumption.
 
 ### Checks / results
 
-- Repository inspection and static edits completed successfully.
-- This connector does not expose an executable checkout, so the modified tests and consolidated validation suite were not executed; no new green-suite claim is made.
-- The modified regression file remains owned by the existing `test_validation_*.py` validation-harness gate.
+- Static repository inspection and edits completed successfully.
+- The connector does not expose an executable checkout, so the new unit regression and local Docker acceptance command were not executed; no new green-suite or MCP-1.4.1-live-smoke claim is made.
+- The new regression is owned by the existing validation-harness gate through `test_validation_*.py`.
 
 ### Decisions
 
-1. Validation should treat the entire inherited Git environment namespace as ambient caller state, rather than continuously enumerating individual Git variables as new gaps are discovered.
-2. Only StageGuard's small trusted Git override set is reintroduced after sanitization; this makes the boundary easier to reason about and prevents repository/object-store redirection classes of bugs.
-3. PATH remains intentionally preserved until a cross-platform executable-resolution replacement can be proven safe.
-4. This closes the recurring Git-environment enumeration problem; future work should return to executable validation and product/runtime gaps rather than adding individual Git variables.
+1. The live local acceptance path should be automatable without requiring GitHub Actions; developers and coding agents can now run `python scripts/demo_release.py --non-interactive` directly on a Docker-capable checkout.
+2. Non-interactive acceptance must not weaken evidence gates. It removes only the human pause between verified healthy baseline and deterministic fault injection.
+3. Interactive mode remains the default because it is useful for operator demonstrations and manual inspection.
+4. Future hardening should focus on concrete executable failures and product/runtime behavior rather than further speculative environment-variable enumeration.
 
 ### Blockers / unknowns
 
-- The repository connector can inspect/update text but cannot execute the test suite.
+- This repository connector can inspect/update text but cannot execute the test suite or Docker stack.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout, fix every concrete failure it exposes, and only after that perform the pinned Grafana MCP 1.4.1 read-only smoke.
+In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive` to exercise the pinned Grafana MCP 1.4.1 local evidence path without manual stdin and record the exact results here.
