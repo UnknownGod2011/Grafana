@@ -28,44 +28,42 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 ## Recent completed work
 
 - Added an unattended local acceptance path with `python scripts/demo_release.py --non-interactive`; it preserves stack recreation, Grafana MCP smoke, healthy evidence gates, deterministic fault injection, and post-fault evidence gates while removing only the human stdin pause.
-- Added opt-in `--cleanup` to the release rehearsal so unattended runs can deterministically tear down the compose stack on success, evidence failure, or partial startup failure without touching a pre-existing StageGuard API/stack.
-- Made compose teardown fail closed: a failed pre-run teardown can no longer be treated as a fresh telemetry boundary, and failed opt-in cleanup now makes an otherwise successful acceptance run fail.
+- Added opt-in `--cleanup` so unattended runs deterministically tear down the compose stack on success, evidence failure, or partial startup failure without touching a pre-existing StageGuard API/stack.
+- Made compose teardown fail closed on non-zero exit and timeout-bounded at 45 seconds, so neither the fresh-evidence boundary nor requested cleanup can hang indefinitely or silently succeed after teardown failure.
 - Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
 - Added critical Grafana alert `stageguard-lifecycle-unsafe` from the authoritative fixed-cardinality `stageguard_lifecycle_safety_state` metric; missing data is alerting.
 - Added a dedicated read-only `StageGuard Lifecycle Safety` Grafana dashboard for the authoritative one-hot lifecycle state, telemetry freshness, scrape transport, and separate recovery proof.
-- Added `docs/runbooks/lifecycle-safety.md`, an operator procedure that preserves StageGuard's no-replay and telemetry-verified recovery invariants during lifecycle incidents.
-- Linked the lifecycle dashboard directly to that repository-owned operator runbook and added validation-owned regression coverage so the operational path cannot silently disappear or become a mutable control surface.
+- Added `docs/runbooks/lifecycle-safety.md`, preserving StageGuard's no-replay and telemetry-verified recovery invariants during lifecycle incidents, and linked it from the lifecycle dashboard.
 
-## Latest run — 2026-09-20 — fail-closed acceptance teardown
+## Latest run — 2026-09-20 — bounded unattended teardown
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_release.py` and `runtime/tests/test_validation_demo_release_noninteractive.py`. The new cleanup path invoked `docker compose down` with `check=False` and discarded its return code. Consequently, a failed pre-run teardown could still be treated as a clean telemetry reset, while a failed final `--cleanup` could still return exit code 0 and falsely claim unattended acceptance succeeded while resources remained.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_release.py` and `runtime/tests/test_validation_demo_release_noninteractive.py`. The prior run correctly rejected non-zero `docker compose down` exits, but the subprocess itself had no timeout. A wedged Docker daemon or Compose process could therefore hang both the pre-run freshness boundary and final `--cleanup` forever, violating the repository's timeout-bounded unattended-validation invariant.
 
 ### Exact changes made
 
-- `_compose_down()` now checks the Docker Compose return code and raises `EvidenceGateError` on non-zero exit.
-- `_recreate_compose_stack()` therefore fails closed when stale resources cannot be removed instead of continuing across an untrustworthy telemetry boundary.
-- Refactored `main()` to retain an explicit `exit_code`, allowing cleanup failures in `finally` to convert an otherwise successful acceptance result into failure without suppressing the cleanup attempt.
-- Cleanup errors are emitted separately as `RELEASE CLEANUP ERROR` for operator diagnosis.
-- Preserved the pre-existing-stack ownership guard: `--cleanup` still never tears down a StageGuard API/stack that was running before the rehearsal.
-- Added regression coverage for non-zero compose teardown, failed fresh-boundary recreation, and cleanup failure overriding an otherwise successful acceptance result.
-- Implementation commit: `52f5adbeec9451f5d78bcfe3c1991de58b8b119a`.
-- Regression-test commit: `4a79233592636cf050e3f62f4a51ee2b52927ecc`.
+- Added `COMPOSE_DOWN_TIMEOUT_SECONDS = 45.0` to the release rehearsal.
+- `_compose_down()` now passes that bound directly to `subprocess.run`.
+- `subprocess.TimeoutExpired` is translated into `EvidenceGateError`, preserving the same fail-closed contract used for non-zero Compose exits.
+- Because both fresh-stack recreation and final cleanup use `_compose_down()`, the bound protects both lifecycle edges without duplicating behavior.
+- Added regression coverage proving the timeout is supplied and that timeout expiry is rejected as an evidence-gate failure.
+- Implementation commit: `cd87fad510967e3e0e6c0ccf7762620e557072ef`.
+- Regression-test commit: `0025f5c4b5b0e84a563975f1ea37afbf31285a46`.
 - No credentials, live Grafana instance, remediation target, cloud resource, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
 - GitHub accepted the Python source and regression-test updates.
-- Static review confirms both the pre-run freshness boundary and requested final cleanup are now fail-closed.
+- Static review confirms timeout expiry cannot be mistaken for successful teardown and flows through the existing failure handling.
 - This repository connector does not expose an executable checkout, so the updated tests and Docker rehearsal were not executed. No new green-suite claim is made.
 
 ### Decisions
 
-1. A clean-stack acceptance run must not continue if Docker Compose cannot prove teardown succeeded; otherwise old Prometheus samples or containers could invalidate evidence claims.
-2. When `--cleanup` is requested, leaving compose resources behind is an acceptance failure even if all evidence gates passed.
-3. Cleanup remains opt-in for interactive/demo users, but its contract is strict once requested.
-4. A pre-existing running StageGuard API remains a hard stop and is never cleaned up by this script.
+1. Unattended acceptance lifecycle operations must be time-bounded as well as return-code checked.
+2. A Docker teardown timeout is an acceptance failure, not a warning, because StageGuard cannot prove a fresh evidence boundary or successful requested cleanup afterward.
+3. The timeout remains a repository constant rather than a user-facing tuning flag until real execution demonstrates a need for configuration.
+4. The pre-existing-stack ownership guard remains unchanged; the rehearsal never destroys a stack it did not start.
 
 ### Blockers / unknowns
 
@@ -76,4 +74,4 @@ Read `progress.md` completely before deciding what to change. Inspected `scripts
 
 ## Single best next step
 
-In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive --cleanup`. Verify Grafana provisions the lifecycle dashboard version 2 and its runbook link, `stageguard-lifecycle-unsafe` remains Normal while lifecycle state is `ok`, pinned `grafana/mcp-grafana:1.4.1` passes the read-only smoke, and both the pre-run teardown and final cleanup are observed to fail closed under a deliberately induced Docker Compose teardown error. After those gates pass, prioritize failures revealed by real execution over additional speculative hardening.
+In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive --cleanup`. Verify Grafana provisions the lifecycle dashboard and runbook link, `stageguard-lifecycle-unsafe` remains Normal while lifecycle state is `ok`, pinned `grafana/mcp-grafana:1.4.1` passes the read-only smoke, and teardown failure/timeout both produce non-zero acceptance without touching a pre-existing stack. After those gates pass, prioritize failures revealed by real execution over additional speculative hardening.
