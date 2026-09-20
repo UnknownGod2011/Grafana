@@ -122,15 +122,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    stack_started = False
+    stack_owned = False
     try:
         if demo_local._api_running():
             raise EvidenceGateError("StageGuard API is already running; run 'python scripts/demo_local.py stop' first")
 
         print("[release] Recreating local compose stack to remove stale telemetry...")
         _recreate_compose_stack()
+        # From this point the rehearsal owns the local compose lifecycle. Mark it
+        # before startup so --cleanup also handles partially-created containers
+        # when demo_local.up() fails midway through startup.
+        stack_owned = True
         demo_local.up(fresh=True, enable_gemini=args.gemini, open_browser=args.open)
-        stack_started = True
 
         print("[release] Waiting for the healthy baseline used by the bounded investigator...")
         healthy_loss = _wait_for("healthy uplink-b packet loss < 1%", PACKET_LOSS_QUERY, lambda value: value < 1.0)
@@ -154,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"RELEASE DEMO ERROR: {exc}", file=sys.stderr)
         return 1
     finally:
-        if args.cleanup and stack_started:
+        if args.cleanup and stack_owned:
             print("[release] Cleaning up local compose stack...")
             _compose_down()
 
