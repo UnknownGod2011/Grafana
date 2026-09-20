@@ -25,19 +25,20 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Connector-authored changes since the last executable checkout are not treated as passing tests.
 
-## Latest run — 2026-09-20 — system Git attributes isolation implemented
+## Latest run — 2026-09-20 — inherited Git repository-state isolation implemented
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/run_stageguard_validation.py`, the validation test inventory, and `runtime/tests/test_validation_git_system_config_isolation.py`. The previous run had closed system Git configuration discovery with `GIT_CONFIG_NOSYSTEM=1`, but system-wide Git attributes remained ambient host state: Git can consult the system gitattributes file unless `GIT_ATTR_NOSYSTEM` is set.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_git_system_config_isolation.py`. The runner already isolated Git credentials, helpers, config, attributes, editors and pagers, but the allow-by-omission approach still left Git repository-discovery and object-store controls such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, and `GIT_NAMESPACE` inherited from the caller. Those can redirect Git commands away from the checked-out StageGuard repository or toward caller-controlled object/index state.
 
 ### Exact changes made
 
-- Added `GIT_ATTR_` to the validation runner's case-insensitive sensitive environment prefixes so caller-provided Git attribute controls cannot survive sanitization.
-- Added trusted `GIT_ATTR_NOSYSTEM=1` after filtering, alongside the existing trusted `GIT_CONFIG_NOSYSTEM=1` override.
-- Extended `runtime/tests/test_validation_git_system_config_isolation.py` to cover hostile Git attribute controls, attempted `GIT_ATTR_NOSYSTEM=0`, canonical/lower/mixed-case sensitivity, preservation of ordinary configuration and PATH, and retention of the trusted non-interactive Git settings.
-- Runner implementation commit: `9695db6299780622c33686cb5fcf0c1181dec2ae`.
-- Regression-test commit: `0465df0dbdafb7013f49e219692c1a81b949fa08`.
+- Broadened the case-insensitive sensitive environment prefix from the partial `GIT_CONFIG_`/`GIT_ATTR_` families to all inherited `GIT_*` variables.
+- Kept the explicit trusted post-sanitization Git overrides: `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, and `GIT_PAGER=cat`.
+- Extended `runtime/tests/test_validation_git_system_config_isolation.py` with hostile repository, worktree, index, object-store, discovery, namespace, config, and attribute controls in canonical/lower/mixed-case forms.
+- Regression assertions continue to preserve `PATH` and ordinary non-sensitive environment configuration while ensuring hostile Git values cannot survive sanitization.
+- Runner implementation commit: `d0218d3efcc81aadcbc0e8248175f2cfe5ffd037`.
+- Regression-test commit: `606f28f6b41e9a2e8c2ffcc966abb1a472b26faa`.
 - No credentials, live Grafana instance, remediation target, Docker/cloud resources, or GitHub Actions workflow were touched.
 
 ### Checks / results
@@ -48,10 +49,10 @@ Read `progress.md` completely before deciding what to change. Inspected `scripts
 
 ### Decisions
 
-1. System-wide Git attributes are ambient host policy and must not affect an isolated production validation process, just as system Git configuration must not.
-2. Caller-supplied `GIT_ATTR_*` values are stripped before the trusted no-system-attributes value is installed, preventing inherited environment state from disabling the boundary.
-3. PATH remains intentionally preserved until a cross-platform executable-resolution replacement can be proven safe; this run did not broaden into speculative PATH hardening.
-4. The change is intentionally narrow and covered in the existing Git ambient-state regression module rather than creating another overlapping test file.
+1. Validation should treat the entire inherited Git environment namespace as ambient caller state, rather than continuously enumerating individual Git variables as new gaps are discovered.
+2. Only StageGuard's small trusted Git override set is reintroduced after sanitization; this makes the boundary easier to reason about and prevents repository/object-store redirection classes of bugs.
+3. PATH remains intentionally preserved until a cross-platform executable-resolution replacement can be proven safe.
+4. This closes the recurring Git-environment enumeration problem; future work should return to executable validation and product/runtime gaps rather than adding individual Git variables.
 
 ### Blockers / unknowns
 
