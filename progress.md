@@ -26,41 +26,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — validation system Git configuration review
+## Latest run — 2026-09-20 — system Git configuration isolation implemented
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the runtime test inventory. The runner already strips caller-provided `GIT_CONFIG_*` variables and uses an isolated HOME, but Git can still consult machine-level/system configuration because the sanitized child environment does not explicitly set `GIT_CONFIG_NOSYSTEM=1`.
+Read `progress.md` completely first. Inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. Confirmed the prior run's finding: caller-provided `GIT_CONFIG_*` values were removed and HOME was isolated, but Git's machine/system configuration remained eligible for discovery because the runner did not install Git's documented no-system-config environment control.
 
-### Changes / actions
+### Exact changes made
 
-- Audited the current validation environment boundary instead of adding another speculative credential-name filter.
-- Identified a concrete remaining ambient-state path: `/etc/gitconfig` or platform-equivalent system Git configuration can affect validation subprocesses even though global/user Git configuration is isolated.
-- Confirmed the correct hardening direction is to install a trusted `GIT_CONFIG_NOSYSTEM=1` override after sanitization; because `GIT_CONFIG_*` is intentionally stripped from caller input, the override must be installed by the runner itself, not inherited.
-- Confirmed regression coverage should prove hostile caller values are removed and the trusted override is reinstalled, while existing `GIT_TERMINAL_PROMPT=0` and `GIT_PAGER=cat` behavior remains intact.
-- Did not weaken `PATH`, execute live services, use credentials, touch Docker/Grafana/cloud resources, or trigger GitHub Actions.
+- Added trusted `GIT_CONFIG_NOSYSTEM=1` to `VALIDATION_ENV_OVERRIDES` in `scripts/run_stageguard_validation.py`.
+- Kept `GIT_CONFIG_` in the case-insensitive sensitive prefix set, so a caller-provided `GIT_CONFIG_NOSYSTEM=0` is stripped before the trusted value is installed.
+- Added `runtime/tests/test_validation_git_system_config_isolation.py` with focused regression coverage proving hostile system/global Git config paths are removed, the trusted no-system override is reinstalled, Git remains non-interactive (`GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`), and ordinary configuration plus PATH survive.
+- Added mixed-case sensitivity coverage for `GIT_CONFIG_NOSYSTEM`.
+- No credentials, live Grafana instance, remediation target, Docker/cloud resources, or GitHub Actions workflow were touched.
 
 ### Checks / results
 
-- Static repository inspection only; no green execution claim is made because this connector does not expose an executable checkout.
-- The runtime test inventory remains extensive and includes validation ownership/full-coverage tests; the consolidated executable run is still necessary to classify actual failures.
-- No production runtime behavior was changed in this run; this entry records the exact hardening gap so the next code change can be narrow and regression-tested rather than speculative.
+- Static inspection and repository edits completed successfully.
+- No executable checkout is exposed by this connector, so the new tests and consolidated suite were not executed and no green test claim is made.
+- The new test filename matches the existing `test_validation_*.py` validation-harness gate, so it is owned by the consolidated runner rather than becoming an intentionally unowned test.
 
 ### Decisions
 
-1. System Git configuration is ambient executable/configuration state and should not influence a credential-isolated production validation run.
-2. The trusted override must be applied after filtering, analogous to the existing non-interactive Git pager/prompt overrides.
-3. Do not set a caller-controlled `GIT_CONFIG_SYSTEM` path or depend on `/dev/null`, which is less portable than Git's documented no-system-config control.
-4. Keep the current isolated HOME behavior for user/global configuration and retain `PATH` until a cross-platform executable-resolution design is proven safe.
+1. System Git configuration is ambient host state and must not influence the isolated production validation process.
+2. `GIT_CONFIG_NOSYSTEM=1` is installed only after caller environment filtering; callers cannot disable it through inherited environment state.
+3. Retain isolated HOME for user/global configuration and retain PATH until a portable executable-resolution replacement is proven safe.
+4. Prefer a focused new regression file over broad unrelated test churn; the validation gate already owns it by pattern.
 
 ### Blockers / unknowns
 
-- This connector can inspect and update repository text but cannot execute the repository test suite.
-- The system-Git-config hardening still needs the runner and regression test edit in an executable/code-editing run.
+- This connector can inspect/update repository text but cannot execute the repository test suite.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Add the trusted `GIT_CONFIG_NOSYSTEM=1` post-sanitization override to `scripts/run_stageguard_validation.py`, add regression coverage in `test_validation_home_isolation.py`, then run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure before performing the pinned Grafana MCP 1.4.1 read-only smoke.
+Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout, fix every concrete failure it exposes, and only after that perform the pinned Grafana MCP 1.4.1 read-only smoke.
