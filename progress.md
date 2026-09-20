@@ -16,7 +16,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Production remediation accepts only canonical operation IDs, bounded canonical target identities, frozen execution/reconciliation capabilities, exact validated transport/reconciliation result types, and bounded finite policy configuration.
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 - Local acceptance never destroys pre-existing compose resources merely because the StageGuard API is unreachable.
-- Unattended cleanup must stop the host StageGuard API process and remove compose containers it owns; both outcomes are verified and a partial teardown is a cleanup failure.
+- Unattended cleanup must independently attempt all runtime components it owns, verify the host API is unreachable and compose has zero containers, and report any partial teardown as failure.
 
 ## Retained validation baseline
 
@@ -32,41 +32,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added unattended local acceptance with `python scripts/demo_release.py --non-interactive` and opt-in `--cleanup`.
 - Made compose teardown fail closed on non-zero exit and timeout-bounded at 45 seconds.
 - Added a bounded compose ownership preflight so stopped, unhealthy, or partially-started pre-existing StageGuard containers are not destroyed when the API is unreachable.
-- Fixed `--cleanup` to stop and verify the StageGuard API host process, tear down compose, then verify no compose containers remain.
+- Fixed `--cleanup` to independently attempt host-API and compose cleanup, verify both postconditions, and aggregate failures rather than stranding one owned component when the other cleanup leg fails.
 - Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
 - Added critical Grafana alert `stageguard-lifecycle-unsafe`, a dedicated read-only lifecycle dashboard, and `docs/runbooks/lifecycle-safety.md` linked from that dashboard.
 
-## Latest run — 2026-09-20 — verify compose cleanup completion
+## Latest run — 2026-09-20 — make owned cleanup independent and failure-aggregating
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the repository tree, `scripts/demo_release.py`, and `runtime/tests/test_validation_demo_release_cleanup.py`. The previous run correctly added host-API shutdown verification, but `docker compose down` success was still accepted as proof that compose cleanup completed. A zero exit code is not the same as a postcondition: remaining project containers would contaminate later freshness rehearsals while `--cleanup` reported success.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_release.py`, its cleanup regression tests, and the local API lifecycle in `scripts/demo_local.py`. The previous cleanup implementation correctly verified both the host API and compose postconditions, but returned immediately when the API remained reachable. That meant a wedged host API could strand simulator/Prometheus/Grafana containers even though the rehearsal had already proved those compose resources were created and owned by this run.
 
 ### Exact changes made
 
-- Extended `_cleanup_owned_runtime()` in `scripts/demo_release.py` to call the existing bounded `_compose_has_resources()` after `docker compose down`.
-- Cleanup now fails closed with `EvidenceGateError` if any project container remains after teardown.
-- Updated `--cleanup` help text to describe verified removal rather than merely requesting a stop.
-- Extended `runtime/tests/test_validation_demo_release_cleanup.py` to require API-stop -> compose-down -> compose-verification ordering.
-- Added a regression case proving surviving compose resources become a cleanup failure.
-- Preserved the existing surviving-API failure behavior and its rule that compose teardown is not attempted while the owned API is still reachable.
-- Implementation commit: `d5a1bc91a72bb20f5531f6593967d2e55e427eba`.
-- Regression-test commit: `9da22ac52134241d5f5b6fdebbeff1f0f28f260d`.
+- Reworked `_cleanup_owned_runtime()` so API cleanup and compose cleanup are independent legs once rehearsal ownership is established.
+- API stop exceptions and an API that remains reachable are recorded as cleanup failures but no longer prevent teardown of the rehearsal-owned compose project.
+- Compose teardown failure no longer prevents the bounded compose postcondition check; surviving resources are reported separately.
+- Cleanup aggregates all observed failures into one `EvidenceGateError`, preserving fail-closed acceptance while maximizing safe teardown.
+- Extended `runtime/tests/test_validation_demo_release_cleanup.py` for successful ordering, API-survival continuation, API-stop-exception continuation, compose-down-failure verification, and surviving compose resources.
+- Implementation commit: `6892c7400fb5117a2df2d9ca42ad6466d848665c`.
+- Regression-test commit: `e495b6ca9dfead990e32b38a48cf921bc246c45c`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted both source and regression-test updates.
-- Static review confirms cleanup now verifies both runtime components it owns: the host API must be unreachable and the compose project must report zero containers.
-- The compose postcondition reuses the existing 45-second bounded, fail-closed ownership query, so Docker timeout/error during verification cannot be mistaken for successful cleanup.
+- GitHub accepted the source and regression-test updates.
+- Static review confirms that a failed API cleanup cannot suppress compose teardown, and a failed compose teardown cannot suppress compose postcondition verification.
+- Pre-run ownership safety is unchanged: cleanup only runs when `stack_owned` is true, after the empty-project preflight and fresh-stack boundary.
 - This repository connector does not expose an executable checkout, so the updated unit tests and Docker rehearsal were not executed. No new green-suite claim is made.
 
 ### Decisions
 
-1. Process exit codes are transport/control-plane evidence, not sufficient proof of cleanup postconditions.
-2. Reuse the same project-scoped `docker compose ps -q --all` ownership primitive before and after acceptance rather than adding host-wide Docker inspection.
-3. Keep cleanup fail-closed: inability to prove zero remaining project containers makes unattended acceptance fail.
-4. Do not add port-killing logic; StageGuard must never terminate unrelated host processes merely because they occupy a known development port.
+1. Once ownership is established, cleanup should be best-effort across independent resources but fail closed in its final result.
+2. A cleanup error is evidence to aggregate, not a reason to abandon safe cleanup of another resource owned by the same rehearsal.
+3. Preserve the project-scoped compose ownership model; do not inspect or terminate unrelated host resources.
+4. Preserve the no-port-killing rule and the existing refusal to touch any pre-existing StageGuard compose project.
 
 ### Blockers / unknowns
 
@@ -74,7 +73,8 @@ Read `progress.md` completely before deciding what to change. Inspected the repo
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
+- `demo_local._spawn_api()` can still leave a process-management edge case if a newly spawned API never becomes healthy; this should be exercised in an executable checkout before changing PID handling speculatively.
 
 ## Single best next step
 
-In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix concrete failures, then run `python scripts/demo_release.py --non-interactive --cleanup` from an empty compose project and verify the API is unreachable and `docker compose ps -q --all` is empty afterward. Also verify a stopped pre-existing StageGuard compose container is refused without destruction. After those gates pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution over additional speculative hardening.
+In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix concrete failures, then run `python scripts/demo_release.py --non-interactive --cleanup` from an empty compose project and verify both cleanup legs under injected failure (including an API-stop failure) without leaving compose resources. Also verify a stopped pre-existing StageGuard compose container is refused without destruction. After those gates pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution over additional speculative hardening.
