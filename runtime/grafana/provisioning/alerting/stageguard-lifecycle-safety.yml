@@ -1,0 +1,66 @@
+apiVersion: 1
+
+# Production-safety alert derived from StageGuard's fixed-cardinality, one-hot
+# lifecycle state metric. This deliberately alerts on the composite invariant
+# rather than duplicating application safety logic in Grafana.
+groups:
+  - orgId: 1
+    name: StageGuard lifecycle safety
+    folder: StageGuard
+    interval: 10s
+    rules:
+      - uid: stageguard-lifecycle-unsafe
+        title: StageGuard lifecycle safety invariant violated
+        condition: B
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: stageguard-prometheus
+            model:
+              # stageguard_lifecycle_safety_state is one-hot. Any non-ok state
+              # means StageGuard has withdrawn lifecycle safety/readiness.
+              expr: max(stageguard_lifecycle_safety_state{state!="ok"})
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: -100
+            model:
+              conditions:
+                - evaluator:
+                    params: [0.5]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: -100
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        noDataState: Alerting
+        execErrState: Error
+        for: 10s
+        annotations:
+          summary: StageGuard has entered an unsafe lifecycle state
+          description: StageGuard reports a composite lifecycle safety state other than ok (checkpoint conflict, audit-integrity failure, execution uncertainty, or a combination). Lifecycle mutation must remain fail-closed. Inspect /readyz, the StageGuard runtime-safety dashboard, durable checkpoint state, and audit/reconciliation evidence before operator recovery. Do not replay remediation solely to clear this alert.
+        labels:
+          component: stageguard-runtime
+          severity: critical
+          safety_boundary: lifecycle
