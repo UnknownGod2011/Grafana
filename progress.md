@@ -26,32 +26,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — Non-interactive pager/editor validation isolation
+## Latest run — 2026-09-20 — Make validation environment isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the runtime test inventory. The validation runner already denied credential/configuration/runtime injection channels and set `GIT_TERMINAL_PROMPT=0`, but inherited pager/editor hooks could still invoke caller-selected programs or preprocessors during command-line validation.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and `ARCHITECTURE.md`. The validation runner already removed many credential, runtime, shell, loader, build-tool, pager, and editor controls. GNU Make ambient controls were still inherited.
 
 ### Changes / actions
 
-- Added case-insensitive filtering for `GIT_PAGER`, `PAGER`, `MANPAGER`, `SYSTEMD_PAGER`, `EDITOR`, `VISUAL`, `LESSOPEN`, and `LESSCLOSE`.
-- Reinstalled only safe non-interactive pager values (`GIT_PAGER=cat`, `PAGER=cat`, `SYSTEMD_PAGER=cat`) after sanitization; editor and less-preprocessor hooks remain absent.
-- Added regression coverage for canonical and mixed/lower-case names, proving host executable/preprocessor values do not survive while ordinary configuration remains intact.
-- Kept `PATH` unchanged because StageGuard still needs cross-platform executable discovery for legitimate validation helpers.
-- No workflow, live service, cloud resource, Docker environment, Grafana instance, remediation target, or credential was touched.
+- Added case-insensitive filtering for `MAKEFLAGS`, `MFLAGS`, and `MAKEFILES` in the consolidated validation environment.
+- Added regression coverage for canonical, lowercase, and mixed-case forms while proving ordinary settings and `PATH` remain intact.
+- This closes inherited Make option/rule/include state from influencing validation helpers that may transitively invoke Make.
+- Did not touch live services, cloud resources, Docker, Grafana instances, remediation targets, credentials, or GitHub Actions.
 
 ### Checks / results
 
-- Runner hardening committed as `ea2c26d15e8a9bee76a1dec927d445b6d30546e9`.
-- Regression coverage committed as `f03dc679016e6d0a436d536bf788e9a48f55afb3`.
-- Static inspection confirms the eight host controls are rejected by the existing case-insensitive exact-name matcher before safe pager overrides are installed.
-- No green execution claim is made: this connector runner can inspect and modify repository files but does not expose an executable checkout for the Python suite.
+- Validation-runner hardening committed as `bafe68b4b5b8b5818560dc60d9cc200829bba79b`.
+- Regression coverage committed as `cd08e4d7871f494244ec60235455d419290732a0`.
+- Static inspection confirms all three names flow through the existing case-insensitive exact-name sanitizer.
+- No green execution claim is made: this connector can inspect and modify repository files but does not expose an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Non-interactive validation requires more than disabling terminal credential prompts: pager/editor hooks are executable ambient state and can hang validation or run caller-selected programs.
-2. Safe pager overrides are preferable to merely deleting pager variables because downstream tools can otherwise rediscover host defaults; `cat` preserves output without interaction.
-3. `LESSOPEN`/`LESSCLOSE` are removed rather than replaced because their preprocessor semantics are unnecessary for StageGuard validation.
+1. `MAKEFILES` is treated as executable ambient configuration because Make can read additional makefiles named by the environment before normal project rules.
+2. `MAKEFLAGS`/`MFLAGS` are removed rather than normalized because StageGuard validation has no legitimate requirement to inherit caller-selected Make options.
+3. `PATH` remains unchanged pending a cross-platform executable-resolution design; silently replacing it could break legitimate validation helpers.
 
 ### Blockers / unknowns
 
