@@ -80,7 +80,7 @@ def _wait_for(label: str, query: str, predicate, *, timeout_seconds: float = 45.
 
 
 def _compose_down() -> None:
-    subprocess.run(
+    result = subprocess.run(
         ["docker", "compose", "down", "--remove-orphans"],
         cwd=ROOT,
         text=True,
@@ -88,12 +88,15 @@ def _compose_down() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if result.returncode != 0:
+        raise EvidenceGateError(f"docker compose down failed with exit code {result.returncode}")
 
 
 def _recreate_compose_stack() -> None:
     # The demo compose file has no persistent volumes. Recreating its containers
     # clears old Prometheus samples so a previous rehearsal cannot contaminate
-    # the next acceptance run.
+    # the next acceptance run. A failed teardown is fatal: continuing would make
+    # the supposedly fresh evidence boundary untrustworthy.
     _compose_down()
 
 
@@ -123,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     stack_owned = False
+    exit_code = 1
     try:
         if demo_local._api_running():
             raise EvidenceGateError("StageGuard API is already running; run 'python scripts/demo_local.py stop' first")
@@ -152,14 +156,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"packet_loss_percent": fault_loss, "cam3_drop_rate": fault_drop}, indent=2))
         print("The real Grafana MCP smoke query already passed during startup.")
         print("Next: Investigate -> optional Gemini briefing -> approve exact revision -> Execute -> wait for recovered.")
-        return 0
+        exit_code = 0
     except (EvidenceGateError, demo_local.DemoError, subprocess.CalledProcessError, OSError) as exc:
         print(f"RELEASE DEMO ERROR: {exc}", file=sys.stderr)
-        return 1
+        exit_code = 1
     finally:
         if args.cleanup and stack_owned:
             print("[release] Cleaning up local compose stack...")
-            _compose_down()
+            try:
+                _compose_down()
+            except (EvidenceGateError, OSError) as exc:
+                print(f"RELEASE CLEANUP ERROR: {exc}", file=sys.stderr)
+                exit_code = 1
+
+    return exit_code
 
 
 if __name__ == "__main__":
