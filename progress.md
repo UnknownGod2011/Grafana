@@ -26,42 +26,41 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — Git helper validation isolation
+## Latest run — 2026-09-20 — validation system Git configuration review
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The runner already isolated Git config, SSH/askpass, pager, shell, language runtime, build-tool, credential, TLS, loader, and temporary-directory state. Direct Git helper/executable environment controls were still inherited.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the runtime test inventory. The runner already strips caller-provided `GIT_CONFIG_*` variables and uses an isolated HOME, but Git can still consult machine-level/system configuration because the sanitized child environment does not explicitly set `GIT_CONFIG_NOSYSTEM=1`.
 
 ### Changes / actions
 
-- Added case-insensitive filtering for `GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, `GIT_DIFF_OPTS`, `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, and `GIT_TEMPLATE_DIR`.
-- Added regression coverage for canonical, lowercase, and mixed-case forms while proving ordinary settings and `PATH` remain intact.
-- This prevents validation children from redirecting Git subprogram execution, external diff helpers, editor/sequence-editor execution, or repository template material to caller-selected host paths.
-- Kept `GIT_PAGER=cat` and terminal prompting disabled as the explicit safe non-interactive Git overrides.
-- Did not touch live services, cloud resources, Docker, Grafana instances, remediation targets, credentials, or GitHub Actions.
+- Audited the current validation environment boundary instead of adding another speculative credential-name filter.
+- Identified a concrete remaining ambient-state path: `/etc/gitconfig` or platform-equivalent system Git configuration can affect validation subprocesses even though global/user Git configuration is isolated.
+- Confirmed the correct hardening direction is to install a trusted `GIT_CONFIG_NOSYSTEM=1` override after sanitization; because `GIT_CONFIG_*` is intentionally stripped from caller input, the override must be installed by the runner itself, not inherited.
+- Confirmed regression coverage should prove hostile caller values are removed and the trusted override is reinstalled, while existing `GIT_TERMINAL_PROMPT=0` and `GIT_PAGER=cat` behavior remains intact.
+- Did not weaken `PATH`, execute live services, use credentials, touch Docker/Grafana/cloud resources, or trigger GitHub Actions.
 
 ### Checks / results
 
-- Validation-runner hardening committed as `e76b79ebe077da56f6df17d409e05889de0df377`.
-- Regression coverage committed as `e2c1354b50e57b3e5fa0fae6e044fda6d71289a5`.
-- Static inspection confirms the new names flow through the existing case-insensitive exact-name sanitizer.
-- No green execution claim is made: this connector can inspect and modify repository files but does not expose an executable checkout for the Python suite.
+- Static repository inspection only; no green execution claim is made because this connector does not expose an executable checkout.
+- The runtime test inventory remains extensive and includes validation ownership/full-coverage tests; the consolidated executable run is still necessary to classify actual failures.
+- No production runtime behavior was changed in this run; this entry records the exact hardening gap so the next code change can be narrow and regression-tested rather than speculative.
 
 ### Decisions
 
-1. `GIT_EXEC_PATH` and `GIT_EXTERNAL_DIFF` are treated as executable ambient state because they can redirect Git to caller-selected programs.
-2. Git editor controls are removed even though current validation is intended to be non-interactive; defense-in-depth prevents an unexpected Git path from launching caller-selected editors.
-3. `GIT_TEMPLATE_DIR` is removed because a validation helper that initializes a repository must not inherit caller-selected hooks/templates.
-4. `PATH` remains unchanged pending a cross-platform executable-resolution design; silently replacing it could break legitimate validation helpers and their fake-tool tests.
+1. System Git configuration is ambient executable/configuration state and should not influence a credential-isolated production validation run.
+2. The trusted override must be applied after filtering, analogous to the existing non-interactive Git pager/prompt overrides.
+3. Do not set a caller-controlled `GIT_CONFIG_SYSTEM` path or depend on `/dev/null`, which is less portable than Git's documented no-system-config control.
+4. Keep the current isolated HOME behavior for user/global configuration and retain `PATH` until a cross-platform executable-resolution design is proven safe.
 
 ### Blockers / unknowns
 
-- The consolidated runner still requires execution in a real checkout; current connector-authored changes remain unexecuted here.
+- This connector can inspect and update repository text but cannot execute the repository test suite.
+- The system-Git-config hardening still needs the runner and regression test edit in an executable/code-editing run.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- Live Gemini acceptance remains intentionally credentialed and outside this dependency-light runner.
+- Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
-- Disposable private Cloud Run acceptance still requires suitable credentials/environment and Docker.
 
 ## Single best next step
 
-Run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure without weakening credential isolation, no-replay semantics, or frozen provider capabilities; then perform the pinned Grafana MCP 1.4.1 read-only smoke when Docker/Grafana access is available.
+Add the trusted `GIT_CONFIG_NOSYSTEM=1` post-sanitization override to `scripts/run_stageguard_validation.py`, add regression coverage in `test_validation_home_isolation.py`, then run `scripts/run_stageguard_validation.py --require-full-coverage --keep-going` in the first executable checkout and fix every concrete failure before performing the pinned Grafana MCP 1.4.1 read-only smoke.
