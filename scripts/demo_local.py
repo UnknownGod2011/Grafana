@@ -83,15 +83,31 @@ def _ensure_hmac_key():
 def _api_running(): return _url_ok(URLS["api_health"])
 
 def _reap_spawn_failure(process):
-    """Stop only the exact child created by this invocation and clear ownership metadata."""
+    """Stop only the exact child created by this invocation and clear ownership metadata.
+
+    Cleanup is deliberately bounded.  If the owned child cannot be reaped after
+    terminate/kill, fail explicitly rather than pretending startup cleanup succeeded.
+    """
     try:
         if process.poll() is None:
-            process.terminate()
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                # The exact child raced with termination and has already exited.
+                pass
             try:
                 process.wait(timeout=5)
+                return
             except subprocess.TimeoutExpired:
+                pass
+            try:
                 process.kill()
+            except ProcessLookupError:
+                pass
+            try:
                 process.wait(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                raise DemoError("StageGuard API child did not exit after terminate/kill; manual process inspection is required") from exc
         else:
             # Reap an already-exited child where supported.
             process.wait(timeout=0)
