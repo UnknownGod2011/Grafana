@@ -28,7 +28,8 @@ import demo_local  # noqa: E402
 PROMETHEUS_QUERY_URL = "http://127.0.0.1:9090/api/v1/query"
 PACKET_LOSS_QUERY = 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}'
 DROP_RATE_QUERY = 'rate(video_frames_dropped_total{production_id="broadcast-alpha",feed_id="cam-3"}[2m])'
-COMPOSE_DOWN_TIMEOUT_SECONDS = 45.0
+COMPOSE_COMMAND_TIMEOUT_SECONDS = 45.0
+COMPOSE_DOWN_TIMEOUT_SECONDS = COMPOSE_COMMAND_TIMEOUT_SECONDS
 
 
 class EvidenceGateError(RuntimeError):
@@ -80,6 +81,33 @@ def _wait_for(label: str, query: str, predicate, *, timeout_seconds: float = 45.
     raise EvidenceGateError(f"timed out waiting for {label} ({detail})")
 
 
+def _compose_has_resources() -> bool:
+    """Return whether this compose project already owns containers.
+
+    The release rehearsal must never infer ownership merely because the API is
+    unreachable: a stopped, unhealthy, or partially-started user stack is still
+    pre-existing infrastructure and must not be destroyed to manufacture a
+    fresh evidence boundary.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "ps", "-q", "--all"],
+            cwd=ROOT,
+            text=True,
+            check=False,
+            timeout=COMPOSE_COMMAND_TIMEOUT_SECONDS,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise EvidenceGateError(
+            f"docker compose ownership preflight timed out after {COMPOSE_COMMAND_TIMEOUT_SECONDS:.0f}s"
+        ) from exc
+    if result.returncode != 0:
+        raise EvidenceGateError(f"docker compose ownership preflight failed with exit code {result.returncode}")
+    return bool(result.stdout.strip())
+
+
 def _compose_down() -> None:
     try:
         result = subprocess.run(
@@ -100,10 +128,9 @@ def _compose_down() -> None:
 
 
 def _recreate_compose_stack() -> None:
-    # The demo compose file has no persistent volumes. Recreating its containers
-    # clears old Prometheus samples so a previous rehearsal cannot contaminate
-    # the next acceptance run. A failed teardown is fatal: continuing would make
-    # the supposedly fresh evidence boundary untrustworthy.
+    # The ownership preflight in main proves this project has no pre-existing
+    # containers. Down remains useful for removing project-scoped orphan
+    # networks before startup; failure is fatal because freshness is unproven.
     _compose_down()
 
 
@@ -137,6 +164,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if demo_local._api_running():
             raise EvidenceGateError("StageGuard API is already running; run 'python scripts/demo_local.py stop' first")
+        if _compose_has_resources():
+            raise EvidenceGateError(
+                "StageGuard compose resources already exist while the API is unreachable; refusing to destroy a pre-existing stack. "
+                "Inspect it first or stop it explicitly with 'python scripts/demo_local.py stop'."
+            )
 
         print("[release] Recreating local compose stack to remove stale telemetry...")
         _recreate_compose_stack()
