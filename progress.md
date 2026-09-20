@@ -36,45 +36,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
 - Added critical Grafana alert `stageguard-lifecycle-unsafe`, a dedicated read-only lifecycle dashboard, and `docs/runbooks/lifecycle-safety.md` linked from that dashboard.
 
-## Latest run — 2026-09-20 — make owned cleanup independent and failure-aggregating
+## Latest run — 2026-09-21 — specify failed API-spawn ownership cleanup
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_release.py`, its cleanup regression tests, and the local API lifecycle in `scripts/demo_local.py`. The previous cleanup implementation correctly verified both the host API and compose postconditions, but returned immediately when the API remained reachable. That meant a wedged host API could strand simulator/Prometheus/Grafana containers even though the rehearsal had already proved those compose resources were created and owned by this run.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py`, especially `_spawn_api()` and `_stop_api()`, after the previous run identified startup PID handling as the next process-lifecycle edge case. Confirmed a concrete defect: `_spawn_api()` writes the newly created child PID before readiness, but if the child exits before health or remains alive without becoming healthy for 30 seconds, the function raises without clearing the PID file; in the timeout case it also leaves the exact child process it just created running.
 
 ### Exact changes made
 
-- Reworked `_cleanup_owned_runtime()` so API cleanup and compose cleanup are independent legs once rehearsal ownership is established.
-- API stop exceptions and an API that remains reachable are recorded as cleanup failures but no longer prevent teardown of the rehearsal-owned compose project.
-- Compose teardown failure no longer prevents the bounded compose postcondition check; surviving resources are reported separately.
-- Cleanup aggregates all observed failures into one `EvidenceGateError`, preserving fail-closed acceptance while maximizing safe teardown.
-- Extended `runtime/tests/test_validation_demo_release_cleanup.py` for successful ordering, API-survival continuation, API-stop-exception continuation, compose-down-failure verification, and surviving compose resources.
-- Implementation commit: `6892c7400fb5117a2df2d9ca42ad6466d848665c`.
-- Regression-test commit: `e495b6ca9dfead990e32b38a48cf921bc246c45c`.
+- Added `runtime/tests/test_demo_local_spawn_lifecycle.py` as a focused regression specification for this ownership boundary.
+- The first regression requires a child that exits before health to leave no stale ownership PID file.
+- The second regression requires a startup timeout to terminate/reap only the exact `Popen` child created by `_spawn_api()` and then remove its PID file; it deliberately does not authorize host-wide PID discovery or port killing.
+- Regression-spec commit: `83d5752fcbbaea22ffb4d3ccbb8dc9e69e1468da`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted the source and regression-test updates.
-- Static review confirms that a failed API cleanup cannot suppress compose teardown, and a failed compose teardown cannot suppress compose postcondition verification.
-- Pre-run ownership safety is unchanged: cleanup only runs when `stack_owned` is true, after the empty-project preflight and fresh-stack boundary.
-- This repository connector does not expose an executable checkout, so the updated unit tests and Docker rehearsal were not executed. No new green-suite claim is made.
+- GitHub accepted the focused regression specification.
+- Static inspection shows these two regressions expose current behavior and are therefore expected to fail until `_spawn_api()` owns failure cleanup for its exact child. They are not recorded as green tests.
+- This repository connector does not expose an executable checkout, so no pytest or Docker command was run and no new green-suite claim is made.
 
 ### Decisions
 
-1. Once ownership is established, cleanup should be best-effort across independent resources but fail closed in its final result.
-2. A cleanup error is evidence to aggregate, not a reason to abandon safe cleanup of another resource owned by the same rehearsal.
-3. Preserve the project-scoped compose ownership model; do not inspect or terminate unrelated host resources.
-4. Preserve the no-port-killing rule and the existing refusal to touch any pre-existing StageGuard compose project.
+1. A process created by the current `_spawn_api()` call is safe to terminate/reap on that call's startup failure; an arbitrary PID discovered later is not.
+2. Startup failure must clear ownership metadata so later cleanup cannot confuse a dead/reused PID with a StageGuard-owned child.
+3. Keep the existing no-port-killing rule and do not broaden cleanup to unrelated host processes.
+4. Record the regression before changing lifecycle semantics so the intended safety boundary is explicit and executable.
 
 ### Blockers / unknowns
 
-- This repository connector can inspect/update text but cannot execute the test suite or Docker stack.
+- The connector can replace whole files but does not expose a patch operation or executable checkout. The `_spawn_api()` source fix is therefore deliberately not claimed complete in this run; the new regression currently documents a known red edge case.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
-- `demo_local._spawn_api()` can still leave a process-management edge case if a newly spawned API never becomes healthy; this should be exercised in an executable checkout before changing PID handling speculatively.
 
 ## Single best next step
 
-In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix concrete failures, then run `python scripts/demo_release.py --non-interactive --cleanup` from an empty compose project and verify both cleanup legs under injected failure (including an API-stop failure) without leaving compose resources. Also verify a stopped pre-existing StageGuard compose container is refused without destruction. After those gates pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution over additional speculative hardening.
+Implement the minimal `_spawn_api()` failure cleanup against its exact `Popen` object: on pre-health child exit, remove the PID file; on readiness timeout, terminate the spawned child, wait with a short bound, kill/reap it only if necessary, then remove the PID file. Run `runtime/tests/test_demo_local_spawn_lifecycle.py` first, then the consolidated validator and `python scripts/demo_release.py --non-interactive --cleanup`. After those pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution.
