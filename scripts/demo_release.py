@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Release-critical StageGuard demo rehearsal gate.
+"""Release-critical StageGuard local acceptance rehearsal.
 
-This wrapper deliberately does not add product features. It makes the existing
-local vertical slice deterministic for recording by recreating the compose stack
-and waiting until the exact Prometheus evidence used by StageGuard is actually
-queryable before the operator clicks Investigate.
+This wrapper makes the existing local vertical slice deterministic by recreating
+the compose stack and waiting until the exact Prometheus evidence used by
+StageGuard is queryable before incident investigation. Interactive mode retains
+a recording/operator pause; ``--non-interactive`` turns the same flow into an
+automatable local acceptance check without adding GitHub Actions usage.
 """
 from __future__ import annotations
 
@@ -81,7 +82,7 @@ def _wait_for(label: str, query: str, predicate, *, timeout_seconds: float = 45.
 def _recreate_compose_stack() -> None:
     # The demo compose file has no persistent volumes. Recreating its containers
     # clears old Prometheus samples so a previous rehearsal cannot contaminate
-    # the next recording take.
+    # the next acceptance run.
     subprocess.run(
         ["docker", "compose", "down", "--remove-orphans"],
         cwd=ROOT,
@@ -92,12 +93,24 @@ def _recreate_compose_stack() -> None:
     )
 
 
+def _confirm_fault_injection(*, non_interactive: bool) -> None:
+    if non_interactive:
+        print("[release] Non-interactive mode: injecting deterministic fault immediately after baseline verification.")
+        return
+    input("\nPress ENTER when ready to inject the deterministic uplink-b fault... ")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Start a clean StageGuard recording stack and gate on real Prometheus evidence."
+        description="Start a clean StageGuard local stack and gate on real Prometheus evidence."
     )
     parser.add_argument("--gemini", action="store_true", help="enable the already-configured Vertex AI Gemini briefing")
     parser.add_argument("--open", action="store_true", help="open StageGuard and Grafana in the default browser")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="skip the operator/recording pause and inject the deterministic fault as soon as baseline evidence is verified",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -114,14 +127,14 @@ def main(argv: list[str] | None = None) -> int:
 
         print("\nHEALTHY BASELINE VERIFIED")
         print(json.dumps({"packet_loss_percent": healthy_loss, "cam3_drop_rate": healthy_drop}, indent=2))
-        input("\nPress ENTER when recording is ready to inject the deterministic uplink-b fault... ")
+        _confirm_fault_injection(non_interactive=args.non_interactive)
 
         demo_local.inject_fault(settle_seconds=0)
         print("[release] Waiting until the exact incident evidence is queryable in Prometheus...")
         fault_loss = _wait_for("faulted uplink-b packet loss > 5%", PACKET_LOSS_QUERY, lambda value: value > 5.0)
         fault_drop = _wait_for("faulted cam-3 dropped-frame rate > 1/s", DROP_RATE_QUERY, lambda value: value > 1.0)
 
-        print("\nINCIDENT EVIDENCE READY — CLICK INVESTIGATE NOW")
+        print("\nINCIDENT EVIDENCE READY — INVESTIGATION MAY START")
         print(json.dumps({"packet_loss_percent": fault_loss, "cam3_drop_rate": fault_drop}, indent=2))
         print("The real Grafana MCP smoke query already passed during startup.")
         print("Next: Investigate -> optional Gemini briefing -> approve exact revision -> Execute -> wait for recovered.")
