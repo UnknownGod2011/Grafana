@@ -37,42 +37,45 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
 - Added critical Grafana alert `stageguard-lifecycle-unsafe`, a dedicated read-only lifecycle dashboard, and `docs/runbooks/lifecycle-safety.md` linked from that dashboard.
 - Hardened local API startup ownership so early child exit and readiness timeout cannot leave stale PID metadata; timeout cleanup targets only the exact spawned child and escalates terminate -> bounded wait -> kill/reap.
+- Hardened the final owned-child reap edge: kill is attempted only after a bounded terminate wait, a second bounded wait is mandatory, and a child that survives both produces an explicit `DemoError` while stale PID ownership metadata is still cleared.
 
-## Latest run — 2026-09-21 — implement failed API-spawn ownership cleanup
+## Latest run — 2026-09-21 — bound terminate/kill/reap failure semantics
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Re-inspected `scripts/demo_local.py` and the focused `runtime/tests/test_demo_local_spawn_lifecycle.py` regressions created in the previous run. Confirmed the implementation still left stale PID metadata on pre-health exit and left the exact spawned child alive on readiness timeout.
+Read `progress.md` completely before deciding what to change. Re-inspected `scripts/demo_local.py`, `runtime/tests/test_demo_local_spawn_lifecycle.py`, and the repository tree. The prior startup cleanup correctly targeted only its exact `Popen` child, but its second `wait(timeout=5)` after `kill()` could itself time out and leak a raw `subprocess.TimeoutExpired` outside the demo error contract. The kill-escalation branch also lacked focused regression coverage.
 
 ### Exact changes made
 
-- Added `_reap_spawn_failure(process)` to `scripts/demo_local.py`.
-- On pre-health child exit, startup now reaps the already-exited child where supported and always removes the ownership PID file before raising `DemoError`.
-- On readiness timeout, startup now terminates only the exact `Popen` child created by the current call, waits up to 5 seconds, escalates to `kill()` only after `subprocess.TimeoutExpired`, performs a second bounded reap, and clears the PID file in a `finally` block.
-- Kept the no-port-killing/no-host-PID-discovery boundary intact.
-- Implementation commit: `cabf293c8abde04c65db349749ff8f61d05c80ef`.
+- Hardened `_reap_spawn_failure(process)` in `scripts/demo_local.py` so terminate and kill remain separately bounded to five seconds.
+- Added race-safe handling for `ProcessLookupError` when the exact owned child exits between `poll()` and terminate/kill.
+- If the exact child still cannot be reaped after terminate and kill, cleanup now raises an explicit `DemoError` rather than leaking a raw subprocess exception or implying cleanup succeeded.
+- Kept PID metadata cleanup in `finally`, including the unreapable-child path, so stale ownership metadata is never retained.
+- Added regressions proving kill escalation occurs only after terminate wait timeout and proving the unreapable-child path fails closed while clearing PID state.
+- Implementation commit: `53ab344f062a1b0b93449a4aa2d2aa59182b3d49`.
+- Regression commit: `38a4bdcc569db74f440d55a0ae0b13e71ef5db51`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted the implementation update.
-- Static review matches the two focused regression expectations: early exit removes PID state; timeout calls `terminate()`, performs bounded `wait()`, and removes PID state.
-- This repository connector still does not expose an executable checkout, so no pytest, Docker, or live MCP command was run and no new green-suite claim is made.
+- GitHub accepted both source and regression updates.
+- Static review confirms the cleanup authority remains the exact `Popen` object and no host PID discovery or port killing was introduced.
+- This repository connector does not expose an executable checkout, so the new regressions, consolidated validator, Docker rehearsal, and live MCP smoke were not executed; no new green-suite claim is made.
 
 ### Decisions
 
-1. Cleanup authority comes from possession of the exact `Popen` object, not from a PID file or listening port.
-2. PID metadata is ownership state and must be removed on every failed startup path.
-3. Termination is bounded and escalates to kill only for the exact owned child after a timeout.
-4. Preserve all production safety boundaries: no arbitrary host process discovery, no port killing, no infrastructure mutation through Grafana/MCP.
+1. An owned child surviving both terminate and kill is an explicit cleanup failure, not a successful startup failure cleanup.
+2. PID metadata is removed even when the OS refuses to reap the child, because the PID file must not falsely claim safe/manageable ownership after cleanup authority has failed.
+3. Process-exit races are benign only when they concern the exact child already owned by the current invocation.
+4. Preserve the existing no-port-killing/no-arbitrary-PID-discovery safety boundary.
 
 ### Blockers / unknowns
 
-- The connector can update repository files but cannot execute the checkout, so the focused regressions and consolidated validator remain unexecuted in this environment.
+- The connector can update repository files but cannot execute the checkout, so focused pytest and consolidated validation remain unexecuted here.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Run `runtime/tests/test_demo_local_spawn_lifecycle.py` first in an executable checkout and fix any behavioral mismatch, then run the consolidated validator and `python scripts/demo_release.py --non-interactive --cleanup`. After those pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution.
+Run `runtime/tests/test_demo_local_spawn_lifecycle.py` in an executable checkout first. If green, run the consolidated validator and `python scripts/demo_release.py --non-interactive --cleanup`; then run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize any failures revealed by real execution.
