@@ -30,38 +30,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added an unattended local acceptance path with `python scripts/demo_release.py --non-interactive`; it preserves stack recreation, Grafana MCP smoke, healthy evidence gates, deterministic fault injection, and post-fault evidence gates while removing only the human stdin pause. Regression coverage lives in `runtime/tests/test_validation_demo_release_noninteractive.py`.
 - Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
 - Added critical Grafana alert `stageguard-lifecycle-unsafe` from the authoritative fixed-cardinality `stageguard_lifecycle_safety_state` metric; missing data is alerting.
+- Added a dedicated read-only `StageGuard Lifecycle Safety` Grafana dashboard for the authoritative one-hot lifecycle state, telemetry freshness, scrape transport, and separate recovery proof.
+- Added `docs/runbooks/lifecycle-safety.md`, an operator procedure that preserves StageGuard's no-replay and telemetry-verified recovery invariants during lifecycle incidents.
 
-## Latest run — 2026-09-20 — lifecycle safety operator dashboard
+## Latest run — 2026-09-20 — lifecycle safety operator runbook
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the lifecycle-safety alert, Grafana dashboard provisioning provider, and the existing `StageGuard Runtime Safety` dashboard. The alert now exposes the composite lifecycle invariant, but the operator dashboard still only visualized remediation watchdog/recovery metrics and did not show the authoritative lifecycle state or distinguish unsafe state from missing/stale lifecycle telemetry.
+Read `progress.md` completely before deciding what to change. Inspected the new lifecycle dashboard, its regression test, and the provisioned `stageguard-lifecycle-unsafe` alert. The observability surfaces now expose the lifecycle boundary, but operators did not have a repository-owned procedure for safely distinguishing evidence loss, checkpoint conflict, audit-integrity failure, execution uncertainty, and recovery verification. That is operationally risky because execution uncertainty must never be resolved by replaying a remediation write.
 
 ### Exact changes made
 
-- Added `runtime/grafana/dashboards/stageguard-lifecycle.json`, provisioned automatically by the existing `/var/lib/grafana/dashboards` provider.
-- Added a fail-visible lifecycle safety stat driven by `max(stageguard_lifecycle_safety_state{state!="ok"})` rather than duplicating application safety logic.
-- Added a complete one-hot lifecycle-state timeline (`stageguard_lifecycle_safety_state`, legend by `state`) so operators can distinguish checkpoint conflict, audit-integrity failure, execution uncertainty, and combined states from a generic unsafe flag.
-- Added lifecycle telemetry freshness using `timestamp(...)` plus `absent(...)`; missing lifecycle evidence renders as a very large age rather than healthy.
-- Added runtime scrape transport health and recovery proof panels to separate evidence availability and recovery verification from the lifecycle invariant.
-- Kept the dashboard non-editable/read-only and free of approval, execution, provider-token, or HTTP mutation controls.
-- Added `runtime/tests/test_validation_grafana_lifecycle_dashboard.py` to lock dashboard identity/provisionability assumptions, authoritative metric queries, fail-visible freshness semantics, separate recovery proof, and absence of mutation surfaces.
-- Dashboard commit: `c41d2e5881551e42615f462e99c553dbfdb4a8ed`.
-- Regression commit: `2e7dca02e74c9ce561d5b1bee9ce9cd07dc0dc60`.
+- Added `docs/runbooks/lifecycle-safety.md`.
+- Defined a fail-closed first-response sequence: establish Grafana evidence availability, check freshness/transport, then identify the authoritative one-hot lifecycle state.
+- Added state-specific procedures for checkpoint conflict, audit-integrity failure, execution uncertainty, and combined unsafe states.
+- For execution uncertainty, explicitly requires read-only operation reconciliation using the canonical operation ID and forbids a second remediation write as a discovery mechanism.
+- Kept provider acceptance separate from recovery and requires fresh Grafana telemetry plus StageGuard recovery verification before considering the incident recovered.
+- Added concrete post-recovery gates for `stageguard_recovery_verified`, `stageguard_lifecycle_safety_state{state="ok"}`, `/readyz`, and the Grafana alert returning to Normal.
+- Added evidence-retention guidance that explicitly excludes bearer tokens, provider credentials, API keys, and authorization headers.
+- Added escalation criteria and the local consolidated-validation/unattended-rehearsal commands.
+- Runbook commit: `69a363b921275599c060cc256007b48450ef86a1`.
 - No credentials, live Grafana instance, remediation target, cloud resource, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
 - Static repository inspection and GitHub writes completed successfully.
-- The dashboard JSON was authored as a Grafana schema-v39 provisioned dashboard using the repository's existing `stageguard-prometheus` datasource UID and existing dashboard provider.
-- This connector does not expose an executable checkout, so the new regression and live Grafana provisioning were not executed; no green-suite claim is made.
+- The runbook is consistent with the current dashboard queries and lifecycle alert semantics inspected in this run.
+- This connector does not expose an executable checkout, so no test/Docker execution was possible and no new green-suite claim is made.
 
 ### Decisions
 
-1. Operators need both the composite unsafe flag and the underlying one-hot state; Grafana should display both but never recompute the lifecycle state machine.
-2. Missing lifecycle telemetry must be visible as evidence loss, not silently interpreted as safe.
-3. Recovery verification remains a separate proof obligation from lifecycle safety and is shown separately.
-4. Grafana remains an indispensable read-only observability/evidence layer; the dashboard intentionally contains no remediation controls.
+1. Execution uncertainty is an at-most-once safety problem: reconcile read-only before any subsequent write.
+2. Evidence loss and unsafe lifecycle state are separate conditions; operators must restore trustworthy evidence before inferring recovery.
+3. Provider acceptance is never a recovery signal; recovery remains telemetry-verified.
+4. Incident notes must retain identifiers/evidence but never operational secrets.
 
 ### Blockers / unknowns
 
@@ -72,4 +74,4 @@ Read `progress.md` completely before deciding what to change. Inspected the life
 
 ## Single best next step
 
-In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive` and verify that both `stageguard-lifecycle-unsafe` and the new `StageGuard Lifecycle Safety` dashboard provision cleanly, show fresh evidence, and remain safe/Normal while the runtime lifecycle state is `ok`.
+In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive` and verify the lifecycle alert/dashboard against the pinned Grafana MCP `1.4.1` stack. If those gates pass, the next product-level improvement should link the lifecycle alert/dashboard directly to the repository-owned runbook without introducing mutable Grafana controls.
