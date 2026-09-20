@@ -39,49 +39,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added critical Grafana alert `stageguard-lifecycle-unsafe`, a dedicated read-only lifecycle dashboard, and `docs/runbooks/lifecycle-safety.md` linked from that dashboard.
 - Hardened local API startup ownership so early child exit and readiness timeout cannot leave stale PID metadata; timeout cleanup targets only the exact spawned child and escalates terminate -> bounded wait -> kill/reap.
 - Hardened the final owned-child reap edge: kill is attempted only after a bounded terminate wait, a second bounded wait is mandatory, and a child that survives both produces an explicit `DemoError` while stale PID ownership metadata is still cleared.
-- Hardened cross-invocation API shutdown against PID reuse: a PID loaded from disk is signalled only after bounded command-line inspection proves the expected StageGuard `bootstrap.py --identity-mode local --port 9110` signature.
+- Hardened cross-invocation API shutdown against PID reuse: a PID loaded from disk is signalled only after bounded command-line inspection proves the expected StageGuard local API signature.
 
-## Latest run — 2026-09-21 — persistent PID ownership verification
+## Latest run — 2026-09-21 — strict PID identity regression gate
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the repository tree, `scripts/demo_local.py`, and `runtime/tests/test_demo_local_spawn_lifecycle.py`. Startup-failure cleanup was already constrained to the exact `Popen` child, but normal `stop` still trusted a numeric PID persisted on disk. If that API had died and the OS reused its PID while another process happened to answer the StageGuard health port, `_stop_api()` could signal an unrelated process. It also unlinked PID metadata even when SIGTERM failed to stop the API, discarding the only local ownership clue.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`. The persisted-PID guard introduced in the previous run is directionally correct, but `_pid_matches_stageguard_api()` currently validates independent substrings: any command containing a `bootstrap.py` basename plus the tokens `local`, `--identity-mode`, `9110`, and `--port` can satisfy it. That leaves two concrete false-authorization classes: a different script with the same basename and commands where the required flag values are present elsewhere in argv rather than paired with their flags.
 
 ### Exact changes made
 
-- Added `_pid_command(pid)`, a two-second-bounded best-effort process command lookup using `/proc/<pid>/cmdline` where available, `ps` on other POSIX systems, and non-interactive PowerShell CIM lookup on Windows.
-- Added `_pid_matches_stageguard_api(pid)` requiring the expected `bootstrap.py`, `--identity-mode local`, and `--port 9110` signature before persistent PID state grants signal authority.
-- Changed `_stop_api()` to refuse signalling an unverified/reused PID rather than trusting the PID file plus health endpoint.
-- Invalid PID metadata is now removed only when the API is unreachable; if the API is reachable, shutdown fails closed for manual inspection.
-- Permission/OS failures while signalling a verified PID now surface as `DemoError` instead of being silently ignored.
-- After SIGTERM, shutdown now requires the health endpoint to become unreachable within five seconds; otherwise it fails and deliberately retains PID metadata for safe follow-up.
-- Added focused regressions for reused/unverified PID refusal, verified shutdown, failed-shutdown metadata retention, and strict command-signature matching.
-- Implementation commit: `d564180357db930f1addc0813a983e5dba3eacdd`.
-- Regression commit: `16338b373c5b98aa0ab5c7e49b349bb15741933e`.
+- Strengthened the lifecycle regression contract so a valid persisted process identity is expected to reference StageGuard's actual `runtime/bootstrap.py` path.
+- Added a regression requiring a different `/tmp/.../bootstrap.py` with otherwise matching arguments to be rejected.
+- Added a regression requiring `--identity-mode local` and `--port 9110` to be real flag/value pairs rather than unrelated substring presence.
+- Preserved all existing startup-reap, PID-reuse, verified-shutdown, and metadata-retention tests.
+- Regression commit: `3a90ea5f96668900cddd05973cb8072190c73c40`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted both source and regression updates.
-- Static review confirms persisted PID state can no longer directly authorize `os.kill`; process identity must be independently inspected first.
-- Identity lookup is timeout-bounded and fails safe when process metadata cannot be read.
-- This repository connector does not expose an executable checkout, so the new regressions, consolidated validator, Docker rehearsal, and live MCP smoke were not executed; no new green-suite claim is made.
+- GitHub accepted the focused regression update.
+- Static inspection confirms both new tests describe real gaps in the current substring matcher and therefore intentionally establish a red safety gate until the matcher is replaced with structured argv validation.
+- This repository connector does not expose an executable checkout, so the focused pytest suite was not executed and no green claim is made.
 
 ### Decisions
 
-1. PID files are hints, not process-termination capabilities; PID reuse is expected OS behavior and must be defended against.
-2. Failure to inspect a process command is a reason to refuse termination, never a reason to weaken ownership checks.
-3. A failed verified shutdown retains PID metadata because deleting it would make subsequent operator recovery less safe.
-4. No port-based process discovery or host-wide killing was introduced.
+1. A persisted PID may authorize termination only when process identity is structurally proven; basename/substrings are insufficient.
+2. The eventual implementation should parse command arguments and verify the exact StageGuard bootstrap path plus exact option/value pairs, while failing closed when platform command-line representation cannot be parsed safely.
+3. The new regressions are preferable to weakening the ownership check for Windows convenience; platform ambiguity must remain non-destructive.
 
 ### Blockers / unknowns
 
+- The two new identity regressions are expected to fail against the current substring matcher until implementation is hardened.
 - The connector can update repository files but cannot execute the checkout, so focused pytest and consolidated validation remain unexecuted here.
-- The PowerShell CIM fallback requires live Windows validation; inability to inspect there fails safe rather than killing anything.
+- Windows process-command quoting requires live validation after structured argv parsing is implemented.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Execute `runtime/tests/test_demo_local_spawn_lifecycle.py` on Linux and Windows (or at minimum Linux first), then run the consolidated validator and `python scripts/demo_release.py --non-interactive --cleanup`. If those pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize any real execution failure over further lifecycle hardening.
+Replace `_pid_matches_stageguard_api()` substring matching with fail-closed structured argv validation: require the resolved StageGuard `runtime/bootstrap.py` path and exact `--identity-mode local` / `--port 9110` option-value pairs, then execute `runtime/tests/test_demo_local_spawn_lifecycle.py`. After that, run consolidated validation, `python scripts/demo_release.py --non-interactive --cleanup`, and the pinned Grafana MCP `1.4.1` read-only smoke.
