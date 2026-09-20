@@ -69,6 +69,18 @@ class DemoReleaseNonInteractiveTests(unittest.TestCase):
         self.assertEqual(result, 1)
         down_mock.assert_called_once_with()
 
+    def test_cleanup_stops_partially_started_stack(self) -> None:
+        with (
+            mock.patch.object(demo_release.demo_local, "_api_running", return_value=False),
+            mock.patch.object(demo_release, "_recreate_compose_stack"),
+            mock.patch.object(demo_release.demo_local, "up", side_effect=demo_release.demo_local.DemoError("startup failed")),
+            mock.patch.object(demo_release, "_compose_down") as down_mock,
+        ):
+            result = demo_release.main(["--non-interactive", "--cleanup"])
+
+        self.assertEqual(result, 1)
+        down_mock.assert_called_once_with()
+
     def test_cleanup_does_not_touch_preexisting_stack(self) -> None:
         with (
             mock.patch.object(demo_release.demo_local, "_api_running", return_value=True),
