@@ -17,6 +17,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 - Local acceptance never destroys pre-existing compose resources merely because the StageGuard API is unreachable.
 - Unattended cleanup must independently attempt all runtime components it owns, verify the host API is unreachable and compose has zero containers, and report any partial teardown as failure.
+- API startup failure may terminate/reap only the exact `Popen` child created by that startup attempt; it must clear ownership metadata before returning failure.
 
 ## Retained validation baseline
 
@@ -35,41 +36,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fixed `--cleanup` to independently attempt host-API and compose cleanup, verify both postconditions, and aggregate failures rather than stranding one owned component when the other cleanup leg fails.
 - Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
 - Added critical Grafana alert `stageguard-lifecycle-unsafe`, a dedicated read-only lifecycle dashboard, and `docs/runbooks/lifecycle-safety.md` linked from that dashboard.
+- Hardened local API startup ownership so early child exit and readiness timeout cannot leave stale PID metadata; timeout cleanup targets only the exact spawned child and escalates terminate -> bounded wait -> kill/reap.
 
-## Latest run — 2026-09-21 — specify failed API-spawn ownership cleanup
+## Latest run — 2026-09-21 — implement failed API-spawn ownership cleanup
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py`, especially `_spawn_api()` and `_stop_api()`, after the previous run identified startup PID handling as the next process-lifecycle edge case. Confirmed a concrete defect: `_spawn_api()` writes the newly created child PID before readiness, but if the child exits before health or remains alive without becoming healthy for 30 seconds, the function raises without clearing the PID file; in the timeout case it also leaves the exact child process it just created running.
+Read `progress.md` completely before deciding what to change. Re-inspected `scripts/demo_local.py` and the focused `runtime/tests/test_demo_local_spawn_lifecycle.py` regressions created in the previous run. Confirmed the implementation still left stale PID metadata on pre-health exit and left the exact spawned child alive on readiness timeout.
 
 ### Exact changes made
 
-- Added `runtime/tests/test_demo_local_spawn_lifecycle.py` as a focused regression specification for this ownership boundary.
-- The first regression requires a child that exits before health to leave no stale ownership PID file.
-- The second regression requires a startup timeout to terminate/reap only the exact `Popen` child created by `_spawn_api()` and then remove its PID file; it deliberately does not authorize host-wide PID discovery or port killing.
-- Regression-spec commit: `83d5752fcbbaea22ffb4d3ccbb8dc9e69e1468da`.
+- Added `_reap_spawn_failure(process)` to `scripts/demo_local.py`.
+- On pre-health child exit, startup now reaps the already-exited child where supported and always removes the ownership PID file before raising `DemoError`.
+- On readiness timeout, startup now terminates only the exact `Popen` child created by the current call, waits up to 5 seconds, escalates to `kill()` only after `subprocess.TimeoutExpired`, performs a second bounded reap, and clears the PID file in a `finally` block.
+- Kept the no-port-killing/no-host-PID-discovery boundary intact.
+- Implementation commit: `cabf293c8abde04c65db349749ff8f61d05c80ef`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted the focused regression specification.
-- Static inspection shows these two regressions expose current behavior and are therefore expected to fail until `_spawn_api()` owns failure cleanup for its exact child. They are not recorded as green tests.
-- This repository connector does not expose an executable checkout, so no pytest or Docker command was run and no new green-suite claim is made.
+- GitHub accepted the implementation update.
+- Static review matches the two focused regression expectations: early exit removes PID state; timeout calls `terminate()`, performs bounded `wait()`, and removes PID state.
+- This repository connector still does not expose an executable checkout, so no pytest, Docker, or live MCP command was run and no new green-suite claim is made.
 
 ### Decisions
 
-1. A process created by the current `_spawn_api()` call is safe to terminate/reap on that call's startup failure; an arbitrary PID discovered later is not.
-2. Startup failure must clear ownership metadata so later cleanup cannot confuse a dead/reused PID with a StageGuard-owned child.
-3. Keep the existing no-port-killing rule and do not broaden cleanup to unrelated host processes.
-4. Record the regression before changing lifecycle semantics so the intended safety boundary is explicit and executable.
+1. Cleanup authority comes from possession of the exact `Popen` object, not from a PID file or listening port.
+2. PID metadata is ownership state and must be removed on every failed startup path.
+3. Termination is bounded and escalates to kill only for the exact owned child after a timeout.
+4. Preserve all production safety boundaries: no arbitrary host process discovery, no port killing, no infrastructure mutation through Grafana/MCP.
 
 ### Blockers / unknowns
 
-- The connector can replace whole files but does not expose a patch operation or executable checkout. The `_spawn_api()` source fix is therefore deliberately not claimed complete in this run; the new regression currently documents a known red edge case.
+- The connector can update repository files but cannot execute the checkout, so the focused regressions and consolidated validator remain unexecuted in this environment.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - Live Gemini acceptance remains intentionally credentialed and outside the dependency-light runner.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Implement the minimal `_spawn_api()` failure cleanup against its exact `Popen` object: on pre-health child exit, remove the PID file; on readiness timeout, terminate the spawned child, wait with a short bound, kill/reap it only if necessary, then remove the PID file. Run `runtime/tests/test_demo_local_spawn_lifecycle.py` first, then the consolidated validator and `python scripts/demo_release.py --non-interactive --cleanup`. After those pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution.
+Run `runtime/tests/test_demo_local_spawn_lifecycle.py` first in an executable checkout and fix any behavioral mismatch, then run the consolidated validator and `python scripts/demo_release.py --non-interactive --cleanup`. After those pass, run the pinned `grafana/mcp-grafana:1.4.1` read-only smoke and prioritize failures revealed by real execution.
