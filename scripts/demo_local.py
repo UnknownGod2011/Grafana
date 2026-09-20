@@ -83,33 +83,20 @@ def _ensure_hmac_key():
 def _api_running(): return _url_ok(URLS["api_health"])
 
 def _reap_spawn_failure(process):
-    """Stop only the exact child created by this invocation and clear ownership metadata.
-
-    Cleanup is deliberately bounded.  If the owned child cannot be reaped after
-    terminate/kill, fail explicitly rather than pretending startup cleanup succeeded.
-    """
+    """Stop only the exact child created by this invocation and clear ownership metadata."""
     try:
         if process.poll() is None:
+            try: process.terminate()
+            except ProcessLookupError: pass
             try:
-                process.terminate()
-            except ProcessLookupError:
-                # The exact child raced with termination and has already exited.
-                pass
-            try:
-                process.wait(timeout=5)
-                return
-            except subprocess.TimeoutExpired:
-                pass
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=5)
+                process.wait(timeout=5); return
+            except subprocess.TimeoutExpired: pass
+            try: process.kill()
+            except ProcessLookupError: pass
+            try: process.wait(timeout=5)
             except subprocess.TimeoutExpired as exc:
                 raise DemoError("StageGuard API child did not exit after terminate/kill; manual process inspection is required") from exc
         else:
-            # Reap an already-exited child where supported.
             process.wait(timeout=0)
     finally:
         PID_PATH.unlink(missing_ok=True)
@@ -138,15 +125,52 @@ def _spawn_api(*, enable_gemini):
     _reap_spawn_failure(process)
     raise DemoError(f"StageGuard API did not become healthy; inspect {API_LOG}")
 
+def _pid_command(pid):
+    """Return a bounded best-effort command line for *pid*, or None if unverifiable."""
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.exists():
+        try:
+            raw = proc_cmdline.read_bytes()
+            if raw: return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        except OSError: pass
+    try:
+        if os.name == "nt":
+            command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"]
+        else:
+            command = ["ps", "-p", str(pid), "-o", "command="]
+        result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=2)
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+
+def _pid_matches_stageguard_api(pid):
+    """Fail-safe identity check before signalling a PID loaded from persistent state."""
+    command = _pid_command(pid)
+    if not command: return False
+    normalized = command.replace("\\", "/")
+    return "bootstrap.py" in normalized and "--port" in normalized and "9110" in normalized and "--identity-mode" in normalized and "local" in normalized
+
 def _stop_api():
     if not PID_PATH.exists(): return
     try: pid = int(PID_PATH.read_text(encoding="utf-8").strip())
-    except ValueError: PID_PATH.unlink(missing_ok=True); return
+    except ValueError:
+        if _api_running(): raise DemoError("invalid StageGuard API PID metadata while API is reachable; refusing unsafe process termination")
+        PID_PATH.unlink(missing_ok=True); return
+    if not _api_running():
+        PID_PATH.unlink(missing_ok=True); return
+    if not _pid_matches_stageguard_api(pid):
+        raise DemoError(f"PID {pid} cannot be verified as the StageGuard local API; refusing to signal it")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError) as exc:
+        raise DemoError(f"could not terminate verified StageGuard API PID {pid}: {exc}") from exc
+    deadline=time.monotonic()+5
+    while time.monotonic()<deadline and _api_running(): time.sleep(.25)
     if _api_running():
-        try: os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError): pass
-        deadline=time.monotonic()+5
-        while time.monotonic()<deadline and _api_running(): time.sleep(.25)
+        raise DemoError(f"verified StageGuard API PID {pid} did not stop after SIGTERM; ownership metadata retained")
     PID_PATH.unlink(missing_ok=True)
 
 def _check_docker():
