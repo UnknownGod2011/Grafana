@@ -25,37 +25,39 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Connector-authored changes since the last executable checkout are not treated as passing tests.
 
-## Latest run — 2026-09-20 — non-interactive local acceptance path implemented
+## Recent completed work
+
+- Added an unattended local acceptance path with `python scripts/demo_release.py --non-interactive`; it preserves stack recreation, Grafana MCP smoke, healthy evidence gates, deterministic fault injection, and post-fault evidence gates while removing only the human stdin pause. Regression coverage lives in `runtime/tests/test_validation_demo_release_noninteractive.py`.
+- Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
+
+## Latest run — 2026-09-20 — Grafana lifecycle safety alert
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the consolidated validation runner, repository test inventory, Docker Compose stack, README, scripts inventory, and `scripts/demo_release.py`. Confirmed that the local stack already pins `grafana/mcp-grafana:1.4.1` and that the release rehearsal proves healthy Prometheus evidence, starts the real local stack/MCP smoke through `demo_local.up`, injects the deterministic fault, and waits for fault evidence. The remaining orchestration problem was that the rehearsal always called `input()`, so the strongest local Docker/Grafana/MCP acceptance path could not run unattended from a terminal, development agent, or local pre-release script without adding GitHub Actions usage.
+Read `progress.md` completely before deciding what to change. Inspected the runtime API's readiness/Prometheus safety model, Docker Compose stack, Grafana provisioning tree, and the existing watchdog alert group. Confirmed that StageGuard already exports a fixed-cardinality one-hot `stageguard_lifecycle_safety_state` metric covering checkpoint conflict, audit-integrity failure, execution uncertainty, and combined execution/audit failure, and that `/readyz` fails closed when lifecycle safety is not `ok`. The existing Grafana rules alert remediation deadline, stale telemetry, scrape failure, and recovery/checkpoint inconsistency, but did not alert the composite lifecycle safety invariant itself.
 
 ### Exact changes made
 
-- Added `--non-interactive` to `scripts/demo_release.py`.
-- Non-interactive mode skips only the human recording/operator pause; it does not skip stack recreation, startup, the Grafana MCP smoke performed by local startup, healthy baseline evidence gates, deterministic fault injection, or post-fault Prometheus evidence gates.
-- Preserved the existing interactive behavior as the default.
-- Reworded recording-specific terminal output so the same command is meaningful as a general local acceptance rehearsal.
-- Added `runtime/tests/test_validation_demo_release_noninteractive.py` with regression coverage proving non-interactive mode never reads stdin, interactive mode still pauses, and the non-interactive main path runs baseline gates before one deterministic fault injection and then fault gates.
-- Named the regression under the existing `test_validation_*.py` ownership pattern so `--require-full-coverage` does not introduce an unowned test.
-- Removed the transient duplicate test filename created before assigning it to the validation-harness gate.
-- Implementation commit: `e31a4ee60eceb60aba15dbf160cde0d2685d566f`.
-- Validation-owned regression commit: `4ac418c263fc7c7b60121c678f2c5758249d6359` (duplicate cleanup: `8cb7cbed41423eb73f575f64c39aee1693b40e83`).
-- No credentials, live Grafana instance, remediation target, cloud resource, or GitHub Actions workflow was touched. Repository Actions history remains empty, so this work adds no CI noise/storage consumption.
+- Added `runtime/grafana/provisioning/alerting/stageguard-lifecycle-safety.yml`.
+- Added critical Grafana alert `stageguard-lifecycle-unsafe`, driven by `max(stageguard_lifecycle_safety_state{state!="ok"})`.
+- Configured `noDataState: Alerting` and `execErrState: Error` so the safety alert fails visibly when its evidence disappears or evaluation fails.
+- Kept the alert read-only: it contains no approval, execution, provider, credential, or remediation action path. Its operator guidance explicitly forbids replaying remediation merely to clear the alert.
+- Added `runtime/tests/test_validation_grafana_lifecycle_alert.py` to lock the composite query, fail-visible behavior, critical labeling, and absence of mutation/provider action strings. The filename is owned by the existing `test_validation_*.py` consolidated-validation gate.
+- Alert implementation commit: `81a713fc82f98248ae07916a7e6df208ddc45c67`.
+- Regression commit: `029c27acbef8458baaba429c47cc41b442aea7f1`.
+- No credentials, live Grafana instance, remediation target, cloud resource, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- Static repository inspection and edits completed successfully.
-- The connector does not expose an executable checkout, so the new unit regression and local Docker acceptance command were not executed; no new green-suite or MCP-1.4.1-live-smoke claim is made.
-- The new regression is owned by the existing validation-harness gate through `test_validation_*.py`.
+- Static repository inspection and GitHub writes completed successfully.
+- The connector does not expose an executable checkout, so the new regression and Grafana provisioning load were not executed; no green-suite claim is made.
+- The alert consumes an already-exported fixed-cardinality metric rather than introducing a second safety-state implementation in Grafana.
 
 ### Decisions
 
-1. The live local acceptance path should be automatable without requiring GitHub Actions; developers and coding agents can now run `python scripts/demo_release.py --non-interactive` directly on a Docker-capable checkout.
-2. Non-interactive acceptance must not weaken evidence gates. It removes only the human pause between verified healthy baseline and deterministic fault injection.
-3. Interactive mode remains the default because it is useful for operator demonstrations and manual inspection.
-4. Future hardening should focus on concrete executable failures and product/runtime behavior rather than further speculative environment-variable enumeration.
+1. Grafana should surface StageGuard's authoritative composite lifecycle invariant rather than independently recomputing checkpoint/audit/reconciliation logic.
+2. A missing composite safety signal is operationally unsafe, so no-data is alerting rather than benign.
+3. Grafana remains an indispensable observability/evidence layer, not a remediation execution plane.
 
 ### Blockers / unknowns
 
@@ -66,4 +68,4 @@ Read `progress.md` completely before deciding what to change. Inspected the cons
 
 ## Single best next step
 
-In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive` to exercise the pinned Grafana MCP 1.4.1 local evidence path without manual stdin and record the exact results here.
+In the first executable Docker-capable checkout, run `python scripts/run_stageguard_validation.py --require-full-coverage --keep-going`; fix every concrete failure it exposes, then run `python scripts/demo_release.py --non-interactive` and verify in Grafana that `stageguard-lifecycle-unsafe` provisions cleanly and remains Normal while the lifecycle state is `ok`.
