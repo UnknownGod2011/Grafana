@@ -28,6 +28,7 @@ import demo_local  # noqa: E402
 PROMETHEUS_QUERY_URL = "http://127.0.0.1:9090/api/v1/query"
 PACKET_LOSS_QUERY = 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}'
 DROP_RATE_QUERY = 'rate(video_frames_dropped_total{production_id="broadcast-alpha",feed_id="cam-3"}[2m])'
+COMPOSE_DOWN_TIMEOUT_SECONDS = 45.0
 
 
 class EvidenceGateError(RuntimeError):
@@ -80,14 +81,20 @@ def _wait_for(label: str, query: str, predicate, *, timeout_seconds: float = 45.
 
 
 def _compose_down() -> None:
-    result = subprocess.run(
-        ["docker", "compose", "down", "--remove-orphans"],
-        cwd=ROOT,
-        text=True,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "down", "--remove-orphans"],
+            cwd=ROOT,
+            text=True,
+            check=False,
+            timeout=COMPOSE_DOWN_TIMEOUT_SECONDS,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise EvidenceGateError(
+            f"docker compose down timed out after {COMPOSE_DOWN_TIMEOUT_SECONDS:.0f}s"
+        ) from exc
     if result.returncode != 0:
         raise EvidenceGateError(f"docker compose down failed with exit code {result.returncode}")
 
