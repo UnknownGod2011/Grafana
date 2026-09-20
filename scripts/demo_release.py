@@ -134,6 +134,20 @@ def _recreate_compose_stack() -> None:
     _compose_down()
 
 
+def _cleanup_owned_runtime() -> None:
+    """Stop the API process created by this rehearsal, then its compose stack.
+
+    The API runs as a host process rather than a compose service. Merely running
+    ``docker compose down`` therefore leaves an authenticated StageGuard process
+    listening on 9110 and makes a supposedly-clean unattended run contaminate
+    the next run. Ownership is established by main before this helper is called.
+    """
+    demo_local._stop_api()
+    if demo_local._api_running():
+        raise EvidenceGateError("owned StageGuard API remained reachable after cleanup")
+    _compose_down()
+
+
 def _confirm_fault_injection(*, non_interactive: bool) -> None:
     if non_interactive:
         print("[release] Non-interactive mode: injecting deterministic fault immediately after baseline verification.")
@@ -155,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="stop the local compose stack on exit (success or failure); useful for unattended acceptance runs",
+        help="stop the owned StageGuard API and local compose stack on exit (success or failure); useful for unattended acceptance runs",
     )
     args = parser.parse_args(argv)
 
@@ -172,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print("[release] Recreating local compose stack to remove stale telemetry...")
         _recreate_compose_stack()
-        # From this point the rehearsal owns the local compose lifecycle. Mark it
+        # From this point the rehearsal owns the local runtime lifecycle. Mark it
         # before startup so --cleanup also handles partially-created containers
         # when demo_local.up() fails midway through startup.
         stack_owned = True
@@ -201,9 +215,9 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = 1
     finally:
         if args.cleanup and stack_owned:
-            print("[release] Cleaning up local compose stack...")
+            print("[release] Cleaning up owned StageGuard API and local compose stack...")
             try:
-                _compose_down()
+                _cleanup_owned_runtime()
             except (EvidenceGateError, OSError) as exc:
                 print(f"RELEASE CLEANUP ERROR: {exc}", file=sys.stderr)
                 exit_code = 1
