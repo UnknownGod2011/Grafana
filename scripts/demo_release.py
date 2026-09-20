@@ -135,17 +135,19 @@ def _recreate_compose_stack() -> None:
 
 
 def _cleanup_owned_runtime() -> None:
-    """Stop the API process created by this rehearsal, then its compose stack.
+    """Stop and verify removal of the host API and owned compose containers.
 
-    The API runs as a host process rather than a compose service. Merely running
-    ``docker compose down`` therefore leaves an authenticated StageGuard process
-    listening on 9110 and makes a supposedly-clean unattended run contaminate
-    the next run. Ownership is established by main before this helper is called.
+    A zero exit from ``docker compose down`` is necessary but not sufficient for
+    an unattended cleanup contract: the project must also report no remaining
+    containers. This keeps a partial teardown visible instead of contaminating a
+    later evidence-freshness rehearsal.
     """
     demo_local._stop_api()
     if demo_local._api_running():
         raise EvidenceGateError("owned StageGuard API remained reachable after cleanup")
     _compose_down()
+    if _compose_has_resources():
+        raise EvidenceGateError("owned StageGuard compose resources remained after cleanup")
 
 
 def _confirm_fault_injection(*, non_interactive: bool) -> None:
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="stop the owned StageGuard API and local compose stack on exit (success or failure); useful for unattended acceptance runs",
+        help="stop and verify removal of the owned StageGuard API and local compose containers on exit (success or failure)",
     )
     args = parser.parse_args(argv)
 
@@ -186,9 +188,6 @@ def main(argv: list[str] | None = None) -> int:
 
         print("[release] Recreating local compose stack to remove stale telemetry...")
         _recreate_compose_stack()
-        # From this point the rehearsal owns the local runtime lifecycle. Mark it
-        # before startup so --cleanup also handles partially-created containers
-        # when demo_local.up() fails midway through startup.
         stack_owned = True
         demo_local.up(fresh=True, enable_gemini=args.gemini, open_browser=args.open)
 
