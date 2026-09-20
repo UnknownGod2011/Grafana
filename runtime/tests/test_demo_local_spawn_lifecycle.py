@@ -85,7 +85,19 @@ def test_stop_api_retains_metadata_when_verified_process_does_not_stop(monkeypat
 
 
 def test_pid_identity_requires_full_local_stageguard_signature(monkeypatch):
-    monkeypatch.setattr(DEMO, "_pid_command", lambda pid: "python /tmp/runtime/bootstrap.py --identity-mode local --port 9110")
+    expected = str(DEMO.RUNTIME / "bootstrap.py")
+    monkeypatch.setattr(DEMO, "_pid_command", lambda pid: f"python {expected} --identity-mode local --port 9110")
     assert DEMO._pid_matches_stageguard_api(7)
     monkeypatch.setattr(DEMO, "_pid_command", lambda pid: "python innocent.py --port 9110")
     assert not DEMO._pid_matches_stageguard_api(7)
+
+
+def test_pid_identity_rejects_different_bootstrap_path_with_same_basename(monkeypatch):
+    monkeypatch.setattr(DEMO, "_pid_command", lambda pid: "python /tmp/attacker/bootstrap.py --identity-mode local --port 9110")
+    assert not DEMO._pid_matches_stageguard_api(7), "basename similarity must not authorize process termination"
+
+
+def test_pid_identity_requires_flag_value_pairing_not_substring_presence(monkeypatch):
+    expected = str(DEMO.RUNTIME / "bootstrap.py")
+    monkeypatch.setattr(DEMO, "_pid_command", lambda pid: f"python {expected} --identity-mode remote local --port 1234 9110")
+    assert not DEMO._pid_matches_stageguard_api(7), "unrelated argv tokens must not satisfy identity/port ownership checks"
