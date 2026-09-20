@@ -135,19 +135,38 @@ def _recreate_compose_stack() -> None:
 
 
 def _cleanup_owned_runtime() -> None:
-    """Stop and verify removal of the host API and owned compose containers.
+    """Best-effort all owned cleanup legs, then fail closed on any postcondition.
 
-    A zero exit from ``docker compose down`` is necessary but not sufficient for
-    an unattended cleanup contract: the project must also report no remaining
-    containers. This keeps a partial teardown visible instead of contaminating a
-    later evidence-freshness rehearsal.
+    Once this rehearsal establishes ownership, failure to stop one runtime
+    component must not prevent cleanup of another. In particular, a wedged host
+    API must not strand simulator/Prometheus/Grafana containers. Every failed
+    leg remains visible: cleanup succeeds only when the API is unreachable and
+    the compose project reports zero containers.
     """
-    demo_local._stop_api()
-    if demo_local._api_running():
-        raise EvidenceGateError("owned StageGuard API remained reachable after cleanup")
-    _compose_down()
-    if _compose_has_resources():
-        raise EvidenceGateError("owned StageGuard compose resources remained after cleanup")
+    failures: list[str] = []
+
+    try:
+        demo_local._stop_api()
+    except Exception as exc:  # cleanup boundary: continue to independently-owned compose resources
+        failures.append(f"StageGuard API stop failed ({type(exc).__name__}: {exc})")
+    try:
+        if demo_local._api_running():
+            failures.append("owned StageGuard API remained reachable after cleanup")
+    except Exception as exc:
+        failures.append(f"StageGuard API cleanup verification failed ({type(exc).__name__}: {exc})")
+
+    try:
+        _compose_down()
+    except (EvidenceGateError, OSError) as exc:
+        failures.append(f"compose teardown failed ({exc})")
+    try:
+        if _compose_has_resources():
+            failures.append("owned StageGuard compose resources remained after cleanup")
+    except (EvidenceGateError, OSError) as exc:
+        failures.append(f"compose cleanup verification failed ({exc})")
+
+    if failures:
+        raise EvidenceGateError("; ".join(failures))
 
 
 def _confirm_fault_injection(*, non_interactive: bool) -> None:
