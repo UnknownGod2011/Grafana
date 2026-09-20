@@ -42,6 +42,19 @@ class DemoReleaseNonInteractiveTests(unittest.TestCase):
         self.assertEqual(wait_mock.call_count, 4)
         inject_mock.assert_called_once_with(settle_seconds=0)
 
+    def test_compose_down_is_timeout_bounded(self) -> None:
+        completed = subprocess.CompletedProcess(args=["docker", "compose", "down"], returncode=0)
+        with mock.patch.object(demo_release.subprocess, "run", return_value=completed) as run_mock:
+            demo_release._compose_down()
+
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], demo_release.COMPOSE_DOWN_TIMEOUT_SECONDS)
+
+    def test_compose_down_rejects_timeout(self) -> None:
+        timeout = subprocess.TimeoutExpired(cmd=["docker", "compose", "down"], timeout=45)
+        with mock.patch.object(demo_release.subprocess, "run", side_effect=timeout):
+            with self.assertRaisesRegex(demo_release.EvidenceGateError, "timed out"):
+                demo_release._compose_down()
+
     def test_compose_down_rejects_failed_teardown(self) -> None:
         completed = subprocess.CompletedProcess(args=["docker", "compose", "down"], returncode=17)
         with mock.patch.object(demo_release.subprocess, "run", return_value=completed):
