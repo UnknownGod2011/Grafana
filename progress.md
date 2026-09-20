@@ -26,32 +26,32 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — Bash validation environment isolation
+## Latest run — 2026-09-20 — Non-interactive pager/editor validation isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the runtime test inventory. The validation runner already isolated shell startup files through `BASH_ENV`, `ENV`, and `ZDOTDIR`, but still allowed inherited Bash exported functions and behavior/path controls to cross into validation subprocesses.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and the runtime test inventory. The validation runner already denied credential/configuration/runtime injection channels and set `GIT_TERMINAL_PROMPT=0`, but inherited pager/editor hooks could still invoke caller-selected programs or preprocessors during command-line validation.
 
 ### Changes / actions
 
-- Added the case-insensitive `BASH_FUNC_` prefix to the validation denylist so exported Bash functions such as `BASH_FUNC_git%%` or `BASH_FUNC_curl%%` cannot override commands inside shell-based validation helpers.
-- Added `BASHOPTS`, `SHELLOPTS`, and `CDPATH` to the case-insensitive denylist to prevent caller-selected shell behavior or directory-resolution semantics from influencing validation scripts.
-- Added regression coverage for canonical and mixed/lower-case exported-function and shell-control names, while explicitly confirming `PATH` and ordinary environment configuration remain intact.
-- Kept the change scoped to ambient shell injection channels rather than replacing `PATH`, because StageGuard's cross-platform validation legitimately resolves system executables.
-- No workflow, live service, cloud resource, Docker environment, Grafana instance, remediation target, or credentials were touched.
+- Added case-insensitive filtering for `GIT_PAGER`, `PAGER`, `MANPAGER`, `SYSTEMD_PAGER`, `EDITOR`, `VISUAL`, `LESSOPEN`, and `LESSCLOSE`.
+- Reinstalled only safe non-interactive pager values (`GIT_PAGER=cat`, `PAGER=cat`, `SYSTEMD_PAGER=cat`) after sanitization; editor and less-preprocessor hooks remain absent.
+- Added regression coverage for canonical and mixed/lower-case names, proving host executable/preprocessor values do not survive while ordinary configuration remains intact.
+- Kept `PATH` unchanged because StageGuard still needs cross-platform executable discovery for legitimate validation helpers.
+- No workflow, live service, cloud resource, Docker environment, Grafana instance, remediation target, or credential was touched.
 
 ### Checks / results
 
-- Runner hardening committed as `7ec76d94e276c607dd49baf5e7f8841553e40f51`.
-- Regression coverage committed as `2e3576f4526904987d0ebad368da0a9da13f513b`.
-- Static inspection confirms exported Bash function names are rejected through the same uppercase prefix matcher and the three behavior controls through the exact-name matcher before subprocess construction.
+- Runner hardening committed as `ea2c26d15e8a9bee76a1dec927d445b6d30546e9`.
+- Regression coverage committed as `f03dc679016e6d0a436d536bf788e9a48f55afb3`.
+- Static inspection confirms the eight host controls are rejected by the existing case-insensitive exact-name matcher before safe pager overrides are installed.
 - No green execution claim is made: this connector runner can inspect and modify repository files but does not expose an executable checkout for the Python suite.
 
 ### Decisions
 
-1. Shell startup-file isolation is insufficient by itself because Bash can import function definitions directly from specially named environment variables.
-2. Exported shell functions are treated as executable ambient state and therefore belong inside the same fail-closed validation boundary as dynamic-loader and language-runtime hooks.
-3. `PATH` remains available until StageGuard has an explicit cross-platform executable-resolution policy; removing it ad hoc would reduce validation fidelity and could break legitimate tests.
+1. Non-interactive validation requires more than disabling terminal credential prompts: pager/editor hooks are executable ambient state and can hang validation or run caller-selected programs.
+2. Safe pager overrides are preferable to merely deleting pager variables because downstream tools can otherwise rediscover host defaults; `cat` preserves output without interaction.
+3. `LESSOPEN`/`LESSCLOSE` are removed rather than replaced because their preprocessor semantics are unnecessary for StageGuard validation.
 
 ### Blockers / unknowns
 
