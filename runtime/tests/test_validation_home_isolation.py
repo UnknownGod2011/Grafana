@@ -73,6 +73,17 @@ class ValidationHomeIsolationTests(unittest.TestCase):
         for name in ("GIT_CONFIG_GLOBAL", "git_config_system", "Git_Config_Count", "git_config_key_0", "GIT_CONFIG_VALUE_0"):
             with self.subTest(name=name): self.assertTrue(runner._is_sensitive_env_name(name))
 
+    def test_pager_editor_and_less_hooks_are_sanitized_noninteractively(self):
+        source = {"PATH": "/usr/bin", "GIT_PAGER": "/host/evil-git-pager", "pager": "/host/evil-pager", "ManPager": "/host/evil-manpager", "SYSTEMD_PAGER": "/host/evil-systemd-pager", "EDITOR": "/host/evil-editor", "visual": "/host/evil-visual", "LESSOPEN": "|/host/evil-less %s", "lessclose": "/host/evil-less-close %s", "ORDINARY_SETTING": "safe"}
+        sanitized = runner._validation_env(source)
+        for name in source:
+            if name in {"PATH", "ORDINARY_SETTING"}: continue
+            with self.subTest(name=name): self.assertTrue(runner._is_sensitive_env_name(name))
+        for value in sanitized.values(): self.assertNotIn("/host/evil", value)
+        self.assertEqual(sanitized["GIT_PAGER"], "cat"); self.assertEqual(sanitized["PAGER"], "cat"); self.assertEqual(sanitized["SYSTEMD_PAGER"], "cat")
+        self.assertNotIn("EDITOR", sanitized); self.assertNotIn("visual", sanitized); self.assertNotIn("LESSOPEN", sanitized); self.assertNotIn("lessclose", sanitized)
+        self.assertEqual(sanitized["ORDINARY_SETTING"], "safe")
+
     def test_tls_session_key_logging_is_removed_case_insensitively(self):
         for name in ("SSLKEYLOGFILE", "sslkeylogfile", "SslKeyLogFile"):
             with self.subTest(name=name):
