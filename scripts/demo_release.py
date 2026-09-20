@@ -79,10 +79,7 @@ def _wait_for(label: str, query: str, predicate, *, timeout_seconds: float = 45.
     raise EvidenceGateError(f"timed out waiting for {label} ({detail})")
 
 
-def _recreate_compose_stack() -> None:
-    # The demo compose file has no persistent volumes. Recreating its containers
-    # clears old Prometheus samples so a previous rehearsal cannot contaminate
-    # the next acceptance run.
+def _compose_down() -> None:
     subprocess.run(
         ["docker", "compose", "down", "--remove-orphans"],
         cwd=ROOT,
@@ -91,6 +88,13 @@ def _recreate_compose_stack() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _recreate_compose_stack() -> None:
+    # The demo compose file has no persistent volumes. Recreating its containers
+    # clears old Prometheus samples so a previous rehearsal cannot contaminate
+    # the next acceptance run.
+    _compose_down()
 
 
 def _confirm_fault_injection(*, non_interactive: bool) -> None:
@@ -111,8 +115,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the operator/recording pause and inject the deterministic fault as soon as baseline evidence is verified",
     )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="stop the local compose stack on exit (success or failure); useful for unattended acceptance runs",
+    )
     args = parser.parse_args(argv)
 
+    stack_started = False
     try:
         if demo_local._api_running():
             raise EvidenceGateError("StageGuard API is already running; run 'python scripts/demo_local.py stop' first")
@@ -120,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[release] Recreating local compose stack to remove stale telemetry...")
         _recreate_compose_stack()
         demo_local.up(fresh=True, enable_gemini=args.gemini, open_browser=args.open)
+        stack_started = True
 
         print("[release] Waiting for the healthy baseline used by the bounded investigator...")
         healthy_loss = _wait_for("healthy uplink-b packet loss < 1%", PACKET_LOSS_QUERY, lambda value: value < 1.0)
@@ -142,6 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     except (EvidenceGateError, demo_local.DemoError, subprocess.CalledProcessError, OSError) as exc:
         print(f"RELEASE DEMO ERROR: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if args.cleanup and stack_started:
+            print("[release] Cleaning up local compose stack...")
+            _compose_down()
 
 
 if __name__ == "__main__":
