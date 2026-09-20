@@ -26,31 +26,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Current connector-authored changes have not been repository-executed in this runner and are not treated as passing tests.
 
-## Latest run — 2026-09-20 — Make validation environment isolation
+## Latest run — 2026-09-20 — Git helper validation isolation
 
 ### Inspected at start
 
-Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py`, `runtime/tests/test_validation_home_isolation.py`, and `ARCHITECTURE.md`. The validation runner already removed many credential, runtime, shell, loader, build-tool, pager, and editor controls. GNU Make ambient controls were still inherited.
+Read `progress.md` completely first, then inspected `scripts/run_stageguard_validation.py` and `runtime/tests/test_validation_home_isolation.py`. The runner already isolated Git config, SSH/askpass, pager, shell, language runtime, build-tool, credential, TLS, loader, and temporary-directory state. Direct Git helper/executable environment controls were still inherited.
 
 ### Changes / actions
 
-- Added case-insensitive filtering for `MAKEFLAGS`, `MFLAGS`, and `MAKEFILES` in the consolidated validation environment.
+- Added case-insensitive filtering for `GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, `GIT_DIFF_OPTS`, `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, and `GIT_TEMPLATE_DIR`.
 - Added regression coverage for canonical, lowercase, and mixed-case forms while proving ordinary settings and `PATH` remain intact.
-- This closes inherited Make option/rule/include state from influencing validation helpers that may transitively invoke Make.
+- This prevents validation children from redirecting Git subprogram execution, external diff helpers, editor/sequence-editor execution, or repository template material to caller-selected host paths.
+- Kept `GIT_PAGER=cat` and terminal prompting disabled as the explicit safe non-interactive Git overrides.
 - Did not touch live services, cloud resources, Docker, Grafana instances, remediation targets, credentials, or GitHub Actions.
 
 ### Checks / results
 
-- Validation-runner hardening committed as `bafe68b4b5b8b5818560dc60d9cc200829bba79b`.
-- Regression coverage committed as `cd08e4d7871f494244ec60235455d419290732a0`.
-- Static inspection confirms all three names flow through the existing case-insensitive exact-name sanitizer.
+- Validation-runner hardening committed as `e76b79ebe077da56f6df17d409e05889de0df377`.
+- Regression coverage committed as `e2c1354b50e57b3e5fa0fae6e044fda6d71289a5`.
+- Static inspection confirms the new names flow through the existing case-insensitive exact-name sanitizer.
 - No green execution claim is made: this connector can inspect and modify repository files but does not expose an executable checkout for the Python suite.
 
 ### Decisions
 
-1. `MAKEFILES` is treated as executable ambient configuration because Make can read additional makefiles named by the environment before normal project rules.
-2. `MAKEFLAGS`/`MFLAGS` are removed rather than normalized because StageGuard validation has no legitimate requirement to inherit caller-selected Make options.
-3. `PATH` remains unchanged pending a cross-platform executable-resolution design; silently replacing it could break legitimate validation helpers.
+1. `GIT_EXEC_PATH` and `GIT_EXTERNAL_DIFF` are treated as executable ambient state because they can redirect Git to caller-selected programs.
+2. Git editor controls are removed even though current validation is intended to be non-interactive; defense-in-depth prevents an unexpected Git path from launching caller-selected editors.
+3. `GIT_TEMPLATE_DIR` is removed because a validation helper that initializes a repository must not inherit caller-selected hooks/templates.
+4. `PATH` remains unchanged pending a cross-platform executable-resolution design; silently replacing it could break legitimate validation helpers and their fake-tool tests.
 
 ### Blockers / unknowns
 
