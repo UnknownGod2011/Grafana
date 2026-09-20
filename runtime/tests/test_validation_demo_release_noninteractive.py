@@ -41,6 +41,44 @@ class DemoReleaseNonInteractiveTests(unittest.TestCase):
         self.assertEqual(wait_mock.call_count, 4)
         inject_mock.assert_called_once_with(settle_seconds=0)
 
+    def test_cleanup_stops_stack_after_success(self) -> None:
+        values = iter((0.1, 0.0, 12.0, 3.0))
+        with (
+            mock.patch.object(demo_release.demo_local, "_api_running", return_value=False),
+            mock.patch.object(demo_release, "_recreate_compose_stack"),
+            mock.patch.object(demo_release.demo_local, "up"),
+            mock.patch.object(demo_release, "_wait_for", side_effect=lambda *args, **kwargs: next(values)),
+            mock.patch.object(demo_release.demo_local, "inject_fault"),
+            mock.patch.object(demo_release, "_compose_down") as down_mock,
+        ):
+            result = demo_release.main(["--non-interactive", "--cleanup"])
+
+        self.assertEqual(result, 0)
+        down_mock.assert_called_once_with()
+
+    def test_cleanup_stops_stack_after_evidence_failure(self) -> None:
+        with (
+            mock.patch.object(demo_release.demo_local, "_api_running", return_value=False),
+            mock.patch.object(demo_release, "_recreate_compose_stack"),
+            mock.patch.object(demo_release.demo_local, "up"),
+            mock.patch.object(demo_release, "_wait_for", side_effect=demo_release.EvidenceGateError("missing evidence")),
+            mock.patch.object(demo_release, "_compose_down") as down_mock,
+        ):
+            result = demo_release.main(["--non-interactive", "--cleanup"])
+
+        self.assertEqual(result, 1)
+        down_mock.assert_called_once_with()
+
+    def test_cleanup_does_not_touch_preexisting_stack(self) -> None:
+        with (
+            mock.patch.object(demo_release.demo_local, "_api_running", return_value=True),
+            mock.patch.object(demo_release, "_compose_down") as down_mock,
+        ):
+            result = demo_release.main(["--non-interactive", "--cleanup"])
+
+        self.assertEqual(result, 1)
+        down_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
