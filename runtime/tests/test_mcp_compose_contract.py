@@ -51,5 +51,7 @@ def test_mcp_waits_for_grafana_http_readiness() -> None:
     mcp = _mcp_section()
 
     assert "\n    healthcheck:\n" in grafana
-    assert "http://localhost:3000/api/health" in grafana
+    # Keep the readiness command aligned with the official mcp-grafana
+    # integration stack for this exact pinned Grafana image.
+    assert 'test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]' in grafana
     assert "\n      grafana:\n        condition: service_healthy\n" in mcp
