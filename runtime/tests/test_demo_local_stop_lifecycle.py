@@ -79,7 +79,7 @@ def test_stop_attempts_compose_cleanup_even_when_api_cleanup_fails(monkeypatch):
     with pytest.raises(DEMO.DemoError, match="StageGuard API"):
         DEMO.stop(keep_stack=False)
 
-    docker.assert_called_once_with("down")
+    docker.assert_any_call("down")
 
 
 def test_stop_aggregates_api_and_compose_failures(monkeypatch):
@@ -101,8 +101,8 @@ def test_stop_aggregates_api_and_compose_failures(monkeypatch):
     assert "Docker Compose" in message
 
 
-def test_stop_verifies_compose_has_no_remaining_containers(monkeypatch):
-    """A zero exit from `compose down` is not sufficient if owned containers remain."""
+def test_stop_verifies_compose_has_no_remaining_containers_including_stopped(monkeypatch):
+    """Verification must include stopped containers, which plain `compose ps` omits."""
     stop_api = MagicMock()
     calls = []
 
@@ -110,7 +110,7 @@ def test_stop_verifies_compose_has_no_remaining_containers(monkeypatch):
         calls.append((args, kwargs))
         if args == ("down",):
             return MagicMock(returncode=0, stdout="")
-        if args == ("ps", "-q"):
+        if args == ("ps", "--all", "-q"):
             return MagicMock(returncode=0, stdout="stageguard-grafana-container-id\n")
         raise AssertionError(f"unexpected docker invocation: {args}")
 
@@ -123,12 +123,12 @@ def test_stop_verifies_compose_has_no_remaining_containers(monkeypatch):
     stop_api.assert_called_once_with()
     assert calls == [
         (("down",), {}),
-        (("ps", "-q"), {"capture": True}),
+        (("ps", "--all", "-q"), {"capture": True}),
     ]
 
 
 def test_stop_accepts_verified_empty_compose_project(monkeypatch):
-    """Successful cleanup requires both `down` and an empty project-container query."""
+    """Successful cleanup requires `down` and an all-state empty project query."""
     stop_api = MagicMock()
     calls = []
 
@@ -136,7 +136,7 @@ def test_stop_accepts_verified_empty_compose_project(monkeypatch):
         calls.append((args, kwargs))
         if args == ("down",):
             return MagicMock(returncode=0, stdout="")
-        if args == ("ps", "-q"):
+        if args == ("ps", "--all", "-q"):
             return MagicMock(returncode=0, stdout="")
         raise AssertionError(f"unexpected docker invocation: {args}")
 
@@ -148,5 +148,5 @@ def test_stop_accepts_verified_empty_compose_project(monkeypatch):
     stop_api.assert_called_once_with()
     assert calls == [
         (("down",), {}),
-        (("ps", "-q"), {"capture": True}),
+        (("ps", "--all", "-q"), {"capture": True}),
     ]
