@@ -20,6 +20,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - API startup failure may terminate/reap only the exact `Popen` child created by that startup attempt; it must clear ownership metadata before returning failure.
 - A persisted local API PID is never sufficient authority to signal a process: shutdown must structurally verify the live command signature first and retain metadata on ambiguous or failed termination.
 - Health reachability is not process ownership: a structurally verified unhealthy local API is still an owned process and must be cleaned up safely.
+- Persisted PID metadata must be a strictly positive process ID before any lookup or signal; zero/negative POSIX PIDs can address process groups and are never valid StageGuard ownership handles.
 
 ## Retained validation baseline
 
@@ -40,41 +41,41 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened local API startup ownership so early child exit and readiness timeout cannot leave stale PID metadata; timeout cleanup targets only the exact spawned child and escalates terminate -> bounded wait -> kill/reap.
 - Hardened cross-invocation API shutdown against PID reuse and replaced substring identity authorization with structured argv validation.
 - Decoupled API health from process ownership during shutdown: verified unhealthy processes are now signalled, while unreachable/unverified stale PID metadata is discarded without signalling.
+- Hardened persisted PID handling so zero and negative values can never reach process lookup or `os.kill`, preventing POSIX process-group signalling from corrupt metadata.
 
-## Latest run — 2026-09-21 — verified unhealthy API cleanup implementation
+## Latest run — 2026-09-21 — special/nonpositive PID safety hardening
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`, focusing on the red regression from the previous run and the persisted-PID ownership/cleanup boundary.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`, focusing on termination authority and the persisted PID trust boundary.
 
 ### Finding
 
-The red regression was valid: `_stop_api()` deleted PID metadata whenever `/healthz` was unavailable before attempting structural process identity verification. This could orphan an owned StageGuard API that was alive but unhealthy, hung, or still starting. Health status is service-state evidence, not process-ownership evidence.
+The PID-reuse work structurally verified command identity, but persisted PID parsing still accepted `0` and negative integers. On POSIX, `os.kill(0, sig)` targets the caller's process group and negative PIDs target process groups. Corrupt or malicious local PID metadata therefore had a dangerous semantic class that should be rejected before process lookup or structural matching.
 
 ### Exact changes made
 
-- Changed `_stop_api()` to evaluate API reachability and structural PID identity independently.
-- A structurally verified StageGuard local API is now sent SIGTERM even when `/healthz` is unavailable.
-- An unverified PID is never signalled. If the API is also unreachable, stale PID metadata is safely discarded; if the API is reachable, cleanup fails closed and retains the metadata for manual investigation.
-- After SIGTERM, shutdown now waits on structural process identity rather than health alone, so an unhealthy process must actually cease matching the owned command signature before cleanup is considered complete.
-- `ProcessLookupError` is treated as an already-exited owned process and clears metadata; permission/OS signalling errors remain explicit failures.
-- Updated lifecycle regressions so successful shutdown models ownership disappearing after SIGTERM, and added coverage for the unreachable + unverified stale-PID case.
-- Implementation commit: `c4d8ece893db2b9b887312e3b8d98efeec1cc5a3`.
-- Regression update commit: `40c6d8ea1353dd79e6e1700d2dce3c949b824248`.
+- `_stop_api()` now rejects every nonpositive persisted PID before command lookup or signalling.
+- If the API is reachable with nonpositive PID metadata, cleanup fails closed and retains the metadata for investigation.
+- If the API is unreachable, nonpositive PID metadata is discarded as stale without signalling anything.
+- `_pid_command()` and `_pid_matches_stageguard_api()` independently reject nonpositive/non-integer PID values as defense in depth.
+- Added regressions for PID `0`, `-1`, and an arbitrary negative PID proving `os.kill` is never called, plus stale-unreachable cleanup and matcher short-circuit coverage.
+- Implementation commit: `d2da2e4184b6bbb1d2360b8bc7ffd07629a09059`.
+- Regression commit: `78f650d6eef9058f68a25b3151917d1a60036ce4`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted both implementation and regression updates.
-- Static inspection confirms the previous early-return-on-unhealthy path is removed and termination authority remains gated by `_pid_matches_stageguard_api()`.
+- GitHub accepted the implementation and regression updates.
+- Static inspection establishes the new guard before `_pid_matches_stageguard_api()` and therefore before `os.kill()`.
 - This connector does not expose an executable checkout, so no new green test claim is made. The focused lifecycle tests and broader validator remain execution gates.
 
 ### Decisions
 
-1. Structural process identity, not HTTP health, is the authority for persisted-PID cleanup.
-2. A reachable API plus unverified PID is ambiguous and must fail closed without signalling or discarding ownership metadata.
-3. An unreachable API plus unverified PID is safe to classify as stale metadata because no termination action is taken.
-4. Post-SIGTERM success is based on disappearance of the verified process identity, preventing a hung/unhealthy API from being mistaken for a successful stop merely because health is down.
+1. Persisted PID files are untrusted local state; parsing as an integer is not sufficient validation.
+2. Only strictly positive PIDs may enter StageGuard's cross-invocation ownership-verification path.
+3. Reachable API + unsafe PID metadata remains ambiguous and fails closed; unreachable API + unsafe metadata can be discarded without any process action.
+4. The invariant is enforced both at the shutdown boundary and lower-level PID identity helpers to reduce regression risk.
 
 ### Blockers / unknowns
 
