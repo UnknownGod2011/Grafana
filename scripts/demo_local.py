@@ -195,7 +195,7 @@ def stop(*,keep_stack):
   except subprocess.CalledProcessError as exc:failures.append(f"Docker Compose teardown failed with exit code {exc.returncode}; local stack may still be running")
   if compose_down_succeeded:
    try:
-    remaining=_docker("ps","-q",capture=True).stdout.strip()
+    remaining=_docker("ps","--all","-q",capture=True).stdout.strip()
     if remaining:failures.append("Docker Compose project still has running or retained containers after teardown; local stack may still be running")
    except FileNotFoundError:failures.append("Docker Compose teardown verification failed: docker executable was not found; local stack state is unknown")
    except subprocess.CalledProcessError as exc:failures.append(f"Docker Compose teardown verification failed with exit code {exc.returncode}; local stack state is unknown")
