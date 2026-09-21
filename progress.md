@@ -18,7 +18,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Local acceptance never destroys pre-existing compose resources merely because the StageGuard API is unreachable.
 - Unattended cleanup must independently attempt all runtime components it owns, verify the host API is unreachable and compose has zero containers, and report any partial teardown as failure.
 - API startup failure may terminate/reap only the exact `Popen` child created by that startup attempt; it must clear ownership metadata before returning failure.
-- A persisted local API PID is never sufficient authority to signal a process: shutdown must verify the live command signature first and retain metadata on ambiguous or failed termination.
+- A persisted local API PID is never sufficient authority to signal a process: shutdown must structurally verify the live command signature first and retain metadata on ambiguous or failed termination.
 
 ## Retained validation baseline
 
@@ -33,49 +33,47 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 
 - Added unattended local acceptance with `python scripts/demo_release.py --non-interactive` and opt-in `--cleanup`.
 - Made compose teardown fail closed on non-zero exit and timeout-bounded at 45 seconds.
-- Added a bounded compose ownership preflight so stopped, unhealthy, or partially-started pre-existing StageGuard containers are not destroyed when the API is unreachable.
+- Added bounded compose ownership preflight so stopped, unhealthy, or partially-started pre-existing StageGuard containers are not destroyed when the API is unreachable.
 - Fixed `--cleanup` to independently attempt host-API and compose cleanup, verify both postconditions, and aggregate failures rather than stranding one owned component when the other cleanup leg fails.
-- Closed inherited Git/environment isolation paths in the consolidated validator and retained explicit safe Git overrides.
-- Added critical Grafana alert `stageguard-lifecycle-unsafe`, a dedicated read-only lifecycle dashboard, and `docs/runbooks/lifecycle-safety.md` linked from that dashboard.
+- Added critical Grafana lifecycle alert/dashboard/runbook surfaces.
 - Hardened local API startup ownership so early child exit and readiness timeout cannot leave stale PID metadata; timeout cleanup targets only the exact spawned child and escalates terminate -> bounded wait -> kill/reap.
-- Hardened the final owned-child reap edge: kill is attempted only after a bounded terminate wait, a second bounded wait is mandatory, and a child that survives both produces an explicit `DemoError` while stale PID ownership metadata is still cleared.
-- Hardened cross-invocation API shutdown against PID reuse: a PID loaded from disk is signalled only after bounded command-line inspection proves the expected StageGuard local API signature.
+- Hardened cross-invocation API shutdown against PID reuse and replaced substring identity authorization with structured argv validation.
 
-## Latest run — 2026-09-21 — strict PID identity regression gate
+## Latest run — 2026-09-21 — structured persisted-PID identity validation
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`. The persisted-PID guard introduced in the previous run is directionally correct, but `_pid_matches_stageguard_api()` currently validates independent substrings: any command containing a `bootstrap.py` basename plus the tokens `local`, `--identity-mode`, `9110`, and `--port` can satisfy it. That leaves two concrete false-authorization classes: a different script with the same basename and commands where the required flag values are present elsewhere in argv rather than paired with their flags.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`. The previous run intentionally added two red regressions proving that the persisted-PID matcher could authorize an unrelated `bootstrap.py` path or accept required values merely because they appeared elsewhere in the command line.
 
 ### Exact changes made
 
-- Strengthened the lifecycle regression contract so a valid persisted process identity is expected to reference StageGuard's actual `runtime/bootstrap.py` path.
-- Added a regression requiring a different `/tmp/.../bootstrap.py` with otherwise matching arguments to be rejected.
-- Added a regression requiring `--identity-mode local` and `--port 9110` to be real flag/value pairs rather than unrelated substring presence.
-- Preserved all existing startup-reap, PID-reuse, verified-shutdown, and metadata-retention tests.
-- Regression commit: `3a90ea5f96668900cddd05973cb8072190c73c40`.
+- Replaced substring-based `_pid_matches_stageguard_api()` authorization with fail-closed command-line parsing using Python `shlex`.
+- Require exactly one bootstrap script argument resolving to StageGuard's own `runtime/bootstrap.py`; a same-basename script elsewhere no longer authorizes termination.
+- Require exact option/value relationships for `--identity-mode local` and `--port 9110`; unrelated argv tokens cannot satisfy ownership.
+- Reject malformed command-line quoting, missing values, duplicate bootstrap matches, duplicate ownership options, and unverifiable command lines by returning `False` rather than weakening the guard.
+- Preserve Windows path normalization/quote handling while retaining the existing bounded PowerShell command lookup fallback.
+- Implementation commit: `a0f3a411506065acf3a2e17bb592dafb22d4d0d8`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted the focused regression update.
-- Static inspection confirms both new tests describe real gaps in the current substring matcher and therefore intentionally establish a red safety gate until the matcher is replaced with structured argv validation.
-- This repository connector does not expose an executable checkout, so the focused pytest suite was not executed and no green claim is made.
+- GitHub accepted the implementation update.
+- Static review confirms the implementation directly addresses the two focused regressions added in the preceding run: path identity is now compared against the expected StageGuard bootstrap path and option values are paired structurally.
+- This repository connector does not expose an executable checkout, so `runtime/tests/test_demo_local_spawn_lifecycle.py` was not executed and no green claim is made for connector-authored changes.
 
 ### Decisions
 
-1. A persisted PID may authorize termination only when process identity is structurally proven; basename/substrings are insufficient.
-2. The eventual implementation should parse command arguments and verify the exact StageGuard bootstrap path plus exact option/value pairs, while failing closed when platform command-line representation cannot be parsed safely.
-3. The new regressions are preferable to weakening the ownership check for Windows convenience; platform ambiguity must remain non-destructive.
+1. Persisted PID metadata remains only a hint; termination authority requires structural live-process identity proof.
+2. Ambiguous parsing, duplicate ownership-defining arguments, or malformed quoting must fail closed.
+3. Process identity remains deliberately narrower than generic Python/bootstrap matching because false refusal is safer than signalling an unrelated host process.
 
 ### Blockers / unknowns
 
-- The two new identity regressions are expected to fail against the current substring matcher until implementation is hardened.
-- The connector can update repository files but cannot execute the checkout, so focused pytest and consolidated validation remain unexecuted here.
-- Windows process-command quoting requires live validation after structured argv parsing is implemented.
+- Focused lifecycle tests still require execution in a real checkout.
+- Windows command-line quoting and path normalization require live Windows validation.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Replace `_pid_matches_stageguard_api()` substring matching with fail-closed structured argv validation: require the resolved StageGuard `runtime/bootstrap.py` path and exact `--identity-mode local` / `--port 9110` option-value pairs, then execute `runtime/tests/test_demo_local_spawn_lifecycle.py`. After that, run consolidated validation, `python scripts/demo_release.py --non-interactive --cleanup`, and the pinned Grafana MCP `1.4.1` read-only smoke.
+Execute `runtime/tests/test_demo_local_spawn_lifecycle.py` on Linux and Windows and fix any platform parsing discrepancy found. Then run consolidated validation, `python scripts/demo_release.py --non-interactive --cleanup`, and the pinned Grafana MCP `1.4.1` read-only smoke. If execution remains unavailable, next harden the structured identity regressions around quoted paths, `--option=value`, duplicate options, and malformed argv before moving to another production-readiness area.
