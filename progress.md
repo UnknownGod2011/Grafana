@@ -39,41 +39,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened local API startup ownership so early child exit and readiness timeout cannot leave stale PID metadata; timeout cleanup targets only the exact spawned child and escalates terminate -> bounded wait -> kill/reap.
 - Hardened cross-invocation API shutdown against PID reuse and replaced substring identity authorization with structured argv validation.
 
-## Latest run — 2026-09-21 — structured persisted-PID identity validation
+## Latest run — 2026-09-21 — unhealthy owned API cleanup regression
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`. The previous run intentionally added two red regressions proving that the persisted-PID matcher could authorize an unrelated `bootstrap.py` path or accept required values merely because they appeared elsewhere in the command line.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_spawn_lifecycle.py`, concentrating on the persisted-PID cleanup path after the prior structured identity hardening.
+
+### Finding
+
+`_stop_api()` currently deletes `stageguard-api.pid` immediately when `/healthz` is unreachable. That conflates service health with process ownership. A StageGuard API process can still be alive but hung, starting, or unhealthy; in that state cleanup discards its verified ownership handle without signalling it, potentially leaking the host process after an unattended acceptance run.
 
 ### Exact changes made
 
-- Replaced substring-based `_pid_matches_stageguard_api()` authorization with fail-closed command-line parsing using Python `shlex`.
-- Require exactly one bootstrap script argument resolving to StageGuard's own `runtime/bootstrap.py`; a same-basename script elsewhere no longer authorizes termination.
-- Require exact option/value relationships for `--identity-mode local` and `--port 9110`; unrelated argv tokens cannot satisfy ownership.
-- Reject malformed command-line quoting, missing values, duplicate bootstrap matches, duplicate ownership options, and unverifiable command lines by returning `False` rather than weakening the guard.
-- Preserve Windows path normalization/quote handling while retaining the existing bounded PowerShell command lookup fallback.
-- Implementation commit: `a0f3a411506065acf3a2e17bb592dafb22d4d0d8`.
+- Added `test_stop_api_terminates_verified_owned_process_even_when_health_is_down`.
+- The regression requires `_stop_api()` to use the structural PID identity proof already implemented and send SIGTERM to that exact verified StageGuard process even when `/healthz` is down.
+- The test simultaneously preserves the safety boundary: it grants termination authority only through `_pid_matches_stageguard_api`, never through port ownership or PID metadata alone.
+- Regression commit: `675c6f954849e2c04504d88bb037c2fbb0ca7064`.
 - No credentials, live Grafana instance, remediation target, cloud resource, unrelated repository, or GitHub Actions workflow was touched.
 
 ### Checks / results
 
-- GitHub accepted the implementation update.
-- Static review confirms the implementation directly addresses the two focused regressions added in the preceding run: path identity is now compared against the expected StageGuard bootstrap path and option values are paired structurally.
-- This repository connector does not expose an executable checkout, so `runtime/tests/test_demo_local_spawn_lifecycle.py` was not executed and no green claim is made for connector-authored changes.
+- GitHub accepted the focused regression update.
+- The new test is intentionally a red gate against the current `_stop_api()` implementation; current code returns early when health is down and therefore does not call `os.kill`.
+- This connector does not expose an executable checkout, so no green test claim is made.
 
 ### Decisions
 
-1. Persisted PID metadata remains only a hint; termination authority requires structural live-process identity proof.
-2. Ambiguous parsing, duplicate ownership-defining arguments, or malformed quoting must fail closed.
-3. Process identity remains deliberately narrower than generic Python/bootstrap matching because false refusal is safer than signalling an unrelated host process.
+1. Health reachability is not process-ownership evidence and must not decide whether an owned process is cleaned up.
+2. Structural command identity remains mandatory before signalling a persisted PID.
+3. An unhealthy but structurally verified StageGuard process should be terminated during owned cleanup; an unverified PID must never be signalled.
 
 ### Blockers / unknowns
 
-- Focused lifecycle tests still require execution in a real checkout.
-- Windows command-line quoting and path normalization require live Windows validation.
+- The red regression requires the corresponding `_stop_api()` implementation change.
+- Focused lifecycle tests still require execution in a real checkout, including Windows command-line parsing validation.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Execute `runtime/tests/test_demo_local_spawn_lifecycle.py` on Linux and Windows and fix any platform parsing discrepancy found. Then run consolidated validation, `python scripts/demo_release.py --non-interactive --cleanup`, and the pinned Grafana MCP `1.4.1` read-only smoke. If execution remains unavailable, next harden the structured identity regressions around quoted paths, `--option=value`, duplicate options, and malformed argv before moving to another production-readiness area.
+Change `_stop_api()` so it structurally checks the persisted PID even when `/healthz` is unavailable: terminate only a verified StageGuard process, safely discard genuinely stale/unverified metadata when the API is also unreachable, retain metadata on ambiguous reachable-service ownership, and keep failure behavior fail-closed. Then execute the focused lifecycle suite before consolidated validation, unattended Docker cleanup rehearsal, and the pinned Grafana MCP `1.4.1` read-only smoke.
