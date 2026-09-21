@@ -15,7 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Demo services without production authentication are loopback-only.
 - Local Grafana MCP is opt-in/on-demand stdio, file-secret-backed, read-only, capability-free, no-new-privileges, and resource/result bounded.
 - MCP startup waits for Grafana HTTP readiness; local rehearsals establish a healthy baseline before fault injection.
-- MCP release acceptance requires non-empty evidence content, not merely a successful JSON-RPC/tool envelope.
+- MCP release acceptance requires a non-empty evidence payload, not merely a successful JSON-RPC/tool envelope or metadata-only content object.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -35,37 +35,39 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added regression contracts for Compose exposure, MCP hardening/readiness, lifecycle behavior, incident rehearsal semantics, and semantic MCP smoke acceptance.
 - Corrected runtime docs to healthy-baseline → explicit fault → recovery and documented one-off stdio MCP lifecycle.
 
-## Latest run — 2026-09-22 — MCP semantic acceptance implementation
+## Latest run — 2026-09-22 — MCP evidence-payload hardening
 
 ### Inspected at start
 
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and the previously-added semantic acceptance gate.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_semantic_acceptance.py`, and the runtime test inventory.
 
 ### Finding
 
-The prior run correctly introduced a red regression proving that `_assert_tool_result` accepted missing or empty MCP `content`. The implementation still needed to close that false-positive release path.
+The previous semantic gate rejected missing/empty content arrays, but still accepted any non-empty dictionary as evidence. Therefore metadata-only entries such as `{"type":"text","text":""}` or `{"type":"text","annotations":...}` could make release acceptance green without an actual evidence payload.
 
 ### Exact changes made
 
-- Hardened `runtime/mcp_smoke.py::_assert_tool_result`.
-- A tool response now fails closed when `content` is missing, is not a list, or is an empty list.
-- It also rejects content arrays that contain no non-empty MCP content object, avoiding acceptance of structurally empty entries.
-- Preserved the existing `isError=true` failure behavior and bounded diagnostics.
-- Updated the final PASS text so it accurately claims non-empty Prometheus evidence rather than generic query execution.
-- Implementation commit: `74c7a6b06c6ba24b57268cfb7869070b249e5391`.
+- Added `_has_nonempty_content_payload()` in `runtime/mcp_smoke.py`.
+- MCP content now qualifies only when an object carries a non-empty payload beyond metadata fields (`type`, `mimeType`, annotations/meta).
+- Blank/whitespace text, metadata-only objects, empty dictionaries, and non-object entries fail closed.
+- Kept the acceptance format-tolerant for non-text MCP content carrying a real payload so StageGuard does not prematurely couple to one upstream serialization before the live `1.4.1` observation.
+- Expanded `runtime/tests/test_mcp_smoke_semantic_acceptance.py` with metadata-only, blank-text, malformed-entry, and non-text-payload regression cases.
+- Implementation commit: `75632513000fa193281dabf0ab3399d9be645aa1`.
+- Test commit: `16ae605bfa044a9625676d9714882db12b6c4cf5`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the implementation update.
-- The connector environment still does not expose an executable repository checkout, so the semantic regression tests and Docker acceptance suite were not run here. This is not recorded as an executable-green result.
-- The implementation is intentionally format-tolerant: it establishes that MCP returned at least one non-empty content object without coupling StageGuard to an upstream Prometheus text serialization that may evolve.
+- GitHub accepted both implementation and regression-test updates.
+- This connector environment still does not expose an executable repository checkout, so the tests were not executed here and are not recorded as green.
+- Static review confirms the prior accepted text fixture still has a non-empty `text` payload and the added resource fixture has a non-empty `resource` payload.
 
 ### Decisions
 
-1. Release smoke success must prove evidence presence in addition to JSON-RPC/tool success.
-2. Keep semantic validation conservative at the MCP content-envelope boundary until pinned `1.4.1` is observed live; do not invent a stricter upstream payload schema before seeing the real response.
-3. Continue avoiding CI churn solely to validate connector-authored changes.
+1. A release smoke must prove payload presence, not just MCP envelope/content-object presence.
+2. Metadata does not count as operational evidence.
+3. Keep payload detection serialization-tolerant until the pinned upstream `1.4.1` response is observed live; only then tighten to a more specific stable contract if justified.
+4. Continue avoiding noisy CI solely to validate connector-authored changes.
 
 ### Blockers / unknowns
 
@@ -77,4 +79,4 @@ The prior run correctly introduced a red regression proving that `_assert_tool_r
 
 ## Single best next step
 
-Execute the semantic MCP smoke contract tests and local Docker acceptance gate. Verify that pinned MCP `1.4.1` returns a real non-empty `query_prometheus` content payload through Grafana `13.2.1`; then tighten parsing only if the observed upstream payload demonstrates a stable, useful semantic contract beyond non-empty content.
+Execute the semantic MCP contract tests and local Docker acceptance gate. Observe the real pinned MCP `1.4.1` `query_prometheus` payload through Grafana `13.2.1`; if it exposes a stable structured result, strengthen acceptance to verify that the requested StageGuard series actually contains a sample rather than merely a non-empty payload.
