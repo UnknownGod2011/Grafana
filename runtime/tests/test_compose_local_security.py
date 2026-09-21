@@ -10,6 +10,10 @@ def _compose_text() -> str:
     return COMPOSE.read_text(encoding="utf-8")
 
 
+def _mcp_section() -> str:
+    return _compose_text().split("\n  mcp:\n", maxsplit=1)[1]
+
+
 def test_local_host_ports_are_loopback_only() -> None:
     """Local fixtures must not regress to Docker's all-interface port publishing."""
     text = _compose_text()
@@ -34,7 +38,22 @@ def test_local_host_ports_are_loopback_only() -> None:
 
 def test_mcp_has_no_host_port_publication() -> None:
     """The stdio MCP sidecar should remain reachable only through its process transport."""
-    text = _compose_text()
-    mcp_section = text.split("\n  mcp:\n", maxsplit=1)[1]
+    assert "\n    ports:" not in _mcp_section()
 
-    assert "\n    ports:" not in mcp_section
+
+def test_mcp_container_is_least_privilege() -> None:
+    """The read-only evidence adapter must not gain filesystem/capability mutation power."""
+    mcp = _mcp_section()
+
+    assert "\n    read_only: true\n" in mcp
+    assert re.search(r"\n    cap_drop:\n\s+- ALL\n", mcp)
+    assert re.search(r"\n    security_opt:\n\s+- no-new-privileges:true\n", mcp)
+
+
+def test_mcp_token_is_file_backed_and_mounted_read_only() -> None:
+    """Do not regress to an inline service-account token in Compose."""
+    mcp = _mcp_section()
+
+    assert "GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE: /run/secrets/grafana-mcp-token" in mcp
+    assert "GRAFANA_SERVICE_ACCOUNT_TOKEN:" not in mcp
+    assert "./runtime/.secrets/grafana-mcp-token:/run/secrets/grafana-mcp-token:ro" in mcp
