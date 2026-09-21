@@ -40,50 +40,51 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened the opt-in MCP container with a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, file-backed token handling, and bounded resources/results.
 - Added a Grafana HTTP healthcheck and changed MCP dependency semantics to `service_healthy`.
 - Corrected the local runtime guide so its incident-replay instructions match the actual healthy-by-default Compose contract and documented that MCP is launched as a one-off stdio subprocess rather than a persistent network sidecar.
+- Aligned the Grafana readiness probe with the official `grafana/mcp-grafana` integration stack for the exact pinned Grafana `13.2.1` image (`curl -sf /api/health`) and locked that command in the MCP Compose contract test.
 
-## Latest run — 2026-09-22 — MCP lifecycle and rehearsal documentation integrity
+## Latest run — 2026-09-22 — upstream-aligned Grafana readiness probe
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `docker-compose.yml`, `runtime/tests/test_mcp_compose_contract.py`, `runtime/README.md`, and the beginning of `runtime/mcp_smoke.py` to reconcile the documented operator flow with the actual Compose and MCP launcher behavior.
+Read `progress.md` completely before deciding what to change. Inspected `docker-compose.yml` and `runtime/tests/test_mcp_compose_contract.py`, then checked current official Grafana and `grafana/mcp-grafana` sources for the pinned image's readiness convention.
 
 ### Findings
 
-1. `docker-compose.yml` explicitly starts the simulator with `STAGEGUARD_SCENARIO: healthy`, but `runtime/README.md` still claimed the stack starts faulted. That would make a new operator reset an already-healthy stack and obscured the intended acceptance sequence of baseline -> fault -> recovery.
-2. The MCP service is correctly stdio-only and opt-in. `runtime/mcp_smoke.py` launches it with `docker compose run --rm -T mcp`, so it is a one-off process whose stdin/stdout are owned by the client, not a persistent sidecar that should be started with ordinary `docker compose up`.
-3. The newly added `service_healthy` dependency is compatible with that launcher model: Compose starts/waits for dependencies before the one-off MCP process is attached to the smoke client.
+1. StageGuard's new readiness gate used `wget --spider` and still carried an explicit executable unknown about whether the pinned Grafana image supported that exact probe.
+2. The official `grafana/mcp-grafana` repository currently runs the exact same `grafana/grafana:13.2.1` image and healthchecks it with `curl -sf http://localhost:3000/api/health`.
+3. That upstream stack is stronger evidence for this exact integration/image pair than historical assumptions about Alpine utilities, so StageGuard can eliminate the unnecessary `wget` uncertainty without broadening privileges or adding dependencies.
 
 ### Exact changes made
 
-- Corrected `runtime/README.md` to state that the local stack starts healthy.
-- Simplified the deterministic rehearsal sequence to explicit fault injection, recovery, and optional reset to a fresh healthy baseline.
-- Documented the actual MCP lifecycle: `docker compose run --rm -T mcp`, stdio transport, one-off container removal, no MCP host port, and Grafana readiness gating before launch.
-- Documentation commit: `919e0694f01ed240819324b43007a0452c438dc8`.
+- Changed the Grafana Compose healthcheck to `curl -sf http://localhost:3000/api/health` and matched upstream's 20 retries.
+- Updated the healthcheck comment to record why this probe is selected.
+- Strengthened `runtime/tests/test_mcp_compose_contract.py` to lock the exact upstream-compatible readiness command rather than merely checking that `/api/health` appears somewhere in the service.
+- Compose commit: `ad06521056e3d028584fc37b93a653b1968ce065`.
+- Contract-test commit: `a13dbf228184abd40217326239ae29c2ec9d73a6`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the runtime documentation update.
-- Static cross-check confirms the revised operator instructions now agree with the current Compose `STAGEGUARD_SCENARIO: healthy` setting and `mcp_smoke.py` default launcher.
-- Current Grafana container research also found historical upstream evidence that `wget` is present in the Alpine image family, but the exact pinned `13.2.1` image still needs executable verification; no stronger claim was recorded.
-- No executable green claim is made: this connector environment does not provide a runnable Docker checkout.
+- GitHub accepted both implementation and test updates.
+- Current upstream `grafana/mcp-grafana` Compose configuration provides direct static evidence that the exact pinned Grafana `13.2.1` image is expected to support this `curl` healthcheck.
+- No executable green claim is made: this connector environment still does not provide a runnable Docker checkout.
 
 ### Decisions
 
-1. Preserve healthy-by-default startup because acceptance should prove a clean baseline before injecting the seeded incident.
-2. Keep MCP stdio/on-demand rather than adding an HTTP listener or trying to keep an unattached stdio process alive.
-3. Treat operator documentation that contradicts runtime state as a correctness defect, not cosmetic cleanup.
-4. Do not add CI merely to validate these connector-authored changes; preserve the low-noise GitHub Actions policy.
+1. Prefer the exact readiness convention exercised by Grafana's own MCP integration stack over maintaining a StageGuard-specific shell-tool assumption.
+2. Keep the readiness endpoint on Grafana itself; do not expose MCP over HTTP merely to healthcheck it.
+3. Keep the probe unauthenticated and local to the container because `/api/health` is only a readiness boundary, not an evidence query.
+4. Do not add CI just to validate connector-authored changes; preserve the low-noise Actions policy.
 
 ### Blockers / unknowns
 
 - Run `docker compose config` in a real checkout.
-- Confirm the pinned `grafana/grafana:13.2.1` image contains a working `wget` and that `/api/health` reaches healthy under the provisioned stack.
-- Start the one-off MCP through `runtime/mcp_smoke.py` and confirm hardened `grafana/mcp-grafana:1.4.1` remains compatible with the read-only root filesystem.
+- Start the base stack and observe Grafana reach healthy with the revised upstream-aligned probe.
+- Bootstrap the Viewer token and run `python runtime/mcp_smoke.py` against hardened `grafana/mcp-grafana:1.4.1`.
 - Run accumulated lifecycle/security/MCP tests on Linux and Windows.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- A live unattended Docker rehearsal and pinned `1.4.1` read-only MCP smoke remain required.
+- A live unattended Docker rehearsal remains required after these hardening changes.
 
 ## Single best next step
 
-Execute the local Docker acceptance gate in a real checkout: `docker compose config`, start the base stack, verify Grafana becomes healthy, bootstrap the Viewer token, run `python runtime/mcp_smoke.py` against pinned MCP `1.4.1`, and then run the focused Compose/MCP regression suites. Fix the first executable failure found before adding further features.
+Execute the local Docker acceptance gate in a real checkout: `docker compose config`, start the base stack and verify Grafana reaches healthy using the upstream-aligned probe, bootstrap the Viewer token, run `python runtime/mcp_smoke.py` against pinned MCP `1.4.1`, and fix the first executable failure before adding further features.
