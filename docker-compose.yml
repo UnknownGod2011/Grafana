@@ -7,7 +7,9 @@ services:
       # uplink-b fault explicitly after the baseline has been verified.
       STAGEGUARD_SCENARIO: healthy
     ports:
-      - "9108:9108"
+      # The simulator exposes scenario mutation endpoints used by the local demo.
+      # Never publish them to the developer's LAN by default.
+      - "127.0.0.1:9108:9108"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9108/healthz', timeout=2)"]
       interval: 5s
@@ -41,7 +43,8 @@ services:
     volumes:
       - ./runtime/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      # Prometheus has no authentication in this local fixture; keep it host-local.
+      - "127.0.0.1:9090:9090"
     depends_on:
       simulator:
         condition: service_healthy
@@ -60,7 +63,9 @@ services:
       - ./runtime/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./runtime/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3000:3000"
+      # The checked-in password is intentionally local-demo-only. Do not expose
+      # this Grafana instance on all host interfaces.
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
 
