@@ -19,10 +19,9 @@ Grafana is provisioned with a Prometheus datasource UID of `stageguard-prometheu
 
 ## Replay the deterministic incident
 
-The stack starts faulted by default. Reset to healthy, then inject again:
+The Compose stack starts **healthy** so a demo or acceptance run can establish a clean telemetry baseline before introducing an incident. Inject the deterministic `uplink-b` fault explicitly:
 
 ```bash
-curl -X POST http://localhost:9108/scenario/reset
 curl -X POST http://localhost:9108/scenario/fault
 ```
 
@@ -30,6 +29,12 @@ Recover without resetting counters:
 
 ```bash
 curl -X POST http://localhost:9108/scenario/recover
+```
+
+Reset the simulator to a fresh healthy baseline when you want to begin a new rehearsal:
+
+```bash
+curl -X POST http://localhost:9108/scenario/reset
 ```
 
 ## Bootstrap the read-only MCP credential
@@ -55,7 +60,9 @@ Safety properties:
 python runtime/mcp_smoke.py
 ```
 
-The reference stack pins `grafana/mcp-grafana:1.4.1` in stdio mode. The smoke client initializes MCP, validates the live tool registry, requires every advertised tool to carry `annotations.readOnlyHint=true`, and then executes bounded evidence reads through Grafana. The MCP service is constrained server-side with `--disable-write`, `--disable-proxied`, and only the `datasource,prometheus,loki` categories enabled.
+The reference stack pins `grafana/mcp-grafana:1.4.1` in stdio mode. The MCP service is an **on-demand stdio process**, not a long-lived network sidecar: the smoke client launches it with `docker compose run --rm -T mcp`, communicates over that subprocess's stdin/stdout, and removes the one-off container when the session ends. The `mcp` Compose profile exists to keep this service out of normal `docker compose up`; no MCP host port is published.
+
+Compose waits for Grafana's HTTP healthcheck before launching the one-off MCP process. The smoke client initializes MCP, validates the live tool registry, requires every advertised tool to carry `annotations.readOnlyHint=true`, and then executes bounded evidence reads through Grafana. The MCP service is constrained server-side with `--disable-write`, `--disable-proxied`, and only the `datasource,prometheus,loki` categories enabled.
 
 The smoke transport also fails closed on malformed JSON-RPC, mismatched response IDs, request timeouts, frames larger than 1 MiB, or more than 16 pending stdout frames. If an MCP protocol upgrade is required, override `STAGEGUARD_MCP_PROTOCOL_VERSION`. If Docker is not the desired client launcher, override `STAGEGUARD_MCP_COMMAND`.
 
