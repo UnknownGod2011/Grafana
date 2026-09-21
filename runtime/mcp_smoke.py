@@ -263,6 +263,22 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
         raise McpError("MCP advertised tools without readOnlyHint=true while StageGuard is configured as an evidence-only plane: " f"{sorted(not_explicitly_read_only)}")
 
 
+def _has_nonempty_content_payload(item: Any) -> bool:
+    """Accept only MCP content entries that carry a non-empty payload, not metadata alone."""
+    if not isinstance(item, dict):
+        return False
+    for key, value in item.items():
+        if key in {"type", "mimeType", "annotations", "meta", "_meta"}:
+            continue
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (dict, list)) and value:
+            return True
+        if isinstance(value, (int, float, bool)):
+            return True
+    return False
+
+
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
     """Require an error-free MCP call that returned actual evidence content."""
     if result.get("isError"):
@@ -270,7 +286,7 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
     content = result.get("content")
     if not isinstance(content, list) or not content:
         raise McpError(f"{name} returned no evidence content")
-    if not any(isinstance(item, dict) and item for item in content):
+    if not any(_has_nonempty_content_payload(item) for item in content):
         raise McpError(f"{name} returned malformed or empty evidence content")
 
 
