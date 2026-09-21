@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -145,11 +146,39 @@ def _pid_command(pid):
         return None
 
 def _pid_matches_stageguard_api(pid):
-    """Fail-safe identity check before signalling a PID loaded from persistent state."""
+    """Structurally prove persisted-PID ownership before allowing a signal."""
     command = _pid_command(pid)
     if not command: return False
-    normalized = command.replace("\\", "/")
-    return "bootstrap.py" in normalized and "--port" in normalized and "9110" in normalized and "--identity-mode" in normalized and "local" in normalized
+    try:
+        argv = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        return False
+    if not argv: return False
+
+    expected_bootstrap = os.path.normcase(os.path.abspath(str(RUNTIME / "bootstrap.py")))
+    script_indexes = []
+    for index, token in enumerate(argv):
+        candidate = token.strip('"') if os.name == "nt" else token
+        if not candidate.lower().endswith("bootstrap.py"): continue
+        candidate_path = os.path.normcase(os.path.abspath(candidate))
+        if candidate_path == expected_bootstrap: script_indexes.append(index)
+    if len(script_indexes) != 1: return False
+
+    def option_values(name):
+        values = []
+        for index, token in enumerate(argv):
+            clean = token.strip('"') if os.name == "nt" else token
+            if clean == name:
+                if index + 1 >= len(argv): return None
+                value = argv[index + 1]
+                values.append(value.strip('"') if os.name == "nt" else value)
+            elif clean.startswith(name + "="):
+                values.append(clean[len(name) + 1:])
+        return values
+
+    identity_values = option_values("--identity-mode")
+    port_values = option_values("--port")
+    return identity_values == ["local"] and port_values == ["9110"]
 
 def _stop_api():
     if not PID_PATH.exists(): return
