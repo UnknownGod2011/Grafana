@@ -186,19 +186,29 @@ def _stop_api():
     except ValueError:
         if _api_running(): raise DemoError("invalid StageGuard API PID metadata while API is reachable; refusing unsafe process termination")
         PID_PATH.unlink(missing_ok=True); return
-    if not _api_running():
-        PID_PATH.unlink(missing_ok=True); return
+
+    api_reachable = _api_running()
     if not _pid_matches_stageguard_api(pid):
-        raise DemoError(f"PID {pid} cannot be verified as the StageGuard local API; refusing to signal it")
+        if api_reachable:
+            raise DemoError(f"PID {pid} cannot be verified as the StageGuard local API while the API is reachable; refusing to signal it")
+        PID_PATH.unlink(missing_ok=True)
+        return
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        pass
+        PID_PATH.unlink(missing_ok=True)
+        return
     except (PermissionError, OSError) as exc:
         raise DemoError(f"could not terminate verified StageGuard API PID {pid}: {exc}") from exc
+
     deadline=time.monotonic()+5
-    while time.monotonic()<deadline and _api_running(): time.sleep(.25)
-    if _api_running():
+    while time.monotonic()<deadline:
+        if not _pid_matches_stageguard_api(pid):
+            PID_PATH.unlink(missing_ok=True)
+            return
+        time.sleep(.25)
+    if _pid_matches_stageguard_api(pid):
         raise DemoError(f"verified StageGuard API PID {pid} did not stop after SIGTERM; ownership metadata retained")
     PID_PATH.unlink(missing_ok=True)
 
