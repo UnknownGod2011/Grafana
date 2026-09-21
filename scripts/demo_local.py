@@ -25,10 +25,11 @@ CHECKPOINT_PATH = STATE_DIR / "checkpoint.json"
 AUDIT_PATH = STATE_DIR / "audit.jsonl"
 HMAC_KEY_PATH = STATE_DIR / "checkpoint-hmac-key"
 REPORT_PATH = STATE_DIR / "readiness.json"
+COMPOSE_COMMAND_TIMEOUT_SECONDS = 90.0
 URLS = {"cockpit":"http://127.0.0.1:9110/console","api_health":"http://127.0.0.1:9110/healthz","simulator_health":"http://127.0.0.1:9108/healthz","simulator_state":"http://127.0.0.1:9108/state","grafana":"http://127.0.0.1:3000","grafana_health":"http://127.0.0.1:3000/api/health","prometheus":"http://127.0.0.1:9090","prometheus_ready":"http://127.0.0.1:9090/-/ready"}
 class DemoError(RuntimeError): pass
-def _run(command,*,capture=False,env=None): return subprocess.run(command,cwd=ROOT,env=env,text=True,capture_output=capture,check=True)
-def _docker(*args,capture=False): return _run(["docker","compose",*args],capture=capture)
+def _run(command,*,capture=False,env=None,timeout=None): return subprocess.run(command,cwd=ROOT,env=env,text=True,capture_output=capture,check=True,timeout=timeout)
+def _docker(*args,capture=False): return _run(["docker","compose",*args],capture=capture,timeout=COMPOSE_COMMAND_TIMEOUT_SECONDS)
 def _request_json(url,*,method="GET",timeout=3.0):
  data=b"{}" if method!="GET" else None; request=urllib.request.Request(url,data=data,headers={"Content-Type":"application/json"} if data is not None else {},method=method)
  with urllib.request.urlopen(request,timeout=timeout) as response:
@@ -151,8 +152,9 @@ def _stop_api():
  if _pid_matches_stageguard_api(pid):raise DemoError(f"verified StageGuard API PID {pid} did not stop after SIGTERM; ownership metadata retained")
  PID_PATH.unlink(missing_ok=True)
 def _check_docker():
- try:_run(["docker","compose","version"],capture=True)
+ try:_run(["docker","compose","version"],capture=True,timeout=COMPOSE_COMMAND_TIMEOUT_SECONDS)
  except (FileNotFoundError,subprocess.CalledProcessError) as exc:raise DemoError("Docker with the Compose plugin is required for the local demo") from exc
+ except subprocess.TimeoutExpired as exc:raise DemoError(f"Docker Compose version check timed out after {COMPOSE_COMMAND_TIMEOUT_SECONDS:.0f}s") from exc
 def _bootstrap_stack():
  print("[1/5] Starting simulator + Prometheus + Grafana...");_docker("up","-d","--build","simulator","prometheus","grafana");_wait_url(URLS["simulator_health"],timeout_seconds=90,label="simulator");_wait_url(URLS["prometheus_ready"],timeout_seconds=90,label="Prometheus");_wait_url(URLS["grafana_health"],timeout_seconds=90,label="Grafana");_request_json("http://127.0.0.1:9108/scenario/reset",method="POST");time.sleep(5)
 def _bootstrap_mcp():
@@ -192,25 +194,28 @@ def stop(*,keep_stack):
   try:
    _docker("down");compose_down_succeeded=True
   except FileNotFoundError:failures.append("Docker Compose teardown failed: docker executable was not found; local stack may still be running")
+  except subprocess.TimeoutExpired:failures.append(f"Docker Compose teardown timed out after {COMPOSE_COMMAND_TIMEOUT_SECONDS:.0f}s; local stack may still be running")
   except subprocess.CalledProcessError as exc:failures.append(f"Docker Compose teardown failed with exit code {exc.returncode}; local stack may still be running")
   if compose_down_succeeded:
    try:
     remaining=_docker("ps","--all","-q",capture=True).stdout.strip()
     if remaining:failures.append("Docker Compose project still has running or retained containers after teardown; local stack may still be running")
    except FileNotFoundError:failures.append("Docker Compose teardown verification failed: docker executable was not found; local stack state is unknown")
+   except subprocess.TimeoutExpired:failures.append(f"Docker Compose teardown verification timed out after {COMPOSE_COMMAND_TIMEOUT_SECONDS:.0f}s; local stack state is unknown")
    except subprocess.CalledProcessError as exc:failures.append(f"Docker Compose teardown verification failed with exit code {exc.returncode}; local stack state is unknown")
  if failures:raise DemoError("Local cleanup incomplete:\n- "+"\n- ".join(failures))
  print("Stopped.")
 def interactive_demo(*,enable_gemini,open_browser):up(fresh=True,enable_gemini=enable_gemini,open_browser=open_browser);print("\n=== RECORDING FLOW ===");print("1. Show the healthy cockpit + Grafana for ~10 seconds.");input("2. Press ENTER when recording is ready to inject uplink-b failure... ");inject_fault(settle_seconds=6);print("\n3. In the cockpit click: Investigate -> Approve exact revision -> Execute remediation -> Verify recovery.");print("4. Show Grafana panels returning to healthy after the deterministic simulator reset.")
 def main(argv=None):
- parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest="command",required=True);p=sub.add_parser("up");p.add_argument("--fresh",action="store_true");p.add_argument("--enable-gemini",action="store_true");p.add_argument("--no-browser",action="store_true");p=sub.add_parser("demo");p.add_argument("--enable-gemini",action="store_true");p.add_argument("--no-browser",action="store_true");p=sub.add_parser("fault");p.add_argument("--settle-seconds",type=float,default=6.0);sub.add_parser("reset");sub.add_parser("status");p=sub.add_parser("stop");p.add_argument("--keep-stack",action="store_true");args=parser.parse_args(argv)
+ parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest="command",required=True);up_parser=sub.add_parser("up",help="start the local stack and StageGuard cockpit");up_parser.add_argument("--fresh",action="store_true",help="clear demo checkpoint/audit state before startup");up_parser.add_argument("--gemini",action="store_true",help="enable Gemini briefing (requires Vertex AI credentials)");up_parser.add_argument("--open",action="store_true",help="open cockpit and Grafana in the default browser");sub.add_parser("status",help="show local component status");sub.add_parser("inject",help="inject deterministic uplink-b packet-loss fault");sub.add_parser("reset",help="reset simulator to healthy telemetry");stop_parser=sub.add_parser("stop",help="stop StageGuard and optionally the local Docker stack");stop_parser.add_argument("--keep-stack",action="store_true",help="leave simulator/Prometheus/Grafana running");demo_parser=sub.add_parser("demo",help="run guided recording flow");demo_parser.add_argument("--gemini",action="store_true");demo_parser.add_argument("--open",action="store_true");args=parser.parse_args(argv)
  try:
-  if args.command=="up":up(fresh=args.fresh,enable_gemini=args.enable_gemini,open_browser=not args.no_browser)
-  elif args.command=="demo":interactive_demo(enable_gemini=args.enable_gemini,open_browser=not args.no_browser)
-  elif args.command=="fault":inject_fault(settle_seconds=args.settle_seconds)
-  elif args.command=="reset":reset_scenario()
+  if args.command=="up":up(fresh=args.fresh,enable_gemini=args.gemini,open_browser=args.open)
   elif args.command=="status":status()
+  elif args.command=="inject":inject_fault()
+  elif args.command=="reset":reset_scenario()
   elif args.command=="stop":stop(keep_stack=args.keep_stack)
- except (DemoError,subprocess.CalledProcessError,urllib.error.URLError,json.JSONDecodeError) as exc:print(f"ERROR: {exc}",file=sys.stderr);return 1
+  elif args.command=="demo":interactive_demo(enable_gemini=args.gemini,open_browser=args.open)
+ except (DemoError,subprocess.CalledProcessError,FileNotFoundError,subprocess.TimeoutExpired,urllib.error.URLError,json.JSONDecodeError) as exc:
+  print(f"ERROR: {exc}",file=sys.stderr);return 1
  return 0
 if __name__=="__main__":raise SystemExit(main())
