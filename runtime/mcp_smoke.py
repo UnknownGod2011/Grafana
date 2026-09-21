@@ -24,13 +24,8 @@ MAX_TOOL_NAME_CHARS = 128
 MAX_DIAGNOSTIC_CHARS = 2048
 MAX_CONFIG_TEXT_CHARS = 512
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
-QUERY = os.getenv(
-    "STAGEGUARD_MCP_SMOKE_QUERY",
-    'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}',
-)
+QUERY = os.getenv("STAGEGUARD_MCP_SMOKE_QUERY", 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}')
 REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
-# Peer metadata is eventually rendered into operator/release output. Reject characters
-# that can alter terminal layout or visual ordering even though they are valid Unicode.
 _UNSAFE_DISPLAY_CODEPOINTS = frozenset({0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069})
 _SENSITIVE_ARG_MARKERS = frozenset({"token", "secret", "password", "passwd", "apikey", "api-key", "authorization", "cookie", "credential", "credentials"})
 
@@ -48,7 +43,6 @@ def _contains_unsafe_display_char(value: str) -> bool:
 
 
 def _bounded_config_text(value: str, field: str) -> str:
-    """Validate operator-controlled config before it enters requests or output."""
     if not isinstance(value, str) or not value.strip():
         raise McpError(f"{field} must be a non-empty string")
     if len(value) > MAX_CONFIG_TEXT_CHARS or _contains_unsafe_display_char(value):
@@ -57,7 +51,6 @@ def _bounded_config_text(value: str, field: str) -> str:
 
 
 def _bounded_diagnostic(value: Any) -> str:
-    """Render untrusted peer data without allowing release diagnostics to explode."""
     rendered = repr(value)
     if len(rendered) <= MAX_DIAGNOSTIC_CHARS:
         return rendered
@@ -66,7 +59,6 @@ def _bounded_diagnostic(value: Any) -> str:
 
 
 def _redacted_command(parts: list[str]) -> str:
-    """Render launcher argv without leaking inline credentials into operator output."""
     rendered: list[str] = []
     redact_next = False
     for part in parts:
@@ -75,12 +67,7 @@ def _redacted_command(parts: list[str]) -> str:
             rendered.append("<redacted>")
             redact_next = False
             continue
-        if marker in _SENSITIVE_ARG_MARKERS:
-            rendered.append(part.split("=", 1)[0] + "=<redacted>" if "=" in part else part)
-            if "=" not in part:
-                redact_next = True
-            continue
-        if any(marker.startswith(f"{candidate}-") for candidate in _SENSITIVE_ARG_MARKERS):
+        if marker in _SENSITIVE_ARG_MARKERS or any(marker.startswith(f"{candidate}-") for candidate in _SENSITIVE_ARG_MARKERS):
             rendered.append(part.split("=", 1)[0] + "=<redacted>" if "=" in part else part)
             if "=" not in part:
                 redact_next = True
@@ -90,7 +77,6 @@ def _redacted_command(parts: list[str]) -> str:
 
 
 def _configured_command(raw: str | None = None) -> list[str]:
-    """Return a validated stdio-only MCP launcher for the release smoke path."""
     command = os.getenv("STAGEGUARD_MCP_COMMAND", DEFAULT_COMMAND) if raw is None else raw
     try:
         return split_command(command)
@@ -106,15 +92,11 @@ def _request_timeout_seconds(raw: str | None) -> float:
     except ValueError as exc:
         raise McpError("STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS must be a number") from exc
     if not math.isfinite(value) or value <= 0 or value > MAX_REQUEST_TIMEOUT_SECONDS:
-        raise McpError(
-            "STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS must be greater than 0 and no more than "
-            f"{MAX_REQUEST_TIMEOUT_SECONDS:g}"
-        )
+        raise McpError(f"STAGEGUARD_MCP_REQUEST_TIMEOUT_SECONDS must be greater than 0 and no more than {MAX_REQUEST_TIMEOUT_SECONDS:g}")
     return value
 
 
 def _bounded_server_info_field(server_info: dict[str, Any], field: str) -> str:
-    """Return bounded terminal-safe MCP server metadata or fail closed."""
     value = server_info.get(field)
     if not isinstance(value, str) or not value.strip():
         raise McpError("initialize returned incomplete serverInfo")
@@ -124,17 +106,12 @@ def _bounded_server_info_field(server_info: dict[str, Any], field: str) -> str:
 
 
 def _assert_initialize_result(result: dict[str, Any], requested_protocol: str) -> None:
-    """Fail closed when the MCP peer negotiates an unexpected protocol contract."""
     negotiated = result.get("protocolVersion")
     if not isinstance(negotiated, str) or not negotiated.strip():
         raise McpError("initialize returned no valid protocolVersion")
     if negotiated != requested_protocol:
-        raise McpError(
-            "MCP protocol negotiation mismatch: "
-            f"requested={requested_protocol!r}, negotiated={negotiated!r}"
-        )
-    capabilities = result.get("capabilities")
-    if not isinstance(capabilities, dict):
+        raise McpError(f"MCP protocol negotiation mismatch: requested={requested_protocol!r}, negotiated={negotiated!r}")
+    if not isinstance(result.get("capabilities"), dict):
         raise McpError("initialize returned malformed capabilities")
     server_info = result.get("serverInfo")
     if not isinstance(server_info, dict):
@@ -212,8 +189,7 @@ class StdioClient:
             if isinstance(line, McpError):
                 raise line
             if line is None:
-                code = self.proc.poll()
-                raise McpError(f"MCP process exited before {method} response (exit={code})")
+                raise McpError(f"MCP process exited before {method} response (exit={self.proc.poll()})")
             try:
                 message = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -288,8 +264,14 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
 
 
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
+    """Require an error-free MCP call that returned actual evidence content."""
     if result.get("isError"):
         raise McpError(f"{name} returned isError=true: {_bounded_diagnostic(result.get('content'))}")
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        raise McpError(f"{name} returned no evidence content")
+    if not any(isinstance(item, dict) and item for item in content):
+        raise McpError(f"{name} returned malformed or empty evidence content")
 
 
 def main() -> None:
@@ -311,7 +293,7 @@ def main() -> None:
         query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
         _assert_tool_result("query_prometheus", query_result)
         print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": datasource_uid, "query": query, "result_summary": _bounded_diagnostic(query_result.get("content"))}, indent=2))
-        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, and executed a Prometheus query through Grafana.")
+        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, and returned non-empty Prometheus evidence through Grafana.")
     finally:
         client.close()
 
