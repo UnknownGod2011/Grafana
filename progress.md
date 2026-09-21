@@ -41,38 +41,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened cross-invocation API shutdown against PID reuse with structured argv validation.
 - Decoupled API health from process ownership; verified unhealthy processes are still safely cleaned up.
 - Rejected zero/negative persisted PIDs before process lookup/signalling.
-- Added a regression gate requiring interactive/local `stop` to surface Compose teardown failure instead of printing a false-success outcome.
+- Added regression coverage requiring interactive/local `stop` to surface Compose teardown failure instead of printing a false-success outcome.
+- Implemented truthful local stop teardown: missing Docker or non-zero `docker compose down` now becomes `DemoError`; `Stopped.` is emitted only after successful teardown or explicit `--keep-stack`.
 
-## Latest run — 2026-09-21 — local stop teardown truthfulness gate
+## Latest run — 2026-09-21 — local stop teardown truthfulness implementation
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and the focused local process-lifecycle regressions.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_stop_lifecycle.py`, including the red regression gate created in the preceding run.
 
 ### Finding
 
-The unattended release cleanup path had already been hardened to fail closed, but the ordinary `demo_local.py stop` path still catches `FileNotFoundError` and `subprocess.CalledProcessError` from `docker compose down`, suppresses them, and then prints `Stopped.`. This can tell an operator cleanup succeeded while StageGuard-owned simulator/Prometheus/Grafana containers remain running. It is a correctness and operational-safety gap, not merely a UX issue.
+The focused regression accurately captured a real operator-safety defect: `demo_local.py stop` attempted API cleanup first, but then swallowed both a missing Docker executable and non-zero `docker compose down`, finally printing `Stopped.` even though StageGuard-owned observability containers could still be running.
 
 ### Exact changes made
 
-- Added `runtime/tests/test_demo_local_stop_lifecycle.py`.
-- Added a regression requiring a non-zero Compose teardown to surface as `DemoError` after API cleanup has been attempted.
-- Added coverage proving `--keep-stack` continues to avoid Compose teardown entirely.
-- Regression commit: `8b72c19f99d3f6b995c055940eb0985cc0e0e96f`.
+- Changed `scripts/demo_local.py::stop()` to preserve API-first cleanup and explicit `--keep-stack` behavior.
+- A missing Docker executable during owned-stack teardown now raises `DemoError` with an explicit warning that the local stack may still be running.
+- A non-zero Compose teardown now raises `DemoError` including the exit code and the same partial-cleanup warning.
+- `Stopped.` is reached only when API cleanup completed and Compose teardown succeeded, or when the operator explicitly selected `--keep-stack`.
+- Implementation commit: `559c152f950ce4805457fe4e34bf5d63bff77f64`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the regression file.
-- Static inspection shows the new failure-propagation test is intentionally red against the current `stop()` implementation because it currently suppresses `CalledProcessError`.
-- No green test claim is made: this connector does not expose an executable checkout.
+- GitHub accepted the implementation update.
+- Static inspection shows the implementation now satisfies the existing regression contract: `CalledProcessError` is converted to `DemoError` containing `Docker Compose teardown failed`, API cleanup remains first, and `--keep-stack` still bypasses Compose entirely.
+- No executable green-test claim is made: the GitHub connector does not expose a runnable checkout in this automation environment.
 
 ### Decisions
 
-1. Cleanup commands are part of StageGuard's safety boundary and must report partial failure truthfully.
-2. `--keep-stack` remains explicit operator intent and must never invoke Compose teardown.
-3. The implementation should preserve API-first cleanup but convert Docker-not-found/non-zero teardown into a controlled `DemoError` rather than swallowing it.
-4. This is kept local to `demo_local.py`; no noisy CI workflow is being added merely to exercise the gate.
+1. Local teardown is an operational safety boundary, so partial cleanup must be surfaced as failure rather than treated as best-effort success.
+2. API cleanup remains first so a Compose failure does not unnecessarily leave the StageGuard API process running.
+3. `--keep-stack` remains the sole explicit path that intentionally leaves the telemetry stack running while reporting normal stop completion.
+4. No CI workflow was added; accumulated lifecycle tests should be executed in a real checkout before expanding this area further.
 
 ### Blockers / unknowns
 
@@ -83,4 +85,4 @@ The unattended release cleanup path had already been hardened to fail closed, bu
 
 ## Single best next step
 
-Change `scripts/demo_local.py::stop()` so Docker Compose teardown failures raise a controlled `DemoError` and never print false success, make the new regression green, then execute the focused lifecycle suites on Linux/Windows before consolidated validation, unattended Docker cleanup rehearsal, and the pinned Grafana MCP `1.4.1` smoke.
+Execute `runtime/tests/test_demo_local_stop_lifecycle.py` together with the accumulated spawn/PID lifecycle suites on Linux and Windows; if green, run consolidated validation and an unattended `scripts/demo_release.py --non-interactive --cleanup` Docker rehearsal, then perform the pinned Grafana MCP `1.4.1` read-only smoke.
