@@ -59,8 +59,8 @@ def test_stop_api_refuses_to_signal_unverified_reused_pid(monkeypatch, tmp_path)
 
 
 def test_stop_api_signals_only_verified_stageguard_pid_and_clears_metadata(monkeypatch, tmp_path):
-    pid_path = tmp_path / "stageguard-api.pid"; pid_path.write_text("424242\n", encoding="utf-8"); states = iter((True, False, False)); kill = MagicMock()
-    monkeypatch.setattr(DEMO, "PID_PATH", pid_path); monkeypatch.setattr(DEMO, "_api_running", lambda: next(states)); monkeypatch.setattr(DEMO, "_pid_matches_stageguard_api", lambda pid: pid == 424242); monkeypatch.setattr(DEMO.os, "kill", kill)
+    pid_path = tmp_path / "stageguard-api.pid"; pid_path.write_text("424242\n", encoding="utf-8"); ownership = iter((True, False)); kill = MagicMock()
+    monkeypatch.setattr(DEMO, "PID_PATH", pid_path); monkeypatch.setattr(DEMO, "_api_running", lambda: True); monkeypatch.setattr(DEMO, "_pid_matches_stageguard_api", lambda pid: next(ownership)); monkeypatch.setattr(DEMO.os, "kill", kill)
     DEMO._stop_api(); kill.assert_called_once_with(424242, DEMO.signal.SIGTERM); assert not pid_path.exists()
 
 
@@ -73,11 +73,18 @@ def test_stop_api_retains_metadata_when_verified_process_does_not_stop(monkeypat
 
 def test_stop_api_terminates_verified_owned_process_even_when_health_is_down(monkeypatch, tmp_path):
     """An unhealthy API must not be orphaned merely because /healthz is unreachable."""
-    pid_path = tmp_path / "stageguard-api.pid"; pid_path.write_text("424242\n", encoding="utf-8"); kill = MagicMock()
-    monkeypatch.setattr(DEMO, "PID_PATH", pid_path); monkeypatch.setattr(DEMO, "_api_running", lambda: False); monkeypatch.setattr(DEMO, "_pid_matches_stageguard_api", lambda pid: pid == 424242); monkeypatch.setattr(DEMO.os, "kill", kill)
+    pid_path = tmp_path / "stageguard-api.pid"; pid_path.write_text("424242\n", encoding="utf-8"); ownership = iter((True, False)); kill = MagicMock()
+    monkeypatch.setattr(DEMO, "PID_PATH", pid_path); monkeypatch.setattr(DEMO, "_api_running", lambda: False); monkeypatch.setattr(DEMO, "_pid_matches_stageguard_api", lambda pid: next(ownership)); monkeypatch.setattr(DEMO.os, "kill", kill)
     DEMO._stop_api()
     kill.assert_called_once_with(424242, DEMO.signal.SIGTERM)
     assert not pid_path.exists()
+
+
+def test_stop_api_discards_unverified_stale_pid_only_when_api_is_unreachable(monkeypatch, tmp_path):
+    pid_path = tmp_path / "stageguard-api.pid"; pid_path.write_text("424242\n", encoding="utf-8"); kill = MagicMock()
+    monkeypatch.setattr(DEMO, "PID_PATH", pid_path); monkeypatch.setattr(DEMO, "_api_running", lambda: False); monkeypatch.setattr(DEMO, "_pid_matches_stageguard_api", lambda pid: False); monkeypatch.setattr(DEMO.os, "kill", kill)
+    DEMO._stop_api()
+    kill.assert_not_called(); assert not pid_path.exists()
 
 
 def test_pid_identity_requires_full_local_stageguard_signature(monkeypatch):
