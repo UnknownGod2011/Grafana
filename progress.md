@@ -16,12 +16,12 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Production remediation accepts only canonical operation IDs, bounded canonical target identities, frozen execution/reconciliation capabilities, exact validated transport/reconciliation result types, and bounded finite policy configuration.
 - Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
 - Local acceptance never destroys pre-existing compose resources merely because the StageGuard API is unreachable.
-- Cleanup should independently attempt all runtime components it owns and report partial teardown as failure.
+- Cleanup independently attempts all requested runtime components it owns and reports partial teardown as failure.
 - API startup failure may terminate/reap only the exact `Popen` child created by that startup attempt.
 - A persisted local API PID is never sufficient authority to signal a process; shutdown structurally verifies the live command signature first.
 - Health reachability is not process ownership: a structurally verified unhealthy local API is still an owned process.
 - Persisted PID metadata must be a strictly positive process ID before lookup or signal.
-- Local stop must not report success if teardown of an owned Compose stack fails.
+- Local stop must not report success if teardown of an owned component fails.
 
 ## Retained validation baseline
 
@@ -42,39 +42,41 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Decoupled API health from process ownership; verified unhealthy processes are still safely cleaned up.
 - Rejected zero/negative persisted PIDs before process lookup/signalling.
 - Implemented truthful local stop teardown: missing Docker or non-zero `docker compose down` becomes `DemoError`; `Stopped.` is emitted only after successful teardown or explicit `--keep-stack`.
+- Implemented independent local stop cleanup so API failure no longer suppresses owned Compose teardown; multiple failures are aggregated.
 
-## Latest run — 2026-09-21 — independent local cleanup regression gate
+## Latest run — 2026-09-21 — independent local cleanup implementation
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py`, `runtime/tests/test_demo_local_stop_lifecycle.py`, and the runtime test inventory.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_stop_lifecycle.py`, including the red independent-cleanup regressions from the preceding run.
 
 ### Finding
 
-`demo_local.py::stop()` now reports Compose teardown failures truthfully, but cleanup is still serial in a way that violates the stronger cleanup invariant already used by unattended acceptance: if `_stop_api()` raises, `docker compose down` is never attempted. A stuck or unverifiable API therefore prevents cleanup of the independently owned observability stack. If both API and Compose cleanup fail, the operator also needs both failures rather than only the first one.
+The red gate was valid: `demo_local.py::stop()` called `_stop_api()` before entering the Compose branch, so a controlled API-cleanup failure prevented `docker compose down` from being attempted. This violated the local ownership invariant and hid a second teardown failure when both components failed.
 
 ### Exact changes made
 
-- Extended `runtime/tests/test_demo_local_stop_lifecycle.py` with a missing-Docker regression to cover the existing implementation contract explicitly.
-- Added a red regression requiring Compose cleanup to be attempted even when StageGuard API cleanup fails.
-- Added a red regression requiring API and Compose teardown failures to be aggregated into one controlled `DemoError` so neither failure is hidden.
-- Preserved the explicit `--keep-stack` contract: it must never invoke Compose teardown.
-- Regression commit: `86e60391389d0237b4f912fceb13a1f947049c00`.
+- Refactored `scripts/demo_local.py::stop()` to collect cleanup failures rather than aborting after the first one.
+- StageGuard API cleanup remains the first attempt, but a `DemoError` from API cleanup is retained while requested Compose teardown still runs.
+- Missing Docker and non-zero Compose teardown are retained as explicit partial-cleanup failures.
+- When multiple cleanup responsibilities fail, one `DemoError` now reports every failure under `Local cleanup incomplete`.
+- Preserved `--keep-stack`: Compose teardown is intentionally skipped when explicitly requested, while API cleanup failure still propagates.
+- `Stopped.` is emitted only if every requested cleanup responsibility succeeds.
+- Implementation commit: `367ff92de495da90acd7732caad293235510733b`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the regression update.
-- Static inspection confirms the new independent-cleanup regression is intentionally red against the current implementation because `_stop_api()` is called before the Compose branch without failure aggregation.
-- The existing missing-Docker and Compose-nonzero behavior remains represented by focused tests.
+- GitHub accepted the implementation update.
+- Static inspection shows the implementation satisfies the focused regression contracts: Compose cleanup is attempted after API failure, simultaneous API/Compose failures are aggregated, and `--keep-stack` does not invoke Compose.
 - No executable green-test claim is made: this connector environment does not expose a runnable checkout.
 
 ### Decisions
 
-1. Cleanup components owned by the local launcher are independent teardown responsibilities; failure of one must not suppress an attempt to clean another.
-2. Multiple teardown failures must be aggregated for operators instead of losing the later failure or falsely reporting success.
-3. `--keep-stack` remains an explicit operator choice and therefore exempts Compose from the independent cleanup attempt.
-4. No CI workflow is being added merely to execute these tests; avoid noisy Actions usage.
+1. Cleanup components are independent responsibilities; teardown continues after a controlled failure in another owned component.
+2. Cleanup remains fail-closed from the operator perspective: partial teardown is an error, never a success message.
+3. Aggregated errors preserve both process-safety diagnostics and container teardown diagnostics without weakening PID ownership verification.
+4. No CI workflow was added merely to execute these tests; avoid noisy Actions usage.
 
 ### Blockers / unknowns
 
@@ -85,4 +87,4 @@ Read `progress.md` completely before deciding what to change. Inspected `scripts
 
 ## Single best next step
 
-Refactor `scripts/demo_local.py::stop()` to independently attempt API cleanup and owned Compose teardown, aggregate all cleanup failures into one `DemoError`, preserve `--keep-stack`, and emit `Stopped.` only when every requested cleanup responsibility succeeds; then execute the focused lifecycle suites on Linux/Windows before consolidated validation, unattended Docker rehearsal, and the pinned Grafana MCP `1.4.1` smoke.
+Execute `runtime/tests/test_demo_local_stop_lifecycle.py` together with the accumulated spawn/PID lifecycle suites on Linux and Windows; if green, run consolidated validation and an unattended `scripts/demo_release.py --non-interactive --cleanup` Docker rehearsal, then perform the pinned Grafana MCP `1.4.1` read-only smoke.
