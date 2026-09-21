@@ -15,7 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Local cleanup signals only structurally verified owned API processes and independently attempts every requested owned component.
 - Compose teardown is timeout-bounded and verified against all project containers before success is reported.
 - Local demo services that do not provide production-grade authentication are published on loopback only; checked-in demo credentials must never create a LAN-accessible service by default.
-- The local Grafana MCP evidence sidecar is stdio-only, file-secret-backed, read-only, capability-free, and cannot gain new privileges.
+- The local Grafana MCP evidence sidecar is stdio-only, file-secret-backed, read-only, capability-free, cannot gain new privileges, and has an explicitly bounded read-only tool/result/resource contract.
 - Validation claims distinguish historical executable results from connector-authored changes that have not run in a checkout.
 
 ## Retained validation baseline
@@ -36,47 +36,44 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Bound the simulator, Prometheus, Grafana, and watchdog fixture host ports to `127.0.0.1` so local-only control surfaces, unauthenticated Prometheus, and the checked-in Grafana demo credential are not exposed to the developer's LAN by default.
 - Added regression contracts for the reviewed host-published surface and stdio-only MCP transport.
 - Hardened the opt-in MCP container with a read-only root filesystem, all Linux capabilities dropped, and `no-new-privileges`; added tests that also guard file-backed read-only token handling.
+- Added a dedicated MCP Compose contract suite covering opt-in/stdio transport, narrow read-only tool categories, bounded container resources, and the Loki result cap.
 
-## Latest run — 2026-09-21 — MCP evidence-sidecar sandbox hardening
+## Latest run — 2026-09-21 — MCP contract regression coverage
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `docker-compose.yml`, the local Compose security regression test, and current official Grafana MCP authentication/install documentation. Verified specifically against the `v1.4.1` upstream authentication document that `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE` is supported and reads the token from a file, including rotation-safe rereads.
+Read `progress.md` completely before deciding what to change. Inspected `docker-compose.yml` and `runtime/tests/test_compose_local_security.py`, with emphasis on whether the MCP runtime's existing least-privilege command/resource settings were protected against future configuration drift.
 
 ### Finding
 
-The MCP sidecar already had a strong application-level least-privilege contract (`--disable-write`, a narrow enabled-tool list, `--disable-proxied`, stdio-only transport, and a read-only token mount), but its container itself retained Docker's normal writable root filesystem and default Linux capability/privilege posture. For a component whose only job is read-only evidence retrieval over the network, those mutation privileges are unnecessary.
+The Compose file already constrains MCP to an opt-in profile, stdio transport, `--disable-write`, `--disable-proxied`, `datasource,prometheus,loki`, an eight-line Loki result cap, and bounded memory/CPU/PID resources. Existing security tests protected host exposure, container privileges, and token handling, but did not lock these application-level and resource-bounding invariants.
 
 ### Exact changes made
 
-- Updated `docker-compose.yml` MCP service with `read_only: true`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]` while preserving network access, stdio transport, and the existing read-only token mount.
-- Extended `runtime/tests/test_compose_local_security.py` with an MCP section helper and executable contracts for the read-only root filesystem, all-capability drop, no-new-privileges, file-backed token variable, absence of an inline service-account token, and read-only token mount.
-- Compose hardening commit: `ed3b0df9cf65fe41048d285dc40dd227979e625c`.
-- Security regression commit: `d5ac48eaae261a7ef579eb540a376f7187601f5d`.
+- Added `runtime/tests/test_mcp_compose_contract.py` with regression contracts for opt-in/stdio-only transport, the narrow read-only MCP tool surface, 256 MiB / 0.50 CPU / 128 PID limits, and the Loki result cap of 8.
+- Commit: `cbdbd521b202dd2c82f61b8d7b1f047410d7e730`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted both implementation and regression-test updates.
-- Upstream Grafana MCP `v1.4.1` authentication documentation explicitly supports `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE`, confirming StageGuard's mounted-secret mechanism is valid for the pinned release.
-- Static review confirms the MCP service has no host port and no requested writable volume; the token bind remains `:ro`.
-- No executable green claim is made: this connector environment does not provide a runnable checkout. `docker compose config`, container startup under the new sandbox, and pytest execution remain pending in a real checkout.
+- GitHub accepted the new regression suite.
+- Static inspection confirms every asserted contract is present in the current Compose MCP service.
+- No executable green claim is made: this connector environment does not provide a runnable checkout, so pytest and Docker startup remain pending.
+- A proposed Grafana-health dependency hardening edit was not applied after the repository write boundary rejected that mutation; no partial configuration change was left behind.
 
 ### Decisions
 
-1. Defense in depth applies to the evidence plane: application-level read-only flags do not justify retaining unnecessary container mutation privileges.
-2. Keep the token file mechanism rather than moving the secret into Compose environment values; upstream `v1.4.1` explicitly supports the file variable and token rotation.
-3. Do not apply `read_only` blindly to Grafana or Prometheus because they have legitimate runtime write requirements; hardening remains service-specific.
-4. No CI workflow was added solely for these tests, preserving the low-noise Actions policy.
+1. Treat MCP application flags and resource bounds as security/reliability invariants, not informal configuration.
+2. Keep these focused tests separate from host/container security tests so failures identify whether drift is transport/tool/resource-level versus Docker privilege/exposure-level.
+3. Do not add CI solely for this suite; preserve the low-noise Actions policy.
 
 ### Blockers / unknowns
 
-- Run `docker compose config` and start the `mcp` profile in a real Docker checkout to confirm the upstream image needs no writable root path at startup.
-- Run the accumulated lifecycle/security suites on Linux and Windows, including Windows command-line parsing validation.
+- Run `docker compose config` and start the `mcp` profile in a real Docker checkout to confirm the read-only root filesystem is compatible with upstream `1.4.1`.
+- Run the accumulated lifecycle/security/MCP contract suites on Linux and Windows.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- A live unattended Docker rehearsal is required after the accumulated lifecycle/security hardening.
-- A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
+- A live unattended Docker rehearsal and pinned `1.4.1` read-only MCP smoke remain required.
 
 ## Single best next step
 
-Execute `docker compose config`, the Compose security tests, and an `mcp`-profile startup/read-only smoke in a real Docker checkout; if the upstream image requires a writable ephemeral path, add only the minimum scoped `tmpfs` rather than relaxing the read-only root filesystem. Then run the accumulated Linux/Windows lifecycle suite and consolidated validation.
+Execute `docker compose config`, the Compose/MCP security tests, and an `mcp`-profile startup/read-only smoke in a real Docker checkout. If startup exposes a genuine Grafana-readiness race, add a verified Grafana healthcheck and `service_healthy` dependency rather than relying on container-start ordering.
