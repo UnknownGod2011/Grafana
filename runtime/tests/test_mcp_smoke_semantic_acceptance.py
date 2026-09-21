@@ -17,6 +17,23 @@ def test_successful_tool_call_with_empty_content_is_not_accepted_as_evidence() -
         _assert_tool_result("query_prometheus", {"isError": False, "content": []})
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{}],
+        [{"type": "text"}],
+        [{"type": "text", "text": ""}],
+        [{"type": "text", "text": "   "}],
+        [{"type": "text", "annotations": {"audience": ["assistant"]}}],
+        ["not-an-mcp-content-object"],
+    ],
+)
+def test_metadata_only_or_blank_content_is_not_accepted_as_evidence(content: list[object]) -> None:
+    """Content metadata without a payload must not satisfy release acceptance."""
+    with pytest.raises(McpError, match="content"):
+        _assert_tool_result("query_prometheus", {"isError": False, "content": content})
+
+
 def test_successful_tool_call_with_text_content_remains_acceptable() -> None:
     _assert_tool_result(
         "query_prometheus",
@@ -29,4 +46,12 @@ def test_successful_tool_call_with_text_content_remains_acceptable() -> None:
                 }
             ],
         },
+    )
+
+
+def test_non_text_content_with_nonempty_payload_remains_format_tolerant() -> None:
+    """Do not couple the smoke to one upstream serialization before the live 1.4.1 gate."""
+    _assert_tool_result(
+        "query_prometheus",
+        {"isError": False, "content": [{"type": "resource", "resource": {"uri": "stageguard://evidence/1"}}]},
     )
