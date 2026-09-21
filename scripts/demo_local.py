@@ -188,9 +188,17 @@ def stop(*,keep_stack):
  except DemoError as exc:failures.append(f"StageGuard API cleanup failed: {exc}")
  if not keep_stack:
   print("Stopping local Docker stack...")
-  try:_docker("down")
+  compose_down_succeeded=False
+  try:
+   _docker("down");compose_down_succeeded=True
   except FileNotFoundError:failures.append("Docker Compose teardown failed: docker executable was not found; local stack may still be running")
   except subprocess.CalledProcessError as exc:failures.append(f"Docker Compose teardown failed with exit code {exc.returncode}; local stack may still be running")
+  if compose_down_succeeded:
+   try:
+    remaining=_docker("ps","-q",capture=True).stdout.strip()
+    if remaining:failures.append("Docker Compose project still has running or retained containers after teardown; local stack may still be running")
+   except FileNotFoundError:failures.append("Docker Compose teardown verification failed: docker executable was not found; local stack state is unknown")
+   except subprocess.CalledProcessError as exc:failures.append(f"Docker Compose teardown verification failed with exit code {exc.returncode}; local stack state is unknown")
  if failures:raise DemoError("Local cleanup incomplete:\n- "+"\n- ".join(failures))
  print("Stopped.")
 def interactive_demo(*,enable_gemini,open_browser):up(fresh=True,enable_gemini=enable_gemini,open_browser=open_browser);print("\n=== RECORDING FLOW ===");print("1. Show the healthy cockpit + Grafana for ~10 seconds.");input("2. Press ENTER when recording is ready to inject uplink-b failure... ");inject_fault(settle_seconds=6);print("\n3. In the cockpit click: Investigate -> Approve exact revision -> Execute remediation -> Verify recovery.");print("4. Show Grafana panels returning to healthy after the deterministic simulator reset.")
