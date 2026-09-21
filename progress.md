@@ -23,6 +23,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Persisted PID metadata must be a strictly positive process ID before lookup or signal.
 - Local stop must not report success if teardown of an owned component fails.
 - Successful Compose teardown must be verified against all project containers, including stopped containers, not inferred solely from `docker compose down` returning zero or the default running-only `compose ps` view.
+- Local Docker Compose subprocesses are timeout-bounded so a wedged daemon cannot indefinitely block startup, shutdown, or cleanup verification.
 
 ## Retained validation baseline
 
@@ -45,36 +46,42 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Implemented truthful local stop teardown: missing Docker or non-zero `docker compose down` becomes `DemoError`; `Stopped.` is emitted only after successful teardown or explicit `--keep-stack`.
 - Implemented independent local stop cleanup so API failure no longer suppresses owned Compose teardown; multiple failures are aggregated.
 - Implemented post-`down` all-state project-container verification before local stop can report success.
+- Bounded every local Docker Compose subprocess and made teardown/verification timeout failures explicit and fail-closed.
 
-## Latest run — 2026-09-21 — all-state Compose verification implementation
+## Latest run — 2026-09-21 — bounded local Compose lifecycle
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected the current `scripts/demo_local.py` shutdown implementation and the previously established all-state Compose regression contract.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py`, `scripts/demo_release.py`, and the focused local-stop lifecycle regression suite. Confirmed the release rehearsal already bounds Compose subprocesses, while the normal local demo path did not.
 
 ### Finding
 
-The regression contract already required `docker compose ps --all -q`, but the implementation still used `docker compose ps -q`. Because the default view excludes stopped containers, a stopped-but-retained StageGuard project container could evade cleanup verification.
+`demo_local.py` used unbounded `subprocess.run` calls for Docker Compose. A wedged Docker daemon could therefore hang normal startup, stop, or post-teardown verification indefinitely. This undermined the otherwise fail-closed cleanup guarantees and differed from the already timeout-bounded unattended release rehearsal.
 
 ### Exact changes made
 
-- Changed local post-teardown verification from `_docker("ps", "-q", capture=True)` to `_docker("ps", "--all", "-q", capture=True)`.
-- Preserved project-scoped verification, independent API/Compose cleanup, failure aggregation, and explicit `--keep-stack` behavior.
-- Implementation commit: `83b7c040ec6fa9ea50ec233c4ede93068a03e646`.
+- Added `COMPOSE_COMMAND_TIMEOUT_SECONDS = 90.0` to the normal local demo path.
+- Extended `_run()` with an optional timeout and made `_docker()` apply the Compose timeout to every local Compose command.
+- Bounded the Docker Compose version preflight as well.
+- Added controlled timeout diagnostics for Compose teardown and post-teardown verification; timeout state remains a cleanup failure and never prints false success.
+- Added `subprocess.TimeoutExpired` to the top-level local CLI error boundary.
+- Added regression coverage for teardown timeout, verification timeout, and `_docker()` timeout propagation.
+- Implementation commit: `47862180f82f9951afe6b4ffa89c45a19dc72007`.
+- Regression commit: `9721bfeabf63b6befd982d9a601b866a8476480c`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the implementation update.
-- The implementation now matches the focused regression contract established in the prior run.
-- No executable green claim is made: this connector environment still does not provide a runnable repository checkout, so the accumulated lifecycle tests remain pending execution.
+- GitHub accepted both source and regression updates.
+- Static inspection confirms timeout handling is now present at the local Compose boundary and cleanup continues to fail closed on unknown state.
+- No executable green claim is made: the connector environment does not provide a runnable checkout, so the new and accumulated lifecycle tests remain pending execution.
 
 ### Decisions
 
-1. Local stop may report success only after the Compose project is verified empty across running and stopped container states.
-2. Verification remains limited to the StageGuard Compose project; no global Docker enumeration or pruning is introduced.
-3. Existing fail-closed cleanup behavior is retained when verification itself cannot be completed.
-4. No CI workflow is added solely to execute this gate; avoid noisy GitHub Actions usage.
+1. A wedged Docker daemon is an operational failure, not a reason for the local CLI to wait forever.
+2. The normal local path now follows the same bounded-subprocess principle already used by `demo_release.py`.
+3. Timeout during teardown or verification is reported as incomplete cleanup; StageGuard never infers absence of resources from an uncompleted command.
+4. No CI workflow was introduced solely to execute this gate, preserving the low-noise Actions policy.
 
 ### Blockers / unknowns
 
