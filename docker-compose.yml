@@ -82,6 +82,14 @@ services:
       GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE: /run/secrets/grafana-mcp-token
     volumes:
       - ./runtime/.secrets/grafana-mcp-token:/run/secrets/grafana-mcp-token:ro
+    # The MCP process is a read-only evidence adapter. It needs network access to
+    # Grafana and read access to its token, but no Linux capabilities, privilege
+    # escalation, or writable container filesystem.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     command:
       - -t
       - stdio
