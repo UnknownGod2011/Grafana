@@ -22,131 +22,87 @@ SPEC.loader.exec_module(DEMO)
 
 
 def test_stop_propagates_compose_down_failure_after_attempting_api_cleanup(monkeypatch):
-    """An owned-stack teardown failure must be visible to callers, not swallowed."""
-    stop_api = MagicMock()
-    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
-
-    def fail_down(*args, **kwargs):
-        raise subprocess.CalledProcessError(returncode=17, cmd=["docker", "compose", "down"])
-
+    stop_api = MagicMock(); monkeypatch.setattr(DEMO, "_stop_api", stop_api)
+    def fail_down(*args, **kwargs): raise subprocess.CalledProcessError(returncode=17, cmd=["docker", "compose", "down"])
     monkeypatch.setattr(DEMO, "_docker", fail_down)
-
-    with pytest.raises(DEMO.DemoError, match="Docker Compose teardown failed"):
-        DEMO.stop(keep_stack=False)
-
+    with pytest.raises(DEMO.DemoError, match="Docker Compose teardown failed"): DEMO.stop(keep_stack=False)
     stop_api.assert_called_once_with()
 
 
 def test_stop_missing_docker_is_reported_as_partial_cleanup(monkeypatch):
-    """A missing Docker executable is a teardown failure, not successful stop."""
-    stop_api = MagicMock()
-    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
-
-    def missing_docker(*args, **kwargs):
-        raise FileNotFoundError("docker")
-
+    stop_api = MagicMock(); monkeypatch.setattr(DEMO, "_stop_api", stop_api)
+    def missing_docker(*args, **kwargs): raise FileNotFoundError("docker")
     monkeypatch.setattr(DEMO, "_docker", missing_docker)
-
-    with pytest.raises(DEMO.DemoError, match="Docker Compose teardown failed"):
-        DEMO.stop(keep_stack=False)
-
+    with pytest.raises(DEMO.DemoError, match="Docker Compose teardown failed"): DEMO.stop(keep_stack=False)
     stop_api.assert_called_once_with()
 
 
 def test_stop_keep_stack_never_invokes_compose_down(monkeypatch):
-    """Explicit keep-stack remains a safe escape hatch for operator-owned telemetry."""
-    stop_api = MagicMock()
-    docker = MagicMock()
-    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
-    monkeypatch.setattr(DEMO, "_docker", docker)
-
-    DEMO.stop(keep_stack=True)
-
-    stop_api.assert_called_once_with()
-    docker.assert_not_called()
+    stop_api=MagicMock(); docker=MagicMock(); monkeypatch.setattr(DEMO,"_stop_api",stop_api); monkeypatch.setattr(DEMO,"_docker",docker)
+    DEMO.stop(keep_stack=True); stop_api.assert_called_once_with(); docker.assert_not_called()
 
 
 def test_stop_attempts_compose_cleanup_even_when_api_cleanup_fails(monkeypatch):
-    """One cleanup failure must not prevent an independent owned component cleanup."""
-    docker = MagicMock()
-
-    def fail_api_stop():
-        raise DEMO.DemoError("verified StageGuard API did not stop")
-
-    monkeypatch.setattr(DEMO, "_stop_api", fail_api_stop)
-    monkeypatch.setattr(DEMO, "_docker", docker)
-
-    with pytest.raises(DEMO.DemoError, match="StageGuard API"):
-        DEMO.stop(keep_stack=False)
-
+    docker=MagicMock()
+    def fail_api_stop(): raise DEMO.DemoError("verified StageGuard API did not stop")
+    monkeypatch.setattr(DEMO,"_stop_api",fail_api_stop); monkeypatch.setattr(DEMO,"_docker",docker)
+    with pytest.raises(DEMO.DemoError,match="StageGuard API"): DEMO.stop(keep_stack=False)
     docker.assert_any_call("down")
 
 
 def test_stop_aggregates_api_and_compose_failures(monkeypatch):
-    """Operators must see both failures when neither owned component cleaned up."""
-    def fail_api_stop():
-        raise DEMO.DemoError("verified StageGuard API did not stop")
-
-    def fail_down(*args, **kwargs):
-        raise subprocess.CalledProcessError(returncode=23, cmd=["docker", "compose", "down"])
-
-    monkeypatch.setattr(DEMO, "_stop_api", fail_api_stop)
-    monkeypatch.setattr(DEMO, "_docker", fail_down)
-
-    with pytest.raises(DEMO.DemoError) as exc_info:
-        DEMO.stop(keep_stack=False)
-
-    message = str(exc_info.value)
-    assert "StageGuard API" in message
-    assert "Docker Compose" in message
+    def fail_api_stop(): raise DEMO.DemoError("verified StageGuard API did not stop")
+    def fail_down(*args,**kwargs): raise subprocess.CalledProcessError(returncode=23,cmd=["docker","compose","down"])
+    monkeypatch.setattr(DEMO,"_stop_api",fail_api_stop); monkeypatch.setattr(DEMO,"_docker",fail_down)
+    with pytest.raises(DEMO.DemoError) as exc_info: DEMO.stop(keep_stack=False)
+    message=str(exc_info.value); assert "StageGuard API" in message; assert "Docker Compose" in message
 
 
 def test_stop_verifies_compose_has_no_remaining_containers_including_stopped(monkeypatch):
-    """Verification must include stopped containers, which plain `compose ps` omits."""
-    stop_api = MagicMock()
-    calls = []
-
-    def docker(*args, **kwargs):
-        calls.append((args, kwargs))
-        if args == ("down",):
-            return MagicMock(returncode=0, stdout="")
-        if args == ("ps", "--all", "-q"):
-            return MagicMock(returncode=0, stdout="stageguard-grafana-container-id\n")
+    stop_api=MagicMock(); calls=[]
+    def docker(*args,**kwargs):
+        calls.append((args,kwargs))
+        if args==("down",): return MagicMock(returncode=0,stdout="")
+        if args==("ps","--all","-q"): return MagicMock(returncode=0,stdout="stageguard-grafana-container-id\n")
         raise AssertionError(f"unexpected docker invocation: {args}")
-
-    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
-    monkeypatch.setattr(DEMO, "_docker", docker)
-
-    with pytest.raises(DEMO.DemoError, match="still has running or retained containers"):
-        DEMO.stop(keep_stack=False)
-
-    stop_api.assert_called_once_with()
-    assert calls == [
-        (("down",), {}),
-        (("ps", "--all", "-q"), {"capture": True}),
-    ]
+    monkeypatch.setattr(DEMO,"_stop_api",stop_api); monkeypatch.setattr(DEMO,"_docker",docker)
+    with pytest.raises(DEMO.DemoError,match="still has running or retained containers"): DEMO.stop(keep_stack=False)
+    stop_api.assert_called_once_with(); assert calls==[(("down",),{}),(("ps","--all","-q"),{"capture":True})]
 
 
 def test_stop_accepts_verified_empty_compose_project(monkeypatch):
-    """Successful cleanup requires `down` and an all-state empty project query."""
-    stop_api = MagicMock()
-    calls = []
-
-    def docker(*args, **kwargs):
-        calls.append((args, kwargs))
-        if args == ("down",):
-            return MagicMock(returncode=0, stdout="")
-        if args == ("ps", "--all", "-q"):
-            return MagicMock(returncode=0, stdout="")
+    stop_api=MagicMock(); calls=[]
+    def docker(*args,**kwargs):
+        calls.append((args,kwargs))
+        if args==("down",): return MagicMock(returncode=0,stdout="")
+        if args==("ps","--all","-q"): return MagicMock(returncode=0,stdout="")
         raise AssertionError(f"unexpected docker invocation: {args}")
+    monkeypatch.setattr(DEMO,"_stop_api",stop_api); monkeypatch.setattr(DEMO,"_docker",docker)
+    DEMO.stop(keep_stack=False); stop_api.assert_called_once_with(); assert calls==[(("down",),{}),(("ps","--all","-q"),{"capture":True})]
 
-    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
+
+def test_stop_reports_compose_down_timeout(monkeypatch):
+    """A wedged Docker daemon must not hang stop forever or be reported as success."""
+    monkeypatch.setattr(DEMO, "_stop_api", MagicMock())
+    def timeout(*args, **kwargs): raise subprocess.TimeoutExpired(cmd=["docker", "compose", "down"], timeout=DEMO.COMPOSE_COMMAND_TIMEOUT_SECONDS)
+    monkeypatch.setattr(DEMO, "_docker", timeout)
+    with pytest.raises(DEMO.DemoError, match="teardown timed out"): DEMO.stop(keep_stack=False)
+
+
+def test_stop_reports_compose_verification_timeout(monkeypatch):
+    """An unknown post-teardown state remains fail-closed when verification wedges."""
+    monkeypatch.setattr(DEMO, "_stop_api", MagicMock())
+    def docker(*args, **kwargs):
+        if args == ("down",): return MagicMock(returncode=0, stdout="")
+        if args == ("ps", "--all", "-q"):
+            raise subprocess.TimeoutExpired(cmd=["docker", "compose", "ps", "--all", "-q"], timeout=DEMO.COMPOSE_COMMAND_TIMEOUT_SECONDS)
+        raise AssertionError(f"unexpected docker invocation: {args}")
     monkeypatch.setattr(DEMO, "_docker", docker)
+    with pytest.raises(DEMO.DemoError, match="verification timed out"): DEMO.stop(keep_stack=False)
 
-    DEMO.stop(keep_stack=False)
 
-    stop_api.assert_called_once_with()
-    assert calls == [
-        (("down",), {}),
-        (("ps", "--all", "-q"), {"capture": True}),
-    ]
+def test_docker_wrapper_passes_bounded_timeout(monkeypatch):
+    """Every local Compose command is bounded, including startup and cleanup calls."""
+    run = MagicMock(return_value=MagicMock(returncode=0, stdout="")); monkeypatch.setattr(DEMO, "_run", run)
+    DEMO._docker("ps", "--all", "-q", capture=True)
+    run.assert_called_once_with(["docker", "compose", "ps", "--all", "-q"], capture=True, timeout=DEMO.COMPOSE_COMMAND_TIMEOUT_SECONDS)
