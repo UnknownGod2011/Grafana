@@ -99,3 +99,54 @@ def test_stop_aggregates_api_and_compose_failures(monkeypatch):
     message = str(exc_info.value)
     assert "StageGuard API" in message
     assert "Docker Compose" in message
+
+
+def test_stop_verifies_compose_has_no_remaining_containers(monkeypatch):
+    """A zero exit from `compose down` is not sufficient if owned containers remain."""
+    stop_api = MagicMock()
+    calls = []
+
+    def docker(*args, **kwargs):
+        calls.append((args, kwargs))
+        if args == ("down",):
+            return MagicMock(returncode=0, stdout="")
+        if args == ("ps", "-q"):
+            return MagicMock(returncode=0, stdout="stageguard-grafana-container-id\n")
+        raise AssertionError(f"unexpected docker invocation: {args}")
+
+    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
+    monkeypatch.setattr(DEMO, "_docker", docker)
+
+    with pytest.raises(DEMO.DemoError, match="still has running or retained containers"):
+        DEMO.stop(keep_stack=False)
+
+    stop_api.assert_called_once_with()
+    assert calls == [
+        (("down",), {}),
+        (("ps", "-q"), {"capture": True}),
+    ]
+
+
+def test_stop_accepts_verified_empty_compose_project(monkeypatch):
+    """Successful cleanup requires both `down` and an empty project-container query."""
+    stop_api = MagicMock()
+    calls = []
+
+    def docker(*args, **kwargs):
+        calls.append((args, kwargs))
+        if args == ("down",):
+            return MagicMock(returncode=0, stdout="")
+        if args == ("ps", "-q"):
+            return MagicMock(returncode=0, stdout="")
+        raise AssertionError(f"unexpected docker invocation: {args}")
+
+    monkeypatch.setattr(DEMO, "_stop_api", stop_api)
+    monkeypatch.setattr(DEMO, "_docker", docker)
+
+    DEMO.stop(keep_stack=False)
+
+    stop_api.assert_called_once_with()
+    assert calls == [
+        (("down",), {}),
+        (("ps", "-q"), {"capture": True}),
+    ]
