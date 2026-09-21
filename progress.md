@@ -22,6 +22,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Health reachability is not process ownership: a structurally verified unhealthy local API is still an owned process.
 - Persisted PID metadata must be a strictly positive process ID before lookup or signal.
 - Local stop must not report success if teardown of an owned component fails.
+- Successful Compose teardown must be verified by an empty project-container query, not inferred solely from `docker compose down` returning zero.
 
 ## Retained validation baseline
 
@@ -43,43 +44,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Rejected zero/negative persisted PIDs before process lookup/signalling.
 - Implemented truthful local stop teardown: missing Docker or non-zero `docker compose down` becomes `DemoError`; `Stopped.` is emitted only after successful teardown or explicit `--keep-stack`.
 - Implemented independent local stop cleanup so API failure no longer suppresses owned Compose teardown; multiple failures are aggregated.
+- Added a regression gate requiring post-`down` verification that the Compose project has no retained containers.
 
-## Latest run — 2026-09-21 — independent local cleanup implementation
+## Latest run — 2026-09-21 — post-Compose teardown verification gate
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and `runtime/tests/test_demo_local_stop_lifecycle.py`, including the red independent-cleanup regressions from the preceding run.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py` and the complete focused `runtime/tests/test_demo_local_stop_lifecycle.py` regression suite.
 
 ### Finding
 
-The red gate was valid: `demo_local.py::stop()` called `_stop_api()` before entering the Compose branch, so a controlled API-cleanup failure prevented `docker compose down` from being attempted. This violated the local ownership invariant and hid a second teardown failure when both components failed.
+The local stop path now propagates `docker compose down` failures correctly, but still treats a zero exit code from `compose down` as proof that the owned observability stack is gone. That is weaker than the unattended release cleanup contract: a successful command invocation can still leave project containers behind because of engine/plugin edge cases or partial cleanup. Printing `Stopped.` without checking project state can therefore remain operationally misleading.
 
 ### Exact changes made
 
-- Refactored `scripts/demo_local.py::stop()` to collect cleanup failures rather than aborting after the first one.
-- StageGuard API cleanup remains the first attempt, but a `DemoError` from API cleanup is retained while requested Compose teardown still runs.
-- Missing Docker and non-zero Compose teardown are retained as explicit partial-cleanup failures.
-- When multiple cleanup responsibilities fail, one `DemoError` now reports every failure under `Local cleanup incomplete`.
-- Preserved `--keep-stack`: Compose teardown is intentionally skipped when explicitly requested, while API cleanup failure still propagates.
-- `Stopped.` is emitted only if every requested cleanup responsibility succeeds.
-- Implementation commit: `367ff92de495da90acd7732caad293235510733b`.
+- Extended `runtime/tests/test_demo_local_stop_lifecycle.py` with a red regression requiring a post-teardown `docker compose ps -q` verification query.
+- Added a case where `compose down` returns zero but `compose ps -q` reports a retained StageGuard container; `stop()` must raise `DemoError` rather than report success.
+- Added the complementary success contract: an empty captured `compose ps -q` result permits successful stop.
+- Kept `--keep-stack` behavior unchanged; explicit retention must not invoke Compose at all.
+- Regression commit: `295d9f79931093255f248f1d1e0cd1d2f16d87dd`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the implementation update.
-- Static inspection shows the implementation satisfies the focused regression contracts: Compose cleanup is attempted after API failure, simultaneous API/Compose failures are aggregated, and `--keep-stack` does not invoke Compose.
+- GitHub accepted the focused regression update.
+- Static inspection confirms current `demo_local.py::stop()` invokes only `docker compose down` and does not yet perform the required verification query, so the two new tests intentionally establish a red implementation gate.
 - No executable green-test claim is made: this connector environment does not expose a runnable checkout.
 
 ### Decisions
 
-1. Cleanup components are independent responsibilities; teardown continues after a controlled failure in another owned component.
-2. Cleanup remains fail-closed from the operator perspective: partial teardown is an error, never a success message.
-3. Aggregated errors preserve both process-safety diagnostics and container teardown diagnostics without weakening PID ownership verification.
-4. No CI workflow was added merely to execute these tests; avoid noisy Actions usage.
+1. A zero exit status from a teardown command is evidence of command completion, not sufficient evidence of resource absence.
+2. Verification remains scoped to the current Compose project via `docker compose ps -q`; it does not enumerate or touch unrelated Docker resources.
+3. `--keep-stack` remains the explicit operator escape hatch and therefore intentionally bypasses teardown verification.
+4. No CI workflow is added solely to run this gate; avoid noisy GitHub Actions usage.
 
 ### Blockers / unknowns
 
+- The new post-teardown verification gate still needs implementation in `scripts/demo_local.py::stop()` and executable validation.
 - Focused lifecycle tests still require execution in a real checkout, including Windows command-line parsing validation.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live unattended Docker rehearsal is required after accumulated cleanup hardening.
@@ -87,4 +88,4 @@ The red gate was valid: `demo_local.py::stop()` called `_stop_api()` before ente
 
 ## Single best next step
 
-Execute `runtime/tests/test_demo_local_stop_lifecycle.py` together with the accumulated spawn/PID lifecycle suites on Linux and Windows; if green, run consolidated validation and an unattended `scripts/demo_release.py --non-interactive --cleanup` Docker rehearsal, then perform the pinned Grafana MCP `1.4.1` read-only smoke.
+Implement post-`docker compose down` verification in `scripts/demo_local.py::stop()` using captured `docker compose ps -q`, aggregate verification/query failures with any API cleanup failure, and only print `Stopped.` when the requested Compose project is verified empty; then execute the accumulated lifecycle suites before consolidated validation, unattended Docker cleanup rehearsal, and the pinned Grafana MCP `1.4.1` smoke.
