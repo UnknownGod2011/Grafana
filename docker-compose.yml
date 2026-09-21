@@ -66,15 +66,14 @@ services:
       # The checked-in password is intentionally local-demo-only. Do not expose
       # this Grafana instance on all host interfaces.
       - "127.0.0.1:3000:3000"
-    # MCP needs a usable Grafana HTTP API, not merely a started container. The
-    # stock image is Alpine-based and includes wget; /api/health is intentionally
+    # Keep this readiness probe aligned with the official mcp-grafana integration
+    # stack for the same pinned Grafana 13.2.1 image. /api/health is intentionally
     # unauthenticated and suitable for this local readiness boundary.
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3000/api/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
       interval: 5s
       timeout: 3s
-      retries: 12
-      start_period: 10s
+      retries: 20
     depends_on:
       - prometheus
 
