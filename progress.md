@@ -2,7 +2,7 @@
 
 ## Current status
 
-StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Loki/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, authenticated private metrics bridging, evidence-unavailable abstention, no-replay execution reconciliation, recovery-only Grafana rechecks, stdio-only Grafana MCP launchers, strict operator-API authentication/framing/protocol preflight, a loopback reference remediation provider with idempotent writes plus read-only operation reconciliation, and Grafana lifecycle safety surfaces.
+StageGuard is a personal open-source Gemini/Google Cloud incident commander for live media workflows with Grafana as the read-only runtime evidence plane. The implemented vertical slice includes deterministic telemetry, Prometheus/Grafana, official Grafana MCP access, bounded investigation and diagnosis, optional Gemini briefing, exact-revision approval, remediation adapters, telemetry-verified recovery, authenticated lifecycle state, checkpoint/audit integrity, operator UI, Cloud Run deployment hardening, watchdog observability, execution reconciliation, and hardened local lifecycle tooling.
 
 ## Core invariants
 
@@ -10,86 +10,71 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Gemini is advisory and cannot mutate diagnosis, approval, remediation, or recovery state.
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
-- Fresh Grafana telemetry is required to verify recovery; `recovery_unverified` cannot replay remediation.
-- Ambiguous remediation execution remains behind the execution-uncertainty barrier until durable reconciliation and fresh evidence resolve it.
-- Operator API and reference remediation provider reject ambiguous credential/body framing before mutation.
-- Production remediation accepts only canonical operation IDs, bounded canonical target identities, frozen execution/reconciliation capabilities, exact validated transport/reconciliation result types, and bounded finite policy configuration.
-- Consolidated validation is credential-isolated, timeout-bounded, non-interactive, and tracks safe runtime-test ownership explicitly.
-- Local acceptance never destroys pre-existing compose resources merely because the StageGuard API is unreachable.
-- Cleanup independently attempts all requested runtime components it owns and reports partial teardown as failure.
-- API startup failure may terminate/reap only the exact `Popen` child created by that startup attempt.
-- A persisted local API PID is never sufficient authority to signal a process; shutdown structurally verifies the live command signature first.
-- Health reachability is not process ownership: a structurally verified unhealthy local API is still an owned process.
-- Persisted PID metadata must be a strictly positive process ID before lookup or signal.
-- Local stop must not report success if teardown of an owned component fails.
-- Successful Compose teardown must be verified against all project containers, including stopped containers, not inferred solely from `docker compose down` returning zero or the default running-only `compose ps` view.
-- Local Docker Compose subprocesses are timeout-bounded so a wedged daemon cannot indefinitely block startup, shutdown, or cleanup verification.
+- Fresh Grafana telemetry is required to verify recovery; ambiguous execution cannot replay remediation.
+- Operator API and remediation boundaries reject ambiguous framing and unsafe mutation inputs.
+- Local cleanup signals only structurally verified owned API processes and independently attempts every requested owned component.
+- Compose teardown is timeout-bounded and verified against all project containers before success is reported.
+- Local demo services that do not provide production-grade authentication are published on loopback only; checked-in demo credentials must never create a LAN-accessible service by default.
+- Validation claims distinguish historical executable results from connector-authored changes that have not run in a checkout.
 
 ## Retained validation baseline
 
 - Local onboarding doctor: 8 passed, 1 expected Windows-specific permission test skipped.
 - Focused core/API/UI suite from the last executable repository run: 81/81 passed.
 - Historical full suite: 352 tests, 9 failures, 15 errors, 19 skipped; there is no full-suite green claim.
-- Historical live Docker rehearsal: PASS twice consecutively, predating latest hardening/recovery work.
+- Historical live Docker rehearsal: PASS twice consecutively, predating the latest lifecycle/security hardening.
 - Historical official Grafana MCP read-only smoke: PASS using `grafana/mcp-grafana:1.3.0`; pinned `1.4.1` still requires a live smoke.
 - Connector-authored changes since the last executable checkout are not treated as passing tests.
 
 ## Recent completed work
 
-- Added unattended local acceptance with `python scripts/demo_release.py --non-interactive` and opt-in `--cleanup`.
-- Hardened unattended Compose ownership preflight/teardown and aggregate cleanup verification.
-- Added critical Grafana lifecycle alert/dashboard/runbook surfaces.
-- Hardened local API startup ownership so early child exit/readiness timeout cannot strand stale PID metadata; cleanup targets only the exact spawned child.
-- Hardened cross-invocation API shutdown against PID reuse with structured argv validation.
-- Decoupled API health from process ownership; verified unhealthy processes are still safely cleaned up.
-- Rejected zero/negative persisted PIDs before process lookup/signalling.
-- Implemented truthful local stop teardown: missing Docker or non-zero `docker compose down` becomes `DemoError`; `Stopped.` is emitted only after successful teardown or explicit `--keep-stack`.
-- Implemented independent local stop cleanup so API failure no longer suppresses owned Compose teardown; multiple failures are aggregated.
-- Implemented post-`down` all-state project-container verification before local stop can report success.
-- Bounded every local Docker Compose subprocess and made teardown/verification timeout failures explicit and fail-closed.
+- Added unattended local acceptance with opt-in cleanup and ownership-aware teardown.
+- Hardened API startup/shutdown against stale metadata, PID reuse, invalid/special PIDs, unhealthy-but-owned processes, and partial cleanup.
+- Made local Compose teardown truthful: failures aggregate, all-state project-container verification is required, and Docker commands are timeout-bounded.
+- Added Grafana lifecycle alert/dashboard/runbook surfaces and pinned the official Grafana MCP image to `1.4.1` with write/proxied tools disabled.
+- Bound the simulator, Prometheus, Grafana, and watchdog fixture host ports to `127.0.0.1` so local-only control surfaces, unauthenticated Prometheus, and the checked-in Grafana demo credential are not exposed to the developer's LAN by default.
 
-## Latest run — 2026-09-21 — bounded local Compose lifecycle
+## Latest run — 2026-09-21 — loopback-only local observability stack
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py`, `scripts/demo_release.py`, and the focused local-stop lifecycle regression suite. Confirmed the release rehearsal already bounds Compose subprocesses, while the normal local demo path did not.
+Read `progress.md` completely before deciding what to change. Inspected `scripts/demo_local.py`, its focused stop-lifecycle regression suite, the repository root, and `docker-compose.yml`.
 
 ### Finding
 
-`demo_local.py` used unbounded `subprocess.run` calls for Docker Compose. A wedged Docker daemon could therefore hang normal startup, stop, or post-teardown verification indefinitely. This undermined the otherwise fail-closed cleanup guarantees and differed from the already timeout-bounded unattended release rehearsal.
+The local StageGuard API was already bound to `127.0.0.1`, and the watchdog fixture was explicitly loopback-only, but the Compose port mappings for the simulator (`9108`), Prometheus (`9090`), and Grafana (`3000`) used bare host ports. Docker therefore published those services on all host interfaces by default. This was inappropriate for a local fixture because the simulator exposes scenario mutation endpoints, Prometheus has no authentication in this stack, and Grafana uses a checked-in `stageguard-local-only` administrator password.
 
 ### Exact changes made
 
-- Added `COMPOSE_COMMAND_TIMEOUT_SECONDS = 90.0` to the normal local demo path.
-- Extended `_run()` with an optional timeout and made `_docker()` apply the Compose timeout to every local Compose command.
-- Bounded the Docker Compose version preflight as well.
-- Added controlled timeout diagnostics for Compose teardown and post-teardown verification; timeout state remains a cleanup failure and never prints false success.
-- Added `subprocess.TimeoutExpired` to the top-level local CLI error boundary.
-- Added regression coverage for teardown timeout, verification timeout, and `_docker()` timeout propagation.
-- Implementation commit: `47862180f82f9951afe6b4ffa89c45a19dc72007`.
-- Regression commit: `9721bfeabf63b6befd982d9a601b866a8476480c`.
+- Changed simulator publishing from `9108:9108` to `127.0.0.1:9108:9108`.
+- Changed Prometheus publishing from `9090:9090` to `127.0.0.1:9090:9090`.
+- Changed Grafana publishing from `3000:3000` to `127.0.0.1:3000:3000`.
+- Retained the watchdog fixture's existing loopback-only `127.0.0.1:9111:9111` mapping.
+- Added comments beside each mapping documenting the security reason so future edits do not casually reintroduce all-interface exposure.
+- Implementation commit: `79dacc473b9b72a37ab120483f3c10fc6f5e3747`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted both source and regression updates.
-- Static inspection confirms timeout handling is now present at the local Compose boundary and cleanup continues to fail closed on unknown state.
-- No executable green claim is made: the connector environment does not provide a runnable checkout, so the new and accumulated lifecycle tests remain pending execution.
+- GitHub accepted the Compose update.
+- Static inspection confirms every host-published service in `docker-compose.yml` is now explicitly loopback-bound.
+- Existing local URLs in `demo_local.py` already use `127.0.0.1`, so no caller URL migration is required.
+- No executable green claim is made: this connector environment does not provide a runnable checkout. `docker compose config`, focused lifecycle tests, and the live rehearsal remain pending execution.
 
 ### Decisions
 
-1. A wedged Docker daemon is an operational failure, not a reason for the local CLI to wait forever.
-2. The normal local path now follows the same bounded-subprocess principle already used by `demo_release.py`.
-3. Timeout during teardown or verification is reported as incomplete cleanup; StageGuard never infers absence of resources from an uncompleted command.
-4. No CI workflow was introduced solely to execute this gate, preserving the low-noise Actions policy.
+1. A development stack with local-only credentials or unauthenticated control/metrics endpoints must be secure-by-default at the network binding layer.
+2. Container-to-container connectivity is unaffected because Compose services continue to communicate on the internal Compose network; only host publication was narrowed.
+3. No firewall assumptions are used as a substitute for explicit loopback binding.
+4. No CI workflow was introduced solely for this validation, preserving the low-noise Actions policy.
 
 ### Blockers / unknowns
 
-- Focused lifecycle tests require execution in a real checkout, including Windows command-line parsing validation.
+- Run `docker compose config` and the accumulated lifecycle suites in a real checkout, including Windows command-line parsing validation.
 - Historical full-suite failures/errors still need classification from an executable checkout.
-- A live unattended Docker rehearsal is required after the accumulated cleanup hardening.
+- A live unattended Docker rehearsal is required after the accumulated lifecycle and network-binding hardening.
 - A live read-only smoke against pinned `grafana/mcp-grafana:1.4.1` remains required.
 
 ## Single best next step
 
-Execute the accumulated local lifecycle suites on Linux and Windows, then run consolidated validation and classify any failures before the unattended Docker cleanup rehearsal and pinned Grafana MCP `1.4.1` read-only smoke.
+Execute `docker compose config`, the accumulated local lifecycle suites on Linux/Windows, and consolidated validation; then run the unattended Docker cleanup rehearsal and pinned Grafana MCP `1.4.1` read-only smoke.
