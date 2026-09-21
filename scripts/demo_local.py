@@ -186,7 +186,8 @@ def stop(*,keep_stack):
  if not keep_stack:
   print("Stopping local Docker stack...")
   try:_docker("down")
-  except (FileNotFoundError,subprocess.CalledProcessError):pass
+  except FileNotFoundError as exc:raise DemoError("Docker Compose teardown failed: docker executable was not found; local stack may still be running") from exc
+  except subprocess.CalledProcessError as exc:raise DemoError(f"Docker Compose teardown failed with exit code {exc.returncode}; local stack may still be running") from exc
  print("Stopped.")
 def interactive_demo(*,enable_gemini,open_browser):up(fresh=True,enable_gemini=enable_gemini,open_browser=open_browser);print("\n=== RECORDING FLOW ===");print("1. Show the healthy cockpit + Grafana for ~10 seconds.");input("2. Press ENTER when recording is ready to inject uplink-b failure... ");inject_fault(settle_seconds=6);print("\n3. In the cockpit click: Investigate -> Approve exact revision -> Execute remediation -> Verify recovery.");print("4. Show Grafana panels returning to healthy after the deterministic simulator reset.")
 def main(argv=None):
