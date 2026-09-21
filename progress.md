@@ -44,9 +44,9 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Rejected zero/negative persisted PIDs before process lookup/signalling.
 - Implemented truthful local stop teardown: missing Docker or non-zero `docker compose down` becomes `DemoError`; `Stopped.` is emitted only after successful teardown or explicit `--keep-stack`.
 - Implemented independent local stop cleanup so API failure no longer suppresses owned Compose teardown; multiple failures are aggregated.
-- Added a regression gate requiring post-`down` verification that the Compose project has no retained containers.
+- Implemented post-`down` verification that the Compose project has no retained containers before local stop can report success.
 
-## Latest run — 2026-09-21 — post-Compose teardown verification gate
+## Latest run — 2026-09-21 — verified Compose teardown implementation
 
 ### Inspected at start
 
@@ -54,33 +54,34 @@ Read `progress.md` completely before deciding what to change. Inspected `scripts
 
 ### Finding
 
-The local stop path now propagates `docker compose down` failures correctly, but still treats a zero exit code from `compose down` as proof that the owned observability stack is gone. That is weaker than the unattended release cleanup contract: a successful command invocation can still leave project containers behind because of engine/plugin edge cases or partial cleanup. Printing `Stopped.` without checking project state can therefore remain operationally misleading.
+The previous run established a red gate requiring `docker compose ps -q` after successful `docker compose down`. The implementation still reported success solely from `down` returning zero, so an engine/plugin edge case that retained project containers could produce a false `Stopped.` message.
 
 ### Exact changes made
 
-- Extended `runtime/tests/test_demo_local_stop_lifecycle.py` with a red regression requiring a post-teardown `docker compose ps -q` verification query.
-- Added a case where `compose down` returns zero but `compose ps -q` reports a retained StageGuard container; `stop()` must raise `DemoError` rather than report success.
-- Added the complementary success contract: an empty captured `compose ps -q` result permits successful stop.
-- Kept `--keep-stack` behavior unchanged; explicit retention must not invoke Compose at all.
-- Regression commit: `295d9f79931093255f248f1d1e0cd1d2f16d87dd`.
+- Updated `scripts/demo_local.py::stop()` to run captured `docker compose ps -q` after a successful `down`.
+- A non-empty project-container result is now a cleanup failure and prevents `Stopped.`.
+- A verification-time missing Docker executable or non-zero Compose query is reported as unknown stack state rather than treated as success.
+- Verification runs only when `down` itself succeeded; a failed teardown is not obscured by a redundant verification attempt.
+- Existing API-cleanup failures remain aggregated with Compose verification failures.
+- `--keep-stack` remains an explicit bypass and invokes neither teardown nor verification.
+- Implementation commit: `8916e3d8efa8aa1e03db13ccfec3b9224680ecea`.
 - No credentials, cloud resources, live remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the focused regression update.
-- Static inspection confirms current `demo_local.py::stop()` invokes only `docker compose down` and does not yet perform the required verification query, so the two new tests intentionally establish a red implementation gate.
+- GitHub accepted the implementation update.
+- Static inspection matches the focused regression contract: successful teardown invokes `down` followed by captured `ps -q`; retained containers produce `DemoError`; an empty result permits success.
 - No executable green-test claim is made: this connector environment does not expose a runnable checkout.
 
 ### Decisions
 
-1. A zero exit status from a teardown command is evidence of command completion, not sufficient evidence of resource absence.
-2. Verification remains scoped to the current Compose project via `docker compose ps -q`; it does not enumerate or touch unrelated Docker resources.
-3. `--keep-stack` remains the explicit operator escape hatch and therefore intentionally bypasses teardown verification.
-4. No CI workflow is added solely to run this gate; avoid noisy GitHub Actions usage.
+1. Teardown command success and resource absence remain separate facts; local stop verifies both.
+2. Verification stays project-scoped through Compose and does not enumerate or manipulate unrelated Docker resources.
+3. Verification failure is fail-closed because StageGuard cannot truthfully claim cleanup when project state is unknown.
+4. No CI workflow is added solely for this validation; avoid noisy GitHub Actions usage.
 
 ### Blockers / unknowns
 
-- The new post-teardown verification gate still needs implementation in `scripts/demo_local.py::stop()` and executable validation.
 - Focused lifecycle tests still require execution in a real checkout, including Windows command-line parsing validation.
 - Historical full-suite failures/errors still need classification from an executable checkout.
 - A live unattended Docker rehearsal is required after accumulated cleanup hardening.
@@ -88,4 +89,4 @@ The local stop path now propagates `docker compose down` failures correctly, but
 
 ## Single best next step
 
-Implement post-`docker compose down` verification in `scripts/demo_local.py::stop()` using captured `docker compose ps -q`, aggregate verification/query failures with any API cleanup failure, and only print `Stopped.` when the requested Compose project is verified empty; then execute the accumulated lifecycle suites before consolidated validation, unattended Docker cleanup rehearsal, and the pinned Grafana MCP `1.4.1` smoke.
+Execute the accumulated local lifecycle suites on Linux and Windows and fix any failures found; then run consolidated validation, an unattended Docker cleanup rehearsal, and the pinned Grafana MCP `1.4.1` read-only smoke before expanding product surface area further.
