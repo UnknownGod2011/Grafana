@@ -29,6 +29,11 @@ def test_successful_tool_call_with_empty_content_is_not_accepted_as_evidence() -
         [{"type": "resource", "resource": {"uri": "   "}}],
         [{"type": "resource", "resource": {"contents": []}}],
         [{"type": "resource", "resource": {"contents": [{"text": ""}]}}],
+        [{"type": "resource", "resource": {"ok": True}}],
+        [{"type": "resource", "resource": {"cached": False}}],
+        [{"type": "resource", "resource": {"annotations": {"audience": ["assistant"]}}}],
+        [{"type": "resource", "resource": {"meta": {"source": "grafana"}}}],
+        [{"type": "resource", "resource": {"_meta": {"trace": "present"}}}],
         ["not-an-mcp-content-object"],
     ],
 )
@@ -77,4 +82,12 @@ def test_nested_resource_with_actual_text_payload_remains_acceptable() -> None:
                 }
             ],
         },
+    )
+
+
+def test_finite_numeric_sample_remains_acceptable() -> None:
+    """A numeric zero is valid telemetry and must not be confused with an empty value."""
+    _assert_tool_result(
+        "query_prometheus",
+        {"isError": False, "content": [{"type": "resource", "resource": {"sample": 0}}]},
     )
