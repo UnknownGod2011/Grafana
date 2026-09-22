@@ -27,6 +27,7 @@ MAX_PAYLOAD_NESTING_DEPTH = 16
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv("STAGEGUARD_MCP_SMOKE_QUERY", 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}')
 REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
+_CONTENT_METADATA_KEYS = frozenset({"type", "mimeType", "annotations", "meta", "_meta"})
 _UNSAFE_DISPLAY_CODEPOINTS = frozenset({0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069})
 _SENSITIVE_ARG_MARKERS = frozenset({"token", "secret", "password", "passwd", "apikey", "api-key", "authorization", "cookie", "credential", "credentials"})
 
@@ -265,17 +266,25 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
 
 
 def _has_meaningful_value(value: Any, *, depth: int = 0) -> bool:
-    """Return whether a bounded decoded JSON-like value contains operational payload."""
+    """Return whether a bounded decoded JSON-like value contains operational payload.
+
+    Metadata keys are ignored at every nesting level. Booleans are deliberately
+    not evidence: flags such as ``ok=true`` describe state but do not prove that
+    a telemetry sample or datasource payload was returned.
+    """
     if depth > MAX_PAYLOAD_NESTING_DEPTH:
         return False
     if isinstance(value, str):
         return bool(value.strip())
     if isinstance(value, bool):
-        return True
+        return False
     if isinstance(value, (int, float)):
         return not isinstance(value, float) or math.isfinite(value)
     if isinstance(value, dict):
-        return any(_has_meaningful_value(child, depth=depth + 1) for child in value.values())
+        return any(
+            key not in _CONTENT_METADATA_KEYS and _has_meaningful_value(child, depth=depth + 1)
+            for key, child in value.items()
+        )
     if isinstance(value, list):
         return any(_has_meaningful_value(child, depth=depth + 1) for child in value)
     return False
@@ -286,7 +295,7 @@ def _has_nonempty_content_payload(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
     for key, value in item.items():
-        if key in {"type", "mimeType", "annotations", "meta", "_meta"}:
+        if key in _CONTENT_METADATA_KEYS:
             continue
         if _has_meaningful_value(value):
             return True
@@ -333,4 +342,4 @@ if __name__ == "__main__":
         main()
     except (McpError, FileNotFoundError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise SystemExit(1)
