@@ -32,7 +32,7 @@ _ASSIGNMENT_RE = re.compile(
 
 
 def _sensitive_key(key: Any) -> bool:
-    if not isinstance(key, str):
+    if type(key) is not str:
         return False
     normalized = "".join(ch for ch in key.lower() if ch.isalnum())
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
@@ -64,10 +64,10 @@ def _safe_text(value: str) -> str:
 
 
 def _safe_key(key: Any) -> str:
-    """Render mapping keys without invoking attacker-controlled __str__/__repr__."""
-    if isinstance(key, str):
+    """Render mapping keys without invoking attacker-controlled hooks."""
+    if type(key) is str:
         return _safe_text(key)
-    if key is None or isinstance(key, (bool, int, float)):
+    if key is None or type(key) in (bool, int, float):
         return _safe_text(str(key))
     return f"<{type(key).__name__}-key>"
 
@@ -75,11 +75,15 @@ def _safe_key(key: Any) -> str:
 def _sanitize(value: Any, *, depth: int = 0) -> Any:
     if depth > MAX_DIAGNOSTIC_DEPTH:
         return "<max-depth>"
-    if isinstance(value, str):
+    # Exact built-in type checks are intentional. Container/scalar subclasses may
+    # override iteration, slicing, len(), items(), or stringification hooks. MCP
+    # JSON decoding produces plain built-ins; extension-defined subclasses are
+    # therefore opaque diagnostic values rather than structures to traverse.
+    if type(value) is str:
         return _safe_text(value)
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or type(value) in (bool, int, float):
         return value
-    if isinstance(value, dict):
+    if type(value) is dict:
         sanitized: dict[str, Any] = {}
         for index, (key, child) in enumerate(value.items()):
             if index >= MAX_DIAGNOSTIC_ITEMS:
@@ -88,12 +92,12 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
             display_key = _safe_key(key)
             sanitized[display_key] = _REDACTED if _sensitive_key(key) else _sanitize(child, depth=depth + 1)
         return sanitized
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         items = [_sanitize(child, depth=depth + 1) for child in value[:MAX_DIAGNOSTIC_ITEMS]]
         if len(value) > MAX_DIAGNOSTIC_ITEMS:
             items.append(f"<truncated {len(value) - MAX_DIAGNOSTIC_ITEMS} items>")
         return items
-    # Never invoke arbitrary repr/str implementations from untrusted extension types.
+    # Never invoke arbitrary repr/str/iteration implementations from untrusted extension types.
     return f"<{type(value).__name__}>"
 
 
