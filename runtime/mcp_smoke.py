@@ -15,6 +15,7 @@ from typing import Any
 from command_line import split_command
 from mcp_datasource_identity import contains_datasource_uid
 from mcp_smoke_gate import PrometheusEvidenceError, assert_expected_prometheus_sample
+from mcp_smoke_reporting import SmokeReportError, build_safe_smoke_report
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
@@ -333,7 +334,17 @@ def main() -> None:
             )
         except PrometheusEvidenceError as exc:
             raise McpError(str(exc)) from exc
-        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": datasource_uid, "query": query, "expected_series_labels": expected_series, "result_summary": _bounded_diagnostic(query_result.get("content"))}, indent=2))
+        try:
+            report = build_safe_smoke_report(
+                server_info=initialized.get("serverInfo"),
+                protocol_version=initialized.get("protocolVersion"),
+                tools=list(tools),
+                datasource_uid=datasource_uid,
+                expected_series_labels=expected_series,
+            )
+        except SmokeReportError as exc:
+            raise McpError(f"unsafe MCP smoke report metadata: {exc}") from exc
+        print(json.dumps(report, indent=2))
         print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, resolved the configured datasource UID, and returned a genuine Prometheus telemetry sample for the configured StageGuard series through Grafana.")
     finally:
         client.close()
