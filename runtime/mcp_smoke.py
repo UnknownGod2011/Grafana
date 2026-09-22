@@ -266,12 +266,7 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
 
 
 def _has_meaningful_value(value: Any, *, depth: int = 0) -> bool:
-    """Return whether a bounded decoded JSON-like value contains operational payload.
-
-    Metadata keys are ignored at every nesting level. Booleans are deliberately
-    not evidence: flags such as ``ok=true`` describe state but do not prove that
-    a telemetry sample or datasource payload was returned.
-    """
+    """Return whether a bounded decoded JSON-like value contains operational payload."""
     if depth > MAX_PAYLOAD_NESTING_DEPTH:
         return False
     if isinstance(value, str):
@@ -281,25 +276,16 @@ def _has_meaningful_value(value: Any, *, depth: int = 0) -> bool:
     if isinstance(value, (int, float)):
         return not isinstance(value, float) or math.isfinite(value)
     if isinstance(value, dict):
-        return any(
-            key not in _CONTENT_METADATA_KEYS and _has_meaningful_value(child, depth=depth + 1)
-            for key, child in value.items()
-        )
+        return any(key not in _CONTENT_METADATA_KEYS and _has_meaningful_value(child, depth=depth + 1) for key, child in value.items())
     if isinstance(value, list):
         return any(_has_meaningful_value(child, depth=depth + 1) for child in value)
     return False
 
 
 def _has_nonempty_content_payload(item: Any) -> bool:
-    """Accept only MCP content entries that carry a meaningful payload, not metadata alone."""
     if not isinstance(item, dict):
         return False
-    for key, value in item.items():
-        if key in _CONTENT_METADATA_KEYS:
-            continue
-        if _has_meaningful_value(value):
-            return True
-    return False
+    return any(key not in _CONTENT_METADATA_KEYS and _has_meaningful_value(value) for key, value in item.items())
 
 
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
@@ -311,6 +297,37 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
         raise McpError(f"{name} returned no evidence content")
     if not any(_has_nonempty_content_payload(item) for item in content):
         raise McpError(f"{name} returned malformed or empty evidence content")
+
+
+def _value_contains_string(value: Any, expected: str, *, depth: int = 0) -> bool:
+    """Find an exact string in bounded structured content, decoding JSON text when possible."""
+    if depth > MAX_PAYLOAD_NESTING_DEPTH:
+        return False
+    if isinstance(value, str):
+        if value == expected:
+            return True
+        stripped = value.strip()
+        if not stripped or stripped[0] not in "[{\"":
+            return False
+        try:
+            decoded = json.loads(stripped)
+        except (json.JSONDecodeError, RecursionError):
+            return False
+        if decoded == value:
+            return False
+        return _value_contains_string(decoded, expected, depth=depth + 1)
+    if isinstance(value, dict):
+        return any(_value_contains_string(child, expected, depth=depth + 1) for child in value.values())
+    if isinstance(value, list):
+        return any(_value_contains_string(child, expected, depth=depth + 1) for child in value)
+    return False
+
+
+def _assert_datasource_present(result: dict[str, Any], datasource_uid: str) -> None:
+    """Require list_datasources to prove that the exact configured datasource UID is visible."""
+    _assert_tool_result("list_datasources", result)
+    if not _value_contains_string(result.get("content"), datasource_uid):
+        raise McpError(f"list_datasources did not return configured datasource UID {datasource_uid!r}")
 
 
 def main() -> None:
@@ -328,11 +345,11 @@ def main() -> None:
         tools = _tool_map(client.request("tools/list"))
         _assert_read_only_tool_surface(tools)
         datasources = client.request("tools/call", {"name": "list_datasources", "arguments": {}})
-        _assert_tool_result("list_datasources", datasources)
+        _assert_datasource_present(datasources, datasource_uid)
         query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
         _assert_tool_result("query_prometheus", query_result)
         print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": datasource_uid, "query": query, "result_summary": _bounded_diagnostic(query_result.get("content"))}, indent=2))
-        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, and returned non-empty Prometheus evidence through Grafana.")
+        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, resolved the configured datasource UID, and returned non-empty Prometheus evidence through Grafana.")
     finally:
         client.close()
 
