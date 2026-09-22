@@ -14,6 +14,7 @@ MAX_DIAGNOSTIC_CHARS = 2048
 MAX_DIAGNOSTIC_DEPTH = 8
 MAX_DIAGNOSTIC_ITEMS = 32
 MAX_DIAGNOSTIC_STRING_CHARS = 512
+MAX_TYPE_NAME_CHARS = 96
 _REDACTED = "<redacted>"
 
 # Keys are normalized by removing punctuation so Authorization, api_key,
@@ -63,13 +64,29 @@ def _safe_text(value: str) -> str:
     return value
 
 
+def _safe_type_name(value: Any) -> str:
+    """Return a bounded/display-safe type name without invoking value hooks.
+
+    ``type(value).__name__`` is metadata on the class rather than an instance hook,
+    but extension code can mutate it to contain terminal controls or enormous text.
+    Keep opaque markers useful without creating a second log-spoofing surface.
+    """
+    name = type(value).__name__
+    if type(name) is not str:
+        return "unknown"
+    name = _display_safe(name)
+    if len(name) > MAX_TYPE_NAME_CHARS:
+        name = name[:MAX_TYPE_NAME_CHARS] + "..."
+    return name
+
+
 def _safe_key(key: Any) -> str:
     """Render mapping keys without invoking attacker-controlled hooks."""
     if type(key) is str:
         return _safe_text(key)
     if key is None or type(key) in (bool, int, float):
         return _safe_text(str(key))
-    return f"<{type(key).__name__}-key>"
+    return f"<{_safe_type_name(key)}-key>"
 
 
 def _sanitize(value: Any, *, depth: int = 0) -> Any:
@@ -98,7 +115,7 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
             items.append(f"<truncated {len(value) - MAX_DIAGNOSTIC_ITEMS} items>")
         return items
     # Never invoke arbitrary repr/str/iteration implementations from untrusted extension types.
-    return f"<{type(value).__name__}>"
+    return f"<{_safe_type_name(value)}>"
 
 
 def safe_diagnostic(value: Any) -> str:
