@@ -15,7 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Demo services without production authentication are loopback-only.
 - Local Grafana MCP is opt-in/on-demand stdio, file-secret-backed, read-only, capability-free, no-new-privileges, and resource/result bounded.
 - MCP startup waits for Grafana HTTP readiness; local rehearsals establish a healthy baseline before fault injection.
-- MCP release acceptance requires a non-empty evidence payload, not merely a successful JSON-RPC/tool envelope or metadata-only content object.
+- MCP release acceptance requires meaningful evidence payload, not merely a successful JSON-RPC/tool envelope, metadata, or structurally non-empty but blank nested containers.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -33,40 +33,41 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Pinned official Grafana MCP to `1.4.1`; disabled write/proxied tools; constrained tool groups, results, CPU/memory/PIDs, privileges, capabilities, root filesystem, transport, and token handling.
 - Added Grafana readiness gating with `service_healthy`; readiness uses the same `curl -sf http://localhost:3000/api/health` convention as the official MCP integration for pinned Grafana `13.2.1`.
 - Added regression contracts for Compose exposure, MCP hardening/readiness, lifecycle behavior, incident rehearsal semantics, and semantic MCP smoke acceptance.
-- Corrected runtime docs to healthy-baseline → explicit fault → recovery and documented one-off stdio MCP lifecycle.
+- Corrected runtime docs to healthy-baseline -> explicit fault -> recovery and documented one-off stdio MCP lifecycle.
+- Hardened MCP evidence acceptance from envelope/content presence to meaningful recursively inspected payload presence.
 
-## Latest run — 2026-09-22 — MCP evidence-payload hardening
+## Latest run — 2026-09-22 — recursive MCP evidence validation
 
 ### Inspected at start
 
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/tests/test_mcp_smoke_semantic_acceptance.py`, and the runtime test inventory.
+Read `progress.md` completely before deciding on work. Then inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_semantic_acceptance.py`, including the prior evidence-payload gate and its fixtures.
 
 ### Finding
 
-The previous semantic gate rejected missing/empty content arrays, but still accepted any non-empty dictionary as evidence. Therefore metadata-only entries such as `{"type":"text","text":""}` or `{"type":"text","annotations":...}` could make release acceptance green without an actual evidence payload.
+The previous gate correctly rejected missing content, empty arrays, blank top-level text, and metadata-only content, but treated any non-empty nested dictionary/list as payload. Consequently a response such as `{"type":"resource","resource":{"uri":"   "}}` or `{"resource":{"contents":[]}}` could still make the release smoke green without operational evidence.
 
 ### Exact changes made
 
-- Added `_has_nonempty_content_payload()` in `runtime/mcp_smoke.py`.
-- MCP content now qualifies only when an object carries a non-empty payload beyond metadata fields (`type`, `mimeType`, annotations/meta).
-- Blank/whitespace text, metadata-only objects, empty dictionaries, and non-object entries fail closed.
-- Kept the acceptance format-tolerant for non-text MCP content carrying a real payload so StageGuard does not prematurely couple to one upstream serialization before the live `1.4.1` observation.
-- Expanded `runtime/tests/test_mcp_smoke_semantic_acceptance.py` with metadata-only, blank-text, malformed-entry, and non-text-payload regression cases.
-- Implementation commit: `75632513000fa193281dabf0ab3399d9be645aa1`.
-- Test commit: `16ae605bfa044a9625676d9714882db12b6c4cf5`.
+- Added bounded recursive `_has_meaningful_value()` validation in `runtime/mcp_smoke.py`.
+- Strings now qualify only when non-whitespace; dictionaries/lists qualify only if a descendant carries meaningful payload; finite numeric values and booleans remain valid serialized payload values; unsupported/null values do not qualify.
+- Added `MAX_PAYLOAD_NESTING_DEPTH = 16` so recursive validation remains bounded even for adversarial nesting within the already frame-bounded MCP response.
+- `_has_nonempty_content_payload()` now delegates payload values to this recursive validator while continuing to exclude top-level MCP metadata fields.
+- Added regression cases for empty resource objects, whitespace-only nested URIs, empty nested contents, nested blank text, and a positive nested resource containing real telemetry text.
+- Implementation commit: `30034d748648b4afef124c0b10f726bae4d8e93d`.
+- Test commit: `a359e80184f1d1da75043fdaf749f5e1baf40b73`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted both implementation and regression-test updates.
-- This connector environment still does not expose an executable repository checkout, so the tests were not executed here and are not recorded as green.
-- Static review confirms the prior accepted text fixture still has a non-empty `text` payload and the added resource fixture has a non-empty `resource` payload.
+- GitHub accepted the implementation and regression-test updates.
+- This connector environment does not expose an executable repository checkout, so these tests were not executed here and are not recorded as green.
+- Static inspection confirms existing positive plain-text evidence and nested resource evidence remain accepted while structurally non-empty blank containers fail closed.
 
 ### Decisions
 
-1. A release smoke must prove payload presence, not just MCP envelope/content-object presence.
-2. Metadata does not count as operational evidence.
-3. Keep payload detection serialization-tolerant until the pinned upstream `1.4.1` response is observed live; only then tighten to a more specific stable contract if justified.
+1. Release acceptance must recurse through structured MCP content rather than equating container non-emptiness with evidence.
+2. Recursive inspection is depth-bounded independently of the existing stdio frame-size bound.
+3. Keep serialization tolerance until the pinned MCP `1.4.1` response is observed live; do not prematurely hard-code one upstream result representation.
 4. Continue avoiding noisy CI solely to validate connector-authored changes.
 
 ### Blockers / unknowns
@@ -79,4 +80,4 @@ The previous semantic gate rejected missing/empty content arrays, but still acce
 
 ## Single best next step
 
-Execute the semantic MCP contract tests and local Docker acceptance gate. Observe the real pinned MCP `1.4.1` `query_prometheus` payload through Grafana `13.2.1`; if it exposes a stable structured result, strengthen acceptance to verify that the requested StageGuard series actually contains a sample rather than merely a non-empty payload.
+Execute the semantic MCP contract tests and local Docker acceptance gate. Observe the real pinned MCP `1.4.1` `query_prometheus` payload through Grafana `13.2.1`; if it exposes a stable structured result, strengthen acceptance to verify that the requested StageGuard series actually contains a sample rather than merely a meaningful payload.
