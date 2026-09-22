@@ -32,41 +32,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened expected-label configuration against C0/C1 controls, Unicode line/paragraph separators, and bidi/isolate controls while retaining safe printable Unicode values.
 - Added and wired a bounded safe-report builder so release success output has no API for raw PromQL, MCP evidence content, or sample values.
 - Added a standalone secret-aware MCP diagnostic sanitizer plus credential-free regression coverage for recursive sensitive fields, inline credentials, auth URLs, bounds, and hostile object repr behavior.
+- Wired that sanitizer into production JSON-RPC errors, malformed JSON-RPC results, and MCP tool `isError` content; removed the legacy raw-`repr` diagnostic helper and added a source invariant guarding the boundary.
 
-## Latest run — 2026-09-23 — MCP failure-diagnostic redaction foundation
+## Latest run — 2026-09-23 — production MCP failure-diagnostic gate
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and its failure paths. Confirmed the next recorded security gap: `_bounded_diagnostic()` bounded output length but used raw `repr(value)`, and JSON-RPC errors / `isError` tool content could therefore echo an upstream Authorization header, API key, cookie, password, token, URL password, or similar secret into operator logs.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`. Confirmed the recorded gap remained: production failure paths still called `_bounded_diagnostic()`, whose raw `repr(value)` could expose secrets echoed by an upstream MCP/Grafana error despite output-length bounding.
 
 ### Exact changes made
-- Added `runtime/mcp_diagnostics.py` in commit `9c6b388b573d71599b7046b6a0c5bd0a91e7cdf8`.
-- Added `safe_diagnostic()` as a dependency-free, bounded sanitization boundary for untrusted MCP failure material.
-- Sensitive mapping keys are punctuation-normalized before matching so common variants such as `Authorization`, `api_key`, `x-api-key`, access-token, cookie, password, credential, client-secret, and private-key are redacted recursively.
-- Inline Bearer/Basic credentials, common `key=value` / `key: value` secret forms, and HTTP(S) URL passwords are redacted from free-form upstream error strings.
-- Added depth, collection-width, per-string, and final-render bounds. Unknown objects are represented by type only so attacker-controlled `__repr__` is never invoked.
-- Added `runtime/tests/test_mcp_diagnostics.py` in commit `3631b4fac0c5ef7b983b754a16518397934fb29b` covering recursive secret fields, inline credentials, Basic auth, URL passwords, bounded hostile payloads, hostile repr, and retention of useful non-secret error context.
+- Updated `runtime/mcp_smoke.py` in commit `b02913f250c74482f99c15594d27685eb5aa5ada`.
+- Imported `safe_diagnostic` from `mcp_diagnostics` and routed JSON-RPC `error`, malformed JSON-RPC `result`, and MCP tool `isError` content through it.
+- Removed `_bounded_diagnostic()` and its raw `repr()` implementation, plus the now-unused local diagnostic-size constant.
+- Preserved the existing bounded command redaction, protocol/tool/datasource checks, expected-series Prometheus evidence gate, and safe success reporter.
+- Added `runtime/tests/test_mcp_smoke_diagnostic_gate.py` in commit `302431fba3a636d55854d4ab6796354d8c0f5789`.
+- The source invariant requires the sanitizer import, forbids reintroduction of `_bounded_diagnostic`/raw `repr`, verifies the three untrusted upstream diagnostic sites cross `safe_diagnostic`, and guards stderr from direct upstream payload serialization.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both implementation and regression-test commits.
-- Source inspection confirms the sanitizer is independent of application/cloud credentials and suitable for credential-free unit execution.
-- The production `mcp_smoke.py` call sites are intentionally not yet claimed hardened: they still call their local legacy `_bounded_diagnostic()` until the next wiring change.
+- GitHub accepted the production wiring and regression-invariant commits.
+- Source inspection confirms the three operator-visible upstream MCP diagnostic paths now cross the standalone secret-aware sanitizer.
 - This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Sanitize structured data before rendering rather than regexing only the final `repr`, so sensitive keyed values can be removed regardless of their contents.
-2. Also redact common credential syntax in free-form strings because upstream HTTP/JSON-RPC errors frequently flatten headers or request details into messages.
-3. Never call arbitrary `repr` implementations while constructing diagnostics.
-4. Preserve non-secret error codes/messages so redaction does not destroy operator triage value.
-5. Keep this module dependency-free and deterministic so it can protect the earliest release-smoke failure paths.
-6. Avoid GitHub Actions execution because local validation is preferred and historical Actions storage pressure exists.
+1. Keep sanitization at the point where untrusted upstream material becomes text rather than attempting to redact the final top-level exception string.
+2. Retain useful method/tool context outside the sanitizer while sanitizing only the untrusted payload.
+3. Remove rather than deprecate the legacy raw-repr helper so future code cannot accidentally reuse the unsafe path.
+4. Protect the integration with a cheap credential-free source invariant in addition to the sanitizer's behavioral unit tests.
+5. Avoid GitHub Actions execution because local validation is preferred and historical Actions storage pressure exists.
 
 ### Blockers / unknowns
-- `runtime/mcp_smoke.py` still needs to import/use `safe_diagnostic()` at every untrusted upstream diagnostic call site and remove the legacy raw-repr helper; a source-level invariant should prevent regression.
 - Focused MCP suites still require execution in a checkout.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
+- The command-line redactor is separate from upstream-payload sanitization; its existing coverage should be rechecked during executable validation.
 
 ## Single best next step
-Wire `safe_diagnostic()` into every `runtime/mcp_smoke.py` JSON-RPC/tool failure diagnostic, remove the raw-repr `_bounded_diagnostic()` implementation, add an AST/source invariant proving untrusted failure material cannot bypass the sanitizer, then execute the focused MCP suites and pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke in a checkout.
+Execute the focused MCP unit/invariant suites in a real checkout, fix any regressions, then run the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` response as a regression fixture without logging credentials, raw PromQL, or sample values.
