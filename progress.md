@@ -35,48 +35,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added Grafana readiness gating with `service_healthy`; readiness uses the official MCP integration convention for pinned Grafana `13.2.1`.
 - Hardened MCP evidence acceptance from envelope/content presence to bounded recursive meaningful-payload validation.
 - Added a schema-aware datasource identity parser that accepts only exact string-valued `uid` fields and wired the release smoke to it.
-- Added bounded Prometheus evidence parsing and then aligned it to the pinned official `mcp-grafana v1.4.1` `QueryPrometheusResult` contract.
+- Added bounded Prometheus evidence parsing aligned to the pinned official `mcp-grafana v1.4.1` `QueryPrometheusResult` contract: genuine telemetry must be under `data`.
 
-## Latest run — 2026-09-22 — official query-result contract verified
+## Latest run — 2026-09-22 — production semantic-gate regression added
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py`, `runtime/mcp_prometheus_evidence.py`, and its regression suite. The production smoke still checks meaningful query content rather than semantic samples.
-
-### Research / upstream verification
-
-Inspected the source of official `grafana/mcp-grafana` tag `v1.4.1`, `tools/prometheus.go`. The pinned implementation defines `QueryPrometheusResult` with `Data model.Value` serialized as JSON key `data`, plus optional `hints` and `warnings`; `query_prometheus` returns that wrapper. This removes the prior uncertainty about where genuine Prometheus samples appear in the tool payload and gives StageGuard a stable pinned-version contract to validate against.
+Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py` and confirmed the production release smoke still ends the `query_prometheus` path with `_assert_tool_result(...)`, which validates meaningful MCP content but does not call `contains_prometheus_sample`. The semantic parser exists separately, so the release path can still pass on a non-empty warning/hint payload with no telemetry sample.
 
 ### Exact changes made
 
-- Hardened `runtime/mcp_prometheus_evidence.py`: a sample now qualifies only when it is beneath an official query-result `data` field. The parser still tolerates MCP JSON text and structured transport envelopes, remains depth/size bounded, and recognizes instant `value` and range `values` sample pairs.
-- This closes a false-positive class where sample-looking numeric pairs inside `hints`, `warnings`, metadata, or arbitrary envelope fields could previously count as telemetry.
-- Updated the regression suite to model the pinned v1.4.1 response shape and added explicit rejection tests for sample lookalikes in `hints`, `warnings`, and bare sample objects without the query-result `data` envelope.
-- Parser commit: `8e694e70f295b43dea68479209f56168820274fb`.
-- Test commit: `fd0c64cc53a38b230a513586f3f1f90d1ca8688d`.
+- Added `runtime/tests/test_mcp_smoke_prometheus_gate.py` in commit `1653af1f8847683471b3e23a96ecb58f765c61d2`.
+- The new credential-free AST regression requires the production smoke to import `contains_prometheus_sample` from `mcp_prometheus_evidence`.
+- It also requires `main()` to use that parser against `query_result` in a fail-closed branch that raises `McpError` when semantic telemetry is absent.
+- The test deliberately avoids Docker, credentials, network access, and brittle source-string matching; it encodes the release invariant structurally.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the parser and regression updates.
-- Static contract review is now grounded in the exact pinned upstream `v1.4.1` source rather than an assumed Prometheus HTTP envelope.
-- This connector environment still does not expose an executable repository checkout, so the changed tests were not executed and no green test claim is made.
+- GitHub accepted the regression-test commit.
+- Static inspection confirms the new regression is expected to fail against the current production smoke because the semantic parser is not yet imported/wired there. This is intentional red-test-first coverage of the release defect.
+- This connector environment does not expose an executable repository checkout, so pytest was not executed and no green test claim is made.
 
 ### Decisions
 
-1. Treat the pinned upstream Go type as the semantic contract: only `QueryPrometheusResult.data` may establish telemetry evidence.
-2. Do not accept sample-shaped values from hints/warnings/metadata.
-3. Keep transport-envelope traversal separate from sample-field recognition.
-4. The prior reason for withholding production integration (unknown v1.4.1 response schema) is now resolved by source verification; live Docker validation is still required for end-to-end serialization/transport behavior.
+1. Treat generic MCP payload validity and Prometheus telemetry validity as separate gates.
+2. Release acceptance must fail closed when `query_prometheus` returns valid MCP content but no genuine sample under the pinned v1.4.1 `data` contract.
+3. Keep the regression credential-free so this invariant is testable without Grafana/Docker.
+4. Do not weaken or mark the regression green until the production smoke itself enforces the semantic gate.
 
 ### Blockers / unknowns
 
-- The Prometheus evidence, datasource-identity, and semantic MCP suites need execution in a checkout.
-- `docker compose config`, Grafana `13.2.1` health observation, Viewer-token bootstrap, and hardened MCP `1.4.1` smoke still require an executable Docker checkout.
+- `runtime/mcp_smoke.py` still needs the surgical production wiring: import `contains_prometheus_sample`, call it after `_assert_tool_result("query_prometheus", query_result)`, and raise `McpError` if no sample exists.
+- The focused MCP suites need execution in a checkout.
+- `docker compose config`, Grafana `13.2.1` health observation, Viewer-token bootstrap, and hardened MCP `1.4.1` smoke require an executable Docker checkout.
 - Accumulated lifecycle/security/MCP tests need Linux and Windows execution.
 - Historical full-suite failures/errors still need classification.
-- A live unattended Docker rehearsal remains required after the hardening changes.
 
 ## Single best next step
 
-Wire `contains_prometheus_sample(query_result["content"])` into the production MCP smoke immediately after `_assert_tool_result("query_prometheus", query_result)`, failing closed when the pinned official response contains no sample; then execute the focused MCP suites and the Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance run to validate actual transport serialization end to end.
+Wire the now-regression-protected semantic gate into `runtime/mcp_smoke.py`: import `contains_prometheus_sample`, fail closed when `contains_prometheus_sample(query_result["content"])` is false, and update the PASS wording to state that a genuine Prometheus sample was observed. Then execute the focused MCP suites and Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance run when an executable checkout is available.
