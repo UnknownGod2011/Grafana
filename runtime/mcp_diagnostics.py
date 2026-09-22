@@ -7,6 +7,7 @@ they must never become a lossless serialization of an upstream payload.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 MAX_DIAGNOSTIC_CHARS = 2048
@@ -37,16 +38,38 @@ def _sensitive_key(key: Any) -> bool:
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
 
 
+def _display_safe(value: str) -> str:
+    """Neutralize terminal/log control and Unicode formatting characters."""
+    parts: list[str] = []
+    for ch in value:
+        category = unicodedata.category(ch)
+        if category in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            parts.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
+        else:
+            parts.append(ch)
+    return "".join(parts)
+
+
 def _safe_text(value: str) -> str:
-    """Redact common inline credential forms and bound attacker-controlled text."""
+    """Redact inline credentials, neutralize display controls, and bound text."""
     value = _BEARER_RE.sub(r"\1 " + _REDACTED, value)
     value = _BASIC_RE.sub(r"\1 " + _REDACTED, value)
     value = _URL_CREDENTIAL_RE.sub(r"\1" + _REDACTED + r"\2", value)
     value = _ASSIGNMENT_RE.sub(lambda m: m.group(1) + m.group(2) + _REDACTED, value)
+    value = _display_safe(value)
     if len(value) > MAX_DIAGNOSTIC_STRING_CHARS:
         omitted = len(value) - MAX_DIAGNOSTIC_STRING_CHARS
         value = value[:MAX_DIAGNOSTIC_STRING_CHARS] + f"...<truncated {omitted} chars>"
     return value
+
+
+def _safe_key(key: Any) -> str:
+    """Render mapping keys without invoking attacker-controlled __str__/__repr__."""
+    if isinstance(key, str):
+        return _safe_text(key)
+    if key is None or isinstance(key, (bool, int, float)):
+        return _safe_text(str(key))
+    return f"<{type(key).__name__}-key>"
 
 
 def _sanitize(value: Any, *, depth: int = 0) -> Any:
@@ -62,7 +85,7 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
             if index >= MAX_DIAGNOSTIC_ITEMS:
                 sanitized["<truncated-items>"] = len(value) - MAX_DIAGNOSTIC_ITEMS
                 break
-            display_key = _safe_text(str(key))
+            display_key = _safe_key(key)
             sanitized[display_key] = _REDACTED if _sensitive_key(key) else _sanitize(child, depth=depth + 1)
         return sanitized
     if isinstance(value, (list, tuple)):
@@ -70,12 +93,12 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
         if len(value) > MAX_DIAGNOSTIC_ITEMS:
             items.append(f"<truncated {len(value) - MAX_DIAGNOSTIC_ITEMS} items>")
         return items
-    # Never invoke arbitrary repr implementations from untrusted extension types.
+    # Never invoke arbitrary repr/str implementations from untrusted extension types.
     return f"<{type(value).__name__}>"
 
 
 def safe_diagnostic(value: Any) -> str:
-    """Return a bounded, secret-aware representation of an untrusted MCP value."""
+    """Return a bounded, secret-aware, display-safe representation of an MCP value."""
     rendered = repr(_sanitize(value))
     if len(rendered) <= MAX_DIAGNOSTIC_CHARS:
         return rendered
