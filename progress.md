@@ -14,6 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Raw PromQL/evidence/sample payloads must not be emitted by the normal release-smoke success report.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before it is operator-visible.
 - Untrusted extension/container subclasses are opaque to MCP diagnostics; sanitizer traversal is limited to exact JSON-like built-ins so attacker hooks cannot execute.
+- Opaque diagnostic type markers are themselves bounded and display-safe; mutable class names cannot become a log-spoofing or output-amplification surface.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -32,32 +33,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened expected-label configuration against terminal/log spoofing while retaining safe printable Unicode.
 - Added and wired a bounded safe-report builder so release success output has no API for raw PromQL, MCP evidence content, or sample values.
 - Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, with credential redaction, output bounds, display-control escaping, and hostile-object protection.
-- Hardened diagnostics so arbitrary mapping keys and extension-defined container/scalar subclasses cannot execute attacker-controlled stringification, iteration, slicing, length, or mapping hooks.
+- Restricted diagnostic traversal to exact JSON-like built-ins and made extension-defined container/scalar subclasses opaque.
+- Hardened opaque type markers against mutable hostile class names containing controls, bidi formatting, or oversized text.
 
-## Latest run — 2026-09-23 — MCP diagnostic hostile-container hardening
+## Latest run — 2026-09-23 — MCP opaque type-marker hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The sanitizer no longer stringified arbitrary mapping keys, but it still used `isinstance()` for dict/list/tuple/string/numeric values. A malicious subclass could therefore enter a trusted traversal branch and execute overridden `items()`, slicing, `len()`, or related hooks. Normal `json.loads` MCP data is composed of exact built-ins, so there is no operational need to traverse extension-defined subclasses.
+Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The previous run correctly made extension-defined values opaque, but their markers still interpolated `type(value).__name__` directly. Python class names are mutable metadata, so extension code can assign a name containing terminal controls, Unicode bidi/isolate characters, or very large text. That left a secondary operator-log spoofing/output-amplification surface even though instance `__str__`/`__repr__` hooks were no longer executed.
 
 ### Exact changes made
-- Updated `runtime/mcp_diagnostics.py` in commit `4cf7db2df0093b74b567631a92e22fd74318b6f0`.
-- Restricted structural traversal and scalar handling to exact built-in JSON-like types. Dict/list/tuple/str/int/float/bool subclasses are now treated as opaque values and represented only by type.
-- Restricted sensitive-key inspection and primitive-key stringification to exact built-ins for the same reason.
-- Preserved recursive secret redaction, inline credential redaction, display-control escaping, depth/item/string/final-output bounds, and useful plain-JSON error context.
-- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `59441eade4ba0cafab1454dfba3aec056e96d2f1`.
-- Added regressions proving hostile dict/list subclasses cannot execute traversal/length/slicing/repr hooks and hostile int/str subclasses cannot execute stringification/repr hooks.
+- Updated `runtime/mcp_diagnostics.py` in commit `48f49fc8b0207d201c4e79bfd9aa1f9709368f24`.
+- Added `_safe_type_name()` and a 96-character type-name bound.
+- Opaque value and mapping-key markers now pass class names through the existing display-control neutralization before bounded rendering.
+- Preserved exact-built-in traversal, recursive secret redaction, inline Bearer/Basic/assignment/URL credential redaction, depth/item/string/final-output bounds, and useful plain-JSON error context.
+- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `3fbcd9c9015bc8ec165f593d344fc674750a3897`.
+- Added regressions for hostile mutable class names containing CR/LF, ESC, bidi/isolate controls, and hundreds of characters in both opaque values and opaque mapping keys.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression-test commits.
-- Source inspection confirms traversal is now restricted to exact built-ins produced by normal JSON decoding; unknown/subclass values are reduced to a type marker before final built-in `repr()`.
+- Source inspection confirms opaque type names now cross the same display-safety boundary as other operator-visible diagnostic text and are independently bounded.
 - This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Prefer exact built-in traversal over attempting to safely introspect arbitrary Python extension types; MCP JSON-RPC does not require custom container subclasses.
-2. Keep opaque type markers useful for triage while refusing to execute extension-defined hooks.
-3. Do not trigger GitHub Actions solely for connector-authored hardening because local validation is preferred and historical Actions storage pressure exists.
+1. Preserve useful type identity in diagnostics rather than collapsing all unknown values to one marker, but treat class-name metadata as untrusted display text.
+2. Reuse `_display_safe()` rather than credential-redaction logic for type names: class names are structural metadata, while the relevant risk is display spoofing/output amplification.
+3. Keep local/free executable validation as the next priority and avoid triggering GitHub Actions solely for connector-authored hardening.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout.
