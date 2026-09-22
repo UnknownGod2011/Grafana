@@ -60,6 +60,12 @@ def test_datasource_acceptance_rejects_uid_as_substring_only() -> None:
         _assert_datasource_present(result, "stageguard-prometheus")
 
 
+def test_datasource_acceptance_does_not_confuse_name_with_uid() -> None:
+    result = {"isError": False, "content": [{"type": "text", "text": '{"datasources":[{"uid":"other-prometheus","name":"stageguard-prometheus","type":"prometheus"}],"total":1,"hasMore":false}'}]}
+    with pytest.raises(McpError, match="configured datasource UID"):
+        _assert_datasource_present(result, "stageguard-prometheus")
+
+
 def test_datasource_acceptance_decodes_official_structured_json_text() -> None:
     result = {"isError": False, "content": [{"type": "text", "text": '{"datasources":[{"id":1,"uid":"stageguard-prometheus","name":"StageGuard Prometheus","type":"prometheus","isDefault":true}],"total":1,"hasMore":false}'}]}
     _assert_datasource_present(result, "stageguard-prometheus")
