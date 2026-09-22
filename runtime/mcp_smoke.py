@@ -14,7 +14,7 @@ from typing import Any
 
 from command_line import split_command
 from mcp_datasource_identity import contains_datasource_uid
-from mcp_prometheus_evidence import contains_prometheus_sample
+from mcp_smoke_gate import PrometheusEvidenceError, assert_expected_prometheus_sample
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
@@ -326,10 +326,15 @@ def main() -> None:
         _assert_datasource_present(datasources, datasource_uid)
         query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
         _assert_tool_result("query_prometheus", query_result)
-        if not contains_prometheus_sample(query_result.get("content")):
-            raise McpError("query_prometheus returned no genuine Prometheus telemetry sample")
-        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": datasource_uid, "query": query, "result_summary": _bounded_diagnostic(query_result.get("content"))}, indent=2))
-        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, resolved the configured datasource UID, and returned a genuine Prometheus telemetry sample through Grafana.")
+        try:
+            expected_series = assert_expected_prometheus_sample(
+                query_result.get("content"),
+                os.getenv("STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS"),
+            )
+        except PrometheusEvidenceError as exc:
+            raise McpError(str(exc)) from exc
+        print(json.dumps({"server": initialized.get("serverInfo"), "protocol_version": initialized.get("protocolVersion"), "advertised_read_only_tools": sorted(tools), "datasource_uid": datasource_uid, "query": query, "expected_series_labels": expected_series, "result_summary": _bounded_diagnostic(query_result.get("content"))}, indent=2))
+        print("PASS: official Grafana MCP negotiated the expected protocol, exposed only explicit read-only tools, resolved the configured datasource UID, and returned a genuine Prometheus telemetry sample for the configured StageGuard series through Grafana.")
     finally:
         client.close()
 
