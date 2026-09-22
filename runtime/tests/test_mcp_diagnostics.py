@@ -68,6 +68,47 @@ def test_unknown_mapping_keys_do_not_execute_str_or_repr():
     assert "datasource unavailable" in rendered
 
 
+def test_container_subclasses_are_opaque_and_do_not_execute_hooks():
+    class DangerousDict(dict):
+        def items(self):
+            raise AssertionError("items must not be called")
+
+        def __repr__(self):
+            raise AssertionError("repr must not be called")
+
+    class DangerousList(list):
+        def __getitem__(self, key):
+            raise AssertionError("getitem must not be called")
+
+        def __len__(self):
+            raise AssertionError("len must not be called")
+
+        def __repr__(self):
+            raise AssertionError("repr must not be called")
+
+    assert safe_diagnostic(DangerousDict(secret="must-not-traverse")) == "'<DangerousDict>'"
+    assert safe_diagnostic(DangerousList(["must-not-traverse"])) == "'<DangerousList>'"
+
+
+def test_scalar_subclasses_are_opaque_and_do_not_execute_stringification():
+    class DangerousInt(int):
+        def __str__(self):
+            raise AssertionError("str must not be called")
+
+        def __repr__(self):
+            raise AssertionError("repr must not be called")
+
+    class DangerousStr(str):
+        def __str__(self):
+            raise AssertionError("str must not be called")
+
+        def __repr__(self):
+            raise AssertionError("repr must not be called")
+
+    assert safe_diagnostic(DangerousInt(7)) == "'<DangerousInt>'"
+    assert safe_diagnostic(DangerousStr("Bearer must-not-leak")) == "'<DangerousStr>'"
+
+
 def test_terminal_and_unicode_format_controls_are_neutralized():
     rendered = safe_diagnostic({"message\nspoof": "first\r\nsecond\x1b[31m\u202ehidden\u2066text"})
     assert "\n" not in rendered
