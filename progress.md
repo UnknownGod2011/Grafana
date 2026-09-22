@@ -37,41 +37,45 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened MCP evidence acceptance from envelope/content presence to bounded recursive meaningful-payload validation, including nested metadata and status-flag rejection.
 - Hardened MCP datasource discovery so a successful but unrelated `list_datasources` result cannot make the smoke proceed against an unverified configured UID.
 
-## Latest run — 2026-09-22 — datasource UID field-confusion regression
+## Latest run — 2026-09-22 — field-aware datasource identity implementation
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_semantic_acceptance.py`, concentrating on the configured datasource identity gate added in the preceding run.
+Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_semantic_acceptance.py`, focusing on the red name-vs-UID field-confusion regression from the preceding run.
 
 ### Finding
 
-The new identity gate compares the configured UID as an exact string, which correctly rejects substring collisions, but `_value_contains_string()` searches every value in the decoded datasource response. Therefore an unrelated datasource such as `{\"uid\":\"other-prometheus\",\"name\":\"stageguard-prometheus\"}` can still satisfy the identity gate because its `name` equals the configured UID. This is a semantic field-confusion bug: release acceptance must prove a matching `uid` field, not merely find the UID string somewhere in the payload.
+The existing `_value_contains_string()` matcher is not schema-aware: after decoding MCP JSON text it recursively searches every dictionary value. An unrelated datasource can therefore pass the configured-UID gate when its `name` equals the expected UID. Datasource identity must be established only by a `uid` field.
 
 ### Exact changes made
 
-- Added `test_datasource_acceptance_does_not_confuse_name_with_uid` to `runtime/tests/test_mcp_smoke_semantic_acceptance.py`.
-- The regression constructs an official-style `list_datasources` payload whose datasource name equals the configured UID while its actual UID is different, and requires `_assert_datasource_present()` to reject it.
-- Test commit: `d2b2131f4cd66bffa1d084f3ce1941193fad132e`.
-- Deliberately did not weaken or rewrite the test to fit the current implementation; this is a red regression contract exposing a real release-smoke false positive.
+- Added `runtime/mcp_datasource_identity.py` with `contains_datasource_uid()`.
+- The matcher accepts identity only from an exact string value attached to a `uid` key; plain strings, datasource names, numeric UID lookalikes, and substring collisions do not qualify.
+- MCP text content that looks like JSON is decoded before traversal so the matcher remains compatible with official MCP text serialization.
+- Traversal is bounded to 16 levels and handles both JSON-text and structured MCP content.
+- Added `runtime/tests/test_mcp_datasource_identity.py` covering official-style JSON text, name-vs-UID confusion, plain-string rejection, substring collisions, structured content, non-string UID rejection, nested legitimate UID discovery, and depth bounding.
+- Implementation commit: `5e3f2f41f2203e69dd28df1b5d6007683a8d757a`.
+- Test commit: `112f6738d04f405dcb06026e37732dd17ef930f1`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the regression-test update.
-- Static inspection shows the current `_value_contains_string()` recursively examines all dictionary values, so the new regression is expected to fail until the implementation is made field-aware.
-- This connector environment does not expose an executable repository checkout, so the test was not executed and no green result is claimed.
+- GitHub accepted the implementation and test files.
+- Static inspection confirms the new matcher is field-aware and bounded.
+- This connector environment does not expose an executable repository checkout, so the new tests were not executed and no green result is claimed.
+- The existing `runtime/mcp_smoke.py` has not yet been wired to call the new matcher; therefore the preceding red integration regression remains intentionally unresolved at the release-smoke boundary.
 
 ### Decisions
 
-1. Datasource identity must be schema-aware: only a `uid` field may establish datasource identity.
-2. Keep bounded traversal and JSON-text decoding because official MCP may serialize datasource results as text, but decoded structures must preserve field semantics.
-3. Do not move on to query-result sample validation while the datasource identity gate still has this false-positive path.
-4. Keep the new regression red until the implementation is fixed; do not report connector-authored tests as passing without execution.
+1. Keep datasource identity parsing isolated and independently testable rather than expanding the already security-sensitive stdio client logic.
+2. Only a `uid` field may establish datasource identity; names and arbitrary text are never identity evidence.
+3. Preserve bounded JSON decoding because official MCP may serialize datasource results inside text content.
+4. Do not claim the field-confusion bug fixed end-to-end until `_assert_datasource_present()` uses the new matcher and the semantic integration regression is executable-green.
 
 ### Blockers / unknowns
 
-- `_assert_datasource_present()` still needs a field-aware bounded matcher that decodes JSON text but accepts the configured value only when it is associated with a `uid` key.
-- The semantic MCP smoke tests still need execution in a checkout.
+- `runtime/mcp_smoke.py` still needs to import `contains_datasource_uid` and replace `_value_contains_string()` at the datasource gate; the connector's whole-file write API makes a surgical one-line patch awkward, so this run avoided a risky wholesale rewrite of the stdio client.
+- The semantic MCP smoke tests and new matcher tests still need execution in a checkout.
 - `docker compose config`, Grafana `13.2.1` health observation, Viewer-token bootstrap, and hardened MCP `1.4.1` smoke still require an executable Docker checkout.
 - Accumulated lifecycle/security/MCP tests need Linux and Windows execution.
 - Historical full-suite failures/errors still need classification.
@@ -79,4 +83,4 @@ The new identity gate compares the configured UID as an exact string, which corr
 
 ## Single best next step
 
-Replace the generic `_value_contains_string()` datasource identity check with bounded, JSON-decoding, field-aware UID matching; make the new name-vs-UID regression pass alongside the existing exact-UID and structured-content cases. Then execute the semantic MCP suite and the pinned Grafana `13.2.1` + MCP `1.4.1` acceptance gate before tightening Prometheus sample semantics.
+Wire `runtime/mcp_smoke.py::_assert_datasource_present()` to `contains_datasource_uid()` and remove the generic `_value_contains_string()` identity path, then run both datasource-identity and semantic MCP suites. After that, execute the pinned Grafana `13.2.1` + MCP `1.4.1` acceptance gate before tightening Prometheus sample semantics.
