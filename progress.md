@@ -17,6 +17,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - MCP startup waits for Grafana HTTP readiness; local rehearsals establish a healthy baseline before fault injection.
 - MCP release acceptance requires meaningful evidence payload and proof that the exact configured Grafana datasource UID is visible before querying it.
 - Prometheus release acceptance requires a genuine vector/matrix series sample under the official query result `data` field; warnings, hints, metadata, scalars, nested lookalikes, unbound sample pairs, and merely non-empty MCP content do not qualify.
+- Prometheus evidence can be bound to expected metric labels so an unrelated valid series cannot prove the requested StageGuard series.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -37,37 +38,36 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added a schema-aware datasource identity parser that accepts only exact string-valued `uid` fields and wired the release smoke to it.
 - Added bounded Prometheus evidence parsing aligned to the pinned official `mcp-grafana v1.4.1` `QueryPrometheusResult` contract and wired it into the production release smoke.
 - Hardened Prometheus evidence from generic numeric pairs to series-bound samples, then to the exact direct vector/matrix JSON shape emitted by the pinned upstream `model.Value` contract.
+- Added optional expected-label binding so release evidence can prove the requested series rather than merely any valid Prometheus series.
 
-## Latest run — 2026-09-22 — pinned Prometheus model.Value shape enforced
+## Latest run — 2026-09-22 — Prometheus evidence identity binding
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_prometheus_evidence.py`, its focused regression suite, and the exact official `grafana/mcp-grafana` v1.4.1 `tools/prometheus.go` source. Upstream defines `QueryPrometheusResult.Data` as `prometheus/common/model.Value`; StageGuard's probe expects a metric series, so vector/matrix data is a direct JSON list of series objects. The previous parser still recursively searched arbitrary descendants below `data`, leaving a false-positive shape that the pinned upstream contract cannot emit.
+Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_prometheus_evidence.py`, its focused regression suite, and the production `runtime/mcp_smoke.py` call site. The production gate proves that a genuine vector/matrix sample came back, but the semantic parser previously accepted any valid series in the result. That leaves a correctness gap: an unrelated series could satisfy the evidence gate even when the smoke query is intended to prove a specific StageGuard production/uplink series.
 
 ### Exact changes made
 
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `08895531a051b03258ba297b7ea86a8f068e2676`.
-- Replaced recursive traversal below `data` with direct vector/matrix series validation: `data` must be a list and a qualifying direct child must have a string-to-string `metric` map plus a finite `value` sample or at least one finite `values` sample.
-- Kept bounded recursive traversal only for MCP transport/envelope discovery before reaching `QueryPrometheusResult`.
-- Explicitly reject Prometheus scalar/string model values as StageGuard release evidence because the smoke probe is intended to prove a named telemetry series, not merely any valid PromQL model value.
-- Preserved finite-value checks, zero-valued samples, JSON-text/structured MCP transport support, payload-size bound, and nesting-depth bound.
-- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `a494c334fd1443d3cfe6ff5d578151564c1a9ebb`.
-- Added regressions rejecting a nested series-shaped lookalike below `data` and a valid Prometheus scalar sample as insufficient StageGuard series evidence.
-- Reviewed current official MCP material. A March 6, 2026 upstream issue documents `query_prometheus` failures for Grafana Prometheus datasources configured with `httpMethod: GET`; StageGuard's live acceptance should explicitly confirm its provisioned datasource method/path while validating v1.4.1.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `e9dd57114a40a5419a8c3dcb1c533f0a9006d0e9`.
+- Added optional `expected_labels` binding to `contains_prometheus_sample`; every expected key/value must occur on the same metric series that carries the accepted finite sample. Extra labels remain allowed.
+- Invalid expected-label key/value types fail closed instead of silently disabling identity binding.
+- Preserved the pinned v1.4.1 direct vector/matrix shape, finite sample checks, zero-valued samples, JSON-text/structured MCP support, payload-size bound, and nesting-depth bound.
+- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `7d718740496239d9c2e8ee6da4620f4296e3f598`.
+- Added regressions for successful subset-label binding, rejection of an unrelated valid series, requirement that identity and sample occur on the same series, and invalid expected-label types.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the implementation and regression commits.
-- Source-level review is now aligned to the exact pinned v1.4.1 `QueryPrometheusResult` declaration rather than a speculative response shape.
+- GitHub accepted both implementation and regression commits.
+- Connector-level source inspection confirms the API is backward-compatible when `expected_labels` is omitted.
 - This connector environment does not expose an executable repository checkout, so pytest and Docker acceptance were not executed; no new green runtime claim is made.
 
 ### Decisions
 
-1. Treat the pinned upstream Go type as the release-gate contract: tolerate MCP transport wrappers, but do not tolerate arbitrary structure inside `QueryPrometheusResult.data`.
-2. Require series evidence rather than accepting scalar/string PromQL results because StageGuard's smoke is proving that its telemetry series is observable through Grafana.
-3. Continue allowing an empty metric map because unlabeled Prometheus series are valid; require all present labels to be strings.
-4. Avoid further speculative parser broadening before live capture of the pinned MCP response.
+1. Series identity is part of evidence correctness, not just sample-shape correctness.
+2. Expected labels are an optional subset match so real deployments may retain additional labels such as region, cluster, or instance without weakening the gate.
+3. Keep the parser generic and modular; do not hard-code StageGuard production IDs into the evidence library.
+4. Do not yet change the production smoke call site until expected-label configuration is introduced cleanly and tested, rather than attempting to infer labels from arbitrary PromQL.
 
 ### Blockers / unknowns
 
@@ -75,8 +75,9 @@ Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_pr
 - `docker compose config`, Grafana `13.2.1` health observation, Viewer-token bootstrap, and hardened MCP `1.4.1` smoke require an executable Docker checkout.
 - The live `query_prometheus` payload must be captured and sanitized to confirm the direct vector/matrix representation through the actual MCP transport.
 - The provisioned Prometheus datasource HTTP method should be observed during live acceptance because upstream mcp-grafana has had method-sensitive query behavior.
+- Production `mcp_smoke.py` still needs an explicit, bounded expected-label configuration before it can enforce the new identity-aware parser path.
 - Accumulated lifecycle/security/MCP tests need Linux and Windows execution; historical full-suite failures/errors still need classification.
 
 ## Single best next step
 
-Run the focused MCP suites and Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance in an executable checkout. Capture the sanitized live `query_prometheus` response and datasource configuration, confirm the direct vector/matrix series shape and query transport method, then classify the remaining full-suite failures before expanding release logic.
+Add a bounded `STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS` configuration contract to `mcp_smoke.py` (with safe JSON parsing and StageGuard defaults), pass it to `contains_prometheus_sample`, and add smoke-level regressions proving that an unrelated valid series fails release acceptance. Then run the focused MCP suites and Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance in an executable checkout.
