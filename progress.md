@@ -13,6 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Operator-visible smoke configuration rejects terminal/log-spoofing controls and bidi characters.
 - Raw PromQL/evidence/sample payloads must not be emitted by the normal release-smoke success report.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before it is operator-visible.
+- Untrusted extension/container subclasses are opaque to MCP diagnostics; sanitizer traversal is limited to exact JSON-like built-ins so attacker hooks cannot execute.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -26,41 +27,37 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 ## Recent completed work
 - Hardened lifecycle startup/cleanup, Docker timeouts, teardown verification, loopback publishing, and MCP container privileges/resources.
 - Pinned Grafana `13.2.1` and official Grafana MCP `1.4.1`; release smoke verifies read-only tools and exact datasource UID.
-- Added bounded semantic Prometheus evidence parsing aligned to official v1.4.1 `QueryPrometheusResult`, rejecting warnings/hints/metadata/scalars/nested lookalikes/non-finite samples.
-- Added expected-label binding and bounded `STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS` parsing with deterministic demo defaults.
+- Added bounded semantic Prometheus evidence parsing aligned to official v1.4.1 `QueryPrometheusResult`, expected-label binding, and bounded smoke configuration.
 - Wired expected-series binding into the production MCP release smoke and protected it with a credential-free AST invariant.
-- Hardened expected-label configuration against C0/C1 controls, Unicode line/paragraph separators, and bidi/isolate controls while retaining safe printable Unicode values.
+- Hardened expected-label configuration against terminal/log spoofing while retaining safe printable Unicode.
 - Added and wired a bounded safe-report builder so release success output has no API for raw PromQL, MCP evidence content, or sample values.
-- Added a standalone secret-aware MCP diagnostic sanitizer plus credential-free regression coverage for recursive sensitive fields, inline credentials, auth URLs, bounds, and hostile object repr behavior.
-- Wired that sanitizer into production JSON-RPC errors, malformed JSON-RPC results, and MCP tool `isError` content; removed the legacy raw-`repr` diagnostic helper and added a source invariant guarding the boundary.
-- Hardened MCP failure diagnostics against terminal/log spoofing and attacker-controlled mapping-key `__str__`/`__repr__` execution while preserving safe printable Unicode.
+- Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, with credential redaction, output bounds, display-control escaping, and hostile-object protection.
+- Hardened diagnostics so arbitrary mapping keys and extension-defined container/scalar subclasses cannot execute attacker-controlled stringification, iteration, slicing, length, or mapping hooks.
 
-## Latest run — 2026-09-23 — MCP diagnostic display-safety hardening
+## Latest run — 2026-09-23 — MCP diagnostic hostile-container hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and its behavioral tests. The production failure paths already crossed `safe_diagnostic()`, but two residual issues remained inside that boundary: arbitrary mapping keys were converted with `str(key)`, allowing attacker-controlled `__str__` execution, and upstream strings could retain terminal controls or Unicode formatting/bidi controls that can spoof multiline CI/operator output.
+Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The sanitizer no longer stringified arbitrary mapping keys, but it still used `isinstance()` for dict/list/tuple/string/numeric values. A malicious subclass could therefore enter a trusted traversal branch and execute overridden `items()`, slicing, `len()`, or related hooks. Normal `json.loads` MCP data is composed of exact built-ins, so there is no operational need to traverse extension-defined subclasses.
 
 ### Exact changes made
-- Updated `runtime/mcp_diagnostics.py` in commit `fc0ce2bfd8da955ff1afe5db6d858f1c5d2648c9`.
-- Added display-safe escaping for Unicode categories `Cc`, `Cf`, `Cs`, `Zl`, and `Zp`; this covers C0/C1 controls, ESC/newlines, bidi/isolate formatting controls, surrogates, and Unicode line/paragraph separators while preserving ordinary printable Unicode.
-- Added `_safe_key()` so string keys use the normal redaction/display-safe path, primitive scalar keys are rendered safely, and arbitrary object keys are represented only by their type without invoking attacker-controlled `__str__` or `__repr__`.
-- Kept credential redaction before display escaping so existing Bearer/Basic/assignment/URL credential patterns continue to match their original text.
-- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `f1b8f428ea542fda35ed72da8cdf823c3450817e`.
-- Added regressions for hostile mapping keys, CR/LF/ESC and Unicode bidi/isolate controls, and preservation of safe printable Unicode.
+- Updated `runtime/mcp_diagnostics.py` in commit `4cf7db2df0093b74b567631a92e22fd74318b6f0`.
+- Restricted structural traversal and scalar handling to exact built-in JSON-like types. Dict/list/tuple/str/int/float/bool subclasses are now treated as opaque values and represented only by type.
+- Restricted sensitive-key inspection and primitive-key stringification to exact built-ins for the same reason.
+- Preserved recursive secret redaction, inline credential redaction, display-control escaping, depth/item/string/final-output bounds, and useful plain-JSON error context.
+- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `59441eade4ba0cafab1454dfba3aec056e96d2f1`.
+- Added regressions proving hostile dict/list subclasses cannot execute traversal/length/slicing/repr hooks and hostile int/str subclasses cannot execute stringification/repr hooks.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression-test commits.
-- Source inspection confirms arbitrary mapping-key rendering no longer calls `str()`/`repr()` and attacker-controlled diagnostic strings cross display-control neutralization after credential redaction.
+- Source inspection confirms traversal is now restricted to exact built-ins produced by normal JSON decoding; unknown/subclass values are reduced to a type marker before final built-in `repr()`.
 - This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Escape rather than delete dangerous display characters so diagnostics retain forensic evidence that a control character was present without allowing it to affect terminal rendering.
-2. Preserve printable Unicode; an ASCII-only diagnostic policy would unnecessarily damage legitimate datasource/error context.
-3. Treat arbitrary object keys like arbitrary object values: expose only the Python type, never execute extension-defined stringification hooks.
-4. Keep secret redaction before control escaping to avoid control normalization accidentally weakening credential-pattern matching.
-5. Avoid GitHub Actions execution because local validation is preferred and historical Actions storage pressure exists.
+1. Prefer exact built-in traversal over attempting to safely introspect arbitrary Python extension types; MCP JSON-RPC does not require custom container subclasses.
+2. Keep opaque type markers useful for triage while refusing to execute extension-defined hooks.
+3. Do not trigger GitHub Actions solely for connector-authored hardening because local validation is preferred and historical Actions storage pressure exists.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout.
