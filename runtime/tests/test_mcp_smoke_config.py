@@ -26,6 +26,12 @@ def test_custom_expected_labels_are_parsed() -> None:
     }
 
 
+def test_printable_unicode_label_value_is_allowed() -> None:
+    assert expected_labels(json.dumps({"production_id": "मुंबई"})) == {
+        "production_id": "मुंबई"
+    }
+
+
 @pytest.mark.parametrize("raw", ["[]", "null", '"labels"', "{}"])
 def test_expected_labels_require_nonempty_object(raw: str) -> None:
     with pytest.raises(SmokeConfigError):
@@ -45,6 +51,17 @@ def test_expected_labels_reject_non_string_values() -> None:
 def test_expected_labels_reject_control_characters() -> None:
     with pytest.raises(SmokeConfigError):
         expected_labels(json.dumps({"production_id": "prod\nother"}))
+
+
+@pytest.mark.parametrize("unsafe", ["\u2028", "\u202e", "\u2066", "\u0085"])
+def test_expected_labels_reject_unicode_log_spoofing_characters(unsafe: str) -> None:
+    with pytest.raises(SmokeConfigError):
+        expected_labels(json.dumps({"production_id": f"prod{unsafe}other"}))
+
+
+def test_expected_labels_reject_unsafe_label_name() -> None:
+    with pytest.raises(SmokeConfigError):
+        expected_labels(json.dumps({"production\u202eid": "prod"}))
 
 
 def test_expected_labels_reject_too_many_labels() -> None:
