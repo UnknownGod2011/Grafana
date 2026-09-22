@@ -109,6 +109,37 @@ def test_scalar_subclasses_are_opaque_and_do_not_execute_stringification():
     assert safe_diagnostic(DangerousStr("Bearer must-not-leak")) == "'<DangerousStr>'"
 
 
+def test_opaque_type_names_are_display_safe_and_bounded():
+    class HostileTypeName:
+        pass
+
+    HostileTypeName.__name__ = "evil\n\x1b[31m\u202espoof-" + ("x" * 500)
+    rendered = safe_diagnostic(HostileTypeName())
+    assert "\n" not in rendered
+    assert "\x1b" not in rendered
+    assert "\u202e" not in rendered
+    assert "\\u000a" in rendered
+    assert "\\u001b" in rendered
+    assert "\\u202e" in rendered
+    assert "..." in rendered
+    assert len(rendered) < 180
+
+
+def test_opaque_mapping_key_type_names_are_display_safe_and_bounded():
+    class HostileKey:
+        pass
+
+    HostileKey.__name__ = "key\r\n\u2066spoof-" + ("y" * 500)
+    rendered = safe_diagnostic({HostileKey(): "datasource unavailable"})
+    assert "\n" not in rendered
+    assert "\r" not in rendered
+    assert "\u2066" not in rendered
+    assert "\\u000d" in rendered
+    assert "\\u000a" in rendered
+    assert "\\u2066" in rendered
+    assert "datasource unavailable" in rendered
+
+
 def test_terminal_and_unicode_format_controls_are_neutralized():
     rendered = safe_diagnostic({"message\nspoof": "first\r\nsecond\x1b[31m\u202ehidden\u2066text"})
     assert "\n" not in rendered
