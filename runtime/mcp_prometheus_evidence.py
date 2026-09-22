@@ -2,8 +2,10 @@
 
 The parser is deliberately transport-tolerant: MCP content may contain JSON serialized
 inside text blocks or already-structured objects. Acceptance follows the pinned official
-mcp-grafana QueryPrometheusResult contract: samples must live under its ``data`` field
-and belong to a Prometheus series object with a metric label map.
+mcp-grafana v1.4.1 QueryPrometheusResult contract: ``data`` is a Prometheus
+``model.Value``. StageGuard's release probe intentionally accepts only vector/matrix
+series, represented as a top-level list of objects with a metric label map and value(s).
+Scalar/string model values are not sufficient evidence for the StageGuard series probe.
 """
 from __future__ import annotations
 
@@ -48,37 +50,36 @@ def _decode_json_text(value: str) -> Any | None:
         return None
 
 
-def _contains_sample_in_data(value: Any, *, depth: int) -> bool:
-    """Inspect a QueryPrometheusResult.data subtree for real series-shaped samples."""
-    if depth > MAX_EVIDENCE_NESTING_DEPTH:
-        return False
-    if isinstance(value, list):
-        return any(_contains_sample_in_data(item, depth=depth + 1) for item in value)
-    if not isinstance(value, dict):
+def _series_has_sample(value: Any) -> bool:
+    """Validate one Prometheus vector/matrix series object."""
+    if not isinstance(value, dict) or not _is_metric_map(value.get("metric")):
         return False
 
-    # Prometheus vector/matrix entries carry a metric label map alongside value(s).
-    # Requiring that sibling prevents arbitrary nested objects under `data` from
-    # masquerading as telemetry merely because they contain a numeric `value` pair.
-    if _is_metric_map(value.get("metric")):
-        instant = value.get("value")
-        if _is_sample_pair(instant):
-            return True
+    if _is_sample_pair(value.get("value")):
+        return True
 
-        samples = value.get("values")
-        if isinstance(samples, list) and any(_is_sample_pair(sample) for sample in samples):
-            return True
+    samples = value.get("values")
+    return isinstance(samples, list) and any(_is_sample_pair(sample) for sample in samples)
 
-    return any(_contains_sample_in_data(child, depth=depth + 1) for child in value.values())
+
+def _data_contains_series_sample(value: Any) -> bool:
+    """Accept only the direct JSON shape of Prometheus vector/matrix model.Value.
+
+    In mcp-grafana v1.4.1 QueryPrometheusResult.Data is prometheus/common/model.Value.
+    Vector and matrix values marshal as a top-level JSON array of series. Recursing
+    through arbitrary objects below ``data`` would accept shapes the pinned upstream
+    contract cannot produce and would weaken this release gate.
+    """
+    return isinstance(value, list) and any(_series_has_sample(series) for series in value)
 
 
 def contains_prometheus_sample(value: Any, *, depth: int = 0) -> bool:
-    """Return True only for a sample in an official Grafana MCP query envelope.
+    """Return True only for a series sample in an official Grafana MCP query envelope.
 
     mcp-grafana v1.4.1 returns ``QueryPrometheusResult`` with ``data``, optional
     ``hints``, and optional ``warnings``. MCP may serialize that object into a text
-    content block or expose structured content. Only series-shaped descendants of
-    ``data`` can establish telemetry evidence; sample-looking values elsewhere cannot.
+    content block or expose structured content. Transport/envelope traversal remains
+    bounded, but telemetry itself must have the direct vector/matrix shape under data.
     """
     if depth > MAX_EVIDENCE_NESTING_DEPTH:
         return False
@@ -90,9 +91,9 @@ def contains_prometheus_sample(value: Any, *, depth: int = 0) -> bool:
     if not isinstance(value, dict):
         return False
 
-    if "data" in value and _contains_sample_in_data(value["data"], depth=depth + 1):
+    if "data" in value and _data_contains_series_sample(value["data"]):
         return True
 
-    # Traverse transport/envelope objects to locate QueryPrometheusResult, but never
-    # treat arbitrary value/values fields outside its data subtree as evidence.
+    # Traverse only MCP transport/envelope objects to locate QueryPrometheusResult.
+    # Once `data` is reached, acceptance is deliberately non-recursive.
     return any(contains_prometheus_sample(child, depth=depth + 1) for child in value.values())
