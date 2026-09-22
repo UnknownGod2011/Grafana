@@ -16,7 +16,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Local Grafana MCP is opt-in/on-demand stdio, file-secret-backed, read-only, capability-free, no-new-privileges, and resource/result bounded.
 - MCP startup waits for Grafana HTTP readiness; local rehearsals establish a healthy baseline before fault injection.
 - MCP release acceptance requires meaningful evidence payload and proof that the exact configured Grafana datasource UID is visible before querying it.
-- Prometheus release acceptance additionally requires a genuine sample under the official query result `data` field; warnings, hints, metadata, and merely non-empty MCP content do not qualify.
+- Prometheus release acceptance additionally requires a genuine series-shaped sample under the official query result `data` field; warnings, hints, metadata, unbound sample pairs, and merely non-empty MCP content do not qualify.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -35,44 +35,45 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added Grafana readiness gating with `service_healthy`; readiness uses the official MCP integration convention for pinned Grafana `13.2.1`.
 - Hardened MCP evidence acceptance from envelope/content presence to bounded recursive meaningful-payload validation.
 - Added a schema-aware datasource identity parser that accepts only exact string-valued `uid` fields and wired the release smoke to it.
-- Added bounded Prometheus evidence parsing aligned to the pinned official `mcp-grafana v1.4.1` `QueryPrometheusResult` contract: genuine telemetry must be under `data`.
-- Wired the semantic Prometheus parser into the production MCP release smoke, closing the gap where warnings/hints could satisfy generic non-empty-content validation.
+- Added bounded Prometheus evidence parsing aligned to the pinned official `mcp-grafana v1.4.1` `QueryPrometheusResult` contract and wired it into the production release smoke.
+- Hardened Prometheus semantic evidence so a qualifying `value`/`values` sample must belong to a Prometheus series object carrying a string-to-string `metric` label map.
 
-## Latest run — 2026-09-22 — production Prometheus semantic gate wired
+## Latest run — 2026-09-22 — Prometheus series identity hardened
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py` and confirmed the red regression from the prior run described a real production gap: `query_prometheus` ended with `_assert_tool_result(...)` and never invoked `contains_prometheus_sample`, so valid MCP content without telemetry could still reach PASS.
+Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_prometheus_evidence.py` and its focused regression suite. Found a remaining false-positive path: once traversal entered a legitimate top-level `data` subtree, any nested dictionary containing a numeric `value` or `values` pair could qualify, even when it was arbitrary metadata rather than a Prometheus vector/matrix series.
 
 ### Exact changes made
 
-- Updated `runtime/mcp_smoke.py` in commit `2232b3c3ea6db3ae488e27e45b6b0fa7863144da`.
-- Imported `contains_prometheus_sample` from `mcp_prometheus_evidence`.
-- After generic `_assert_tool_result("query_prometheus", query_result)` validation, the release smoke now evaluates `contains_prometheus_sample(query_result.get("content"))` and raises `McpError` when no genuine sample is present.
-- Updated PASS wording so a successful smoke explicitly means a genuine Prometheus telemetry sample was observed through Grafana, rather than merely non-empty evidence content.
-- Preserved the existing ordering: protocol negotiation -> explicit read-only tool surface -> exact datasource UID discovery -> query execution -> generic MCP validity -> semantic Prometheus sample gate.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `51e46348e20c4de0b1bda2abbe76b29194a74f37`.
+- Added `_is_metric_map()` and now require a qualifying sample to be a sibling of a Prometheus `metric` label map.
+- Require metric label keys and values to be strings, matching the Prometheus series-label representation while allowing the valid empty label map.
+- Preserved finite-value checks, zero-valued samples, JSON-text/structured MCP transport support, payload-size bound, and nesting-depth bound.
+- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `68a0fba71300b66c3703a8cca1aa612bcd497c3b`.
+- Added regressions for sample fields without metric identity, nested sample lookalikes under `data`, and non-string metric labels; updated positive fixtures to be series-shaped.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted the production integration commit.
-- Static inspection shows the previously added AST regression's required import and fail-closed semantic branch are now present in `main()`.
+- GitHub accepted both implementation and regression commits.
+- Static review confirms positive instant/range/zero/structured cases now carry metric identity and negative cases exercise the newly closed false-positive path.
 - This connector environment does not expose an executable repository checkout, so pytest and Docker acceptance were not executed; no new green runtime claim is made.
 
 ### Decisions
 
-1. Keep generic MCP validity as a prerequisite rather than replacing it with semantic parsing; malformed/error responses should fail before telemetry interpretation.
-2. Fail closed when the official Prometheus query response contains warnings, hints, or other meaningful content but no qualifying sample.
-3. Keep the semantic gate immediately after query-result envelope validation so PASS cannot be emitted without telemetry evidence.
-4. Do not broaden accepted Prometheus shapes until justified by the pinned official MCP contract or a captured live fixture.
+1. Treat a numeric pair alone as insufficient evidence, even inside `data`; bind samples to Prometheus series identity.
+2. Allow an empty metric map because unlabeled Prometheus series are valid, but reject non-string label values as malformed evidence.
+3. Keep bounded recursive traversal inside `data` for transport/model compatibility rather than assuming a single list depth.
+4. Do not add more speculative response shapes before capturing the pinned official MCP response live.
 
 ### Blockers / unknowns
 
-- The focused MCP suites need execution in a checkout, including the previously red AST regression that should now become green.
+- Focused MCP suites still require execution in a checkout.
 - `docker compose config`, Grafana `13.2.1` health observation, Viewer-token bootstrap, and hardened MCP `1.4.1` smoke require an executable Docker checkout.
-- Accumulated lifecycle/security/MCP tests need Linux and Windows execution.
-- Historical full-suite failures/errors still need classification.
+- The live `query_prometheus` payload must be captured and sanitized to confirm the stricter series identity gate matches the pinned upstream representation.
+- Accumulated lifecycle/security/MCP tests need Linux and Windows execution; historical full-suite failures/errors still need classification.
 
 ## Single best next step
 
-Run the focused MCP suites and the Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance path in an executable checkout. Capture the live `query_prometheus` response as a sanitized regression fixture, verify the semantic parser accepts the real sample while rejecting warnings/hints-only responses, then classify any failures before adding further release-path logic.
+Run the focused MCP suites and Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance in an executable checkout. Capture the live `query_prometheus` response as a sanitized fixture and confirm its sample carries the expected `metric` sibling; if it does, retain this stricter gate and then classify remaining full-suite failures before expanding release logic.
