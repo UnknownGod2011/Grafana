@@ -18,6 +18,45 @@ def test_zero_sample_is_valid_evidence() -> None:
     assert contains_prometheus_sample({"data": [{"metric": {}, "value": [1789990000, "0"]}]})
 
 
+def test_expected_labels_bind_evidence_to_requested_series() -> None:
+    payload = {
+        "data": [
+            {"metric": {"production_id": "broadcast-beta", "uplink": "uplink-b"}, "value": [1789990000, "9"]},
+            {"metric": {"production_id": "broadcast-alpha", "uplink": "uplink-b", "region": "west"}, "value": [1789990000, "0.2"]},
+        ]
+    }
+    assert contains_prometheus_sample(
+        payload,
+        expected_labels={"production_id": "broadcast-alpha", "uplink": "uplink-b"},
+    )
+
+
+def test_expected_labels_reject_unrelated_series_even_with_valid_sample() -> None:
+    payload = {"data": [{"metric": {"production_id": "broadcast-beta", "uplink": "uplink-b"}, "value": [1789990000, "0.2"]}]}
+    assert not contains_prometheus_sample(
+        payload,
+        expected_labels={"production_id": "broadcast-alpha", "uplink": "uplink-b"},
+    )
+
+
+def test_expected_labels_must_match_same_series_that_has_sample() -> None:
+    payload = {
+        "data": [
+            {"metric": {"production_id": "broadcast-alpha", "uplink": "uplink-b"}},
+            {"metric": {"production_id": "broadcast-beta", "uplink": "uplink-b"}, "value": [1789990000, "0.2"]},
+        ]
+    }
+    assert not contains_prometheus_sample(
+        payload,
+        expected_labels={"production_id": "broadcast-alpha", "uplink": "uplink-b"},
+    )
+
+
+def test_invalid_expected_label_types_fail_closed() -> None:
+    payload = {"data": [{"metric": {"production_id": "broadcast-alpha"}, "value": [1789990000, "0.2"]}]}
+    assert not contains_prometheus_sample(payload, expected_labels={"production_id": 7})  # type: ignore[dict-item]
+
+
 def test_rejects_metric_metadata_without_sample() -> None:
     assert not contains_prometheus_sample({"data": [{"metric": {"production_id": "broadcast-alpha", "uplink": "uplink-b"}}]})
 
