@@ -1,8 +1,8 @@
 """Bounded semantic validation for Prometheus evidence returned through Grafana MCP.
 
 The parser is deliberately transport-tolerant: MCP content may contain JSON serialized
-inside text blocks or already-structured objects. Acceptance is intentionally narrow:
-a Prometheus-style sample must expose a finite timestamp and a finite numeric value.
+inside text blocks or already-structured objects. Acceptance follows the pinned official
+mcp-grafana QueryPrometheusResult contract: samples must live under its ``data`` field.
 """
 from __future__ import annotations
 
@@ -42,20 +42,12 @@ def _decode_json_text(value: str) -> Any | None:
         return None
 
 
-def contains_prometheus_sample(value: Any, *, depth: int = 0) -> bool:
-    """Return True only when bounded MCP evidence contains a real Prometheus sample.
-
-    Supported representations include standard Prometheus ``value`` and ``values``
-    fields, whether returned directly as structured MCP content or JSON-encoded text.
-    Arbitrary numeric pairs elsewhere do not qualify.
-    """
+def _contains_sample_in_data(value: Any, *, depth: int) -> bool:
+    """Inspect only a QueryPrometheusResult.data subtree for Prometheus samples."""
     if depth > MAX_EVIDENCE_NESTING_DEPTH:
         return False
-    if isinstance(value, str):
-        decoded = _decode_json_text(value)
-        return decoded is not None and contains_prometheus_sample(decoded, depth=depth + 1)
     if isinstance(value, list):
-        return any(contains_prometheus_sample(item, depth=depth + 1) for item in value)
+        return any(_contains_sample_in_data(item, depth=depth + 1) for item in value)
     if not isinstance(value, dict):
         return False
 
@@ -67,4 +59,30 @@ def contains_prometheus_sample(value: Any, *, depth: int = 0) -> bool:
     if isinstance(samples, list) and any(_is_sample_pair(sample) for sample in samples):
         return True
 
+    return any(_contains_sample_in_data(child, depth=depth + 1) for child in value.values())
+
+
+def contains_prometheus_sample(value: Any, *, depth: int = 0) -> bool:
+    """Return True only for a sample in an official Grafana MCP query envelope.
+
+    mcp-grafana v1.4.1 returns ``QueryPrometheusResult`` with ``data``, optional
+    ``hints``, and optional ``warnings``. MCP may serialize that object into a text
+    content block or expose structured content. Only descendants of ``data`` can
+    establish telemetry evidence; sample-looking values in hints/metadata cannot.
+    """
+    if depth > MAX_EVIDENCE_NESTING_DEPTH:
+        return False
+    if isinstance(value, str):
+        decoded = _decode_json_text(value)
+        return decoded is not None and contains_prometheus_sample(decoded, depth=depth + 1)
+    if isinstance(value, list):
+        return any(contains_prometheus_sample(item, depth=depth + 1) for item in value)
+    if not isinstance(value, dict):
+        return False
+
+    if "data" in value and _contains_sample_in_data(value["data"], depth=depth + 1):
+        return True
+
+    # Traverse transport/envelope objects to locate QueryPrometheusResult, but never
+    # treat arbitrary value/values fields outside its data subtree as evidence.
     return any(contains_prometheus_sample(child, depth=depth + 1) for child in value.values())
