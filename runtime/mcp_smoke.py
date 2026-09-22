@@ -14,6 +14,7 @@ from typing import Any
 
 from command_line import split_command
 from mcp_datasource_identity import contains_datasource_uid
+from mcp_diagnostics import safe_diagnostic
 from mcp_smoke_gate import PrometheusEvidenceError, assert_expected_prometheus_sample
 from mcp_smoke_reporting import SmokeReportError, build_safe_smoke_report
 
@@ -24,7 +25,6 @@ MAX_STDIO_LINE_CHARS = 1_048_576
 MAX_STDOUT_QUEUE_FRAMES = 16
 MAX_SERVER_INFO_FIELD_CHARS = 128
 MAX_TOOL_NAME_CHARS = 128
-MAX_DIAGNOSTIC_CHARS = 2048
 MAX_CONFIG_TEXT_CHARS = 512
 MAX_PAYLOAD_NESTING_DEPTH = 16
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
@@ -53,14 +53,6 @@ def _bounded_config_text(value: str, field: str) -> str:
     if len(value) > MAX_CONFIG_TEXT_CHARS or _contains_unsafe_display_char(value):
         raise McpError(f"{field} exceeds the bounded printable configuration contract")
     return value
-
-
-def _bounded_diagnostic(value: Any) -> str:
-    rendered = repr(value)
-    if len(rendered) <= MAX_DIAGNOSTIC_CHARS:
-        return rendered
-    omitted = len(rendered) - MAX_DIAGNOSTIC_CHARS
-    return f"{rendered[:MAX_DIAGNOSTIC_CHARS]}...<truncated {omitted} chars>"
 
 
 def _redacted_command(parts: list[str]) -> str:
@@ -210,10 +202,10 @@ class StdioClient:
             if message.get("id") != request_id:
                 raise McpError(f"MCP returned unexpected response id while waiting for {method}")
             if "error" in message:
-                raise McpError(f"{method} failed: {_bounded_diagnostic(message['error'])}")
+                raise McpError(f"{method} failed: {safe_diagnostic(message['error'])}")
             result = message.get("result")
             if not isinstance(result, dict):
-                raise McpError(f"{method} returned malformed result: {_bounded_diagnostic(result)}")
+                raise McpError(f"{method} returned malformed result: {safe_diagnostic(result)}")
             return result
 
     def close(self) -> None:
@@ -294,7 +286,7 @@ def _has_nonempty_content_payload(item: Any) -> bool:
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
     """Require an error-free MCP call that returned actual evidence content."""
     if result.get("isError"):
-        raise McpError(f"{name} returned isError=true: {_bounded_diagnostic(result.get('content'))}")
+        raise McpError(f"{name} returned isError=true: {safe_diagnostic(result.get('content'))}")
     content = result.get("content")
     if not isinstance(content, list) or not content:
         raise McpError(f"{name} returned no evidence content")
@@ -328,20 +320,11 @@ def main() -> None:
         query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
         _assert_tool_result("query_prometheus", query_result)
         try:
-            expected_series = assert_expected_prometheus_sample(
-                query_result.get("content"),
-                os.getenv("STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS"),
-            )
+            expected_series = assert_expected_prometheus_sample(query_result.get("content"), os.getenv("STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS"))
         except PrometheusEvidenceError as exc:
             raise McpError(str(exc)) from exc
         try:
-            report = build_safe_smoke_report(
-                server_info=initialized.get("serverInfo"),
-                protocol_version=initialized.get("protocolVersion"),
-                tools=list(tools),
-                datasource_uid=datasource_uid,
-                expected_series_labels=expected_series,
-            )
+            report = build_safe_smoke_report(server_info=initialized.get("serverInfo"), protocol_version=initialized.get("protocolVersion"), tools=list(tools), datasource_uid=datasource_uid, expected_series_labels=expected_series)
         except SmokeReportError as exc:
             raise McpError(f"unsafe MCP smoke report metadata: {exc}") from exc
         print(json.dumps(report, indent=2))
