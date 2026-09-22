@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from command_line import split_command
+from mcp_datasource_identity import contains_datasource_uid
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
@@ -299,34 +300,10 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
         raise McpError(f"{name} returned malformed or empty evidence content")
 
 
-def _value_contains_string(value: Any, expected: str, *, depth: int = 0) -> bool:
-    """Find an exact string in bounded structured content, decoding JSON text when possible."""
-    if depth > MAX_PAYLOAD_NESTING_DEPTH:
-        return False
-    if isinstance(value, str):
-        if value == expected:
-            return True
-        stripped = value.strip()
-        if not stripped or stripped[0] not in "[{\"":
-            return False
-        try:
-            decoded = json.loads(stripped)
-        except (json.JSONDecodeError, RecursionError):
-            return False
-        if decoded == value:
-            return False
-        return _value_contains_string(decoded, expected, depth=depth + 1)
-    if isinstance(value, dict):
-        return any(_value_contains_string(child, expected, depth=depth + 1) for child in value.values())
-    if isinstance(value, list):
-        return any(_value_contains_string(child, expected, depth=depth + 1) for child in value)
-    return False
-
-
 def _assert_datasource_present(result: dict[str, Any], datasource_uid: str) -> None:
     """Require list_datasources to prove that the exact configured datasource UID is visible."""
     _assert_tool_result("list_datasources", result)
-    if not _value_contains_string(result.get("content"), datasource_uid):
+    if not contains_datasource_uid(result.get("content"), datasource_uid):
         raise McpError(f"list_datasources did not return configured datasource UID {datasource_uid!r}")
 
 
