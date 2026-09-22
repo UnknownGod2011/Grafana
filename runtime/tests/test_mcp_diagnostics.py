@@ -52,6 +52,40 @@ def test_unknown_objects_do_not_execute_repr():
     assert safe_diagnostic(Dangerous()) == "'<Dangerous>'"
 
 
+def test_unknown_mapping_keys_do_not_execute_str_or_repr():
+    class DangerousKey:
+        def __hash__(self):
+            return 1
+
+        def __str__(self):
+            raise AssertionError("str must not be called")
+
+        def __repr__(self):
+            raise AssertionError("repr must not be called")
+
+    rendered = safe_diagnostic({DangerousKey(): "datasource unavailable"})
+    assert "<DangerousKey-key>" in rendered
+    assert "datasource unavailable" in rendered
+
+
+def test_terminal_and_unicode_format_controls_are_neutralized():
+    rendered = safe_diagnostic({"message\nspoof": "first\r\nsecond\x1b[31m\u202ehidden\u2066text"})
+    assert "\n" not in rendered
+    assert "\r" not in rendered
+    assert "\x1b" not in rendered
+    assert "\u202e" not in rendered
+    assert "\u2066" not in rendered
+    assert "\\u000a" in rendered
+    assert "\\u001b" in rendered
+    assert "\\u202e" in rendered
+    assert "\\u2066" in rendered
+
+
+def test_safe_printable_unicode_is_preserved():
+    rendered = safe_diagnostic({"message": "München 東京 unavailable"})
+    assert "München 東京 unavailable" in rendered
+
+
 def test_non_secret_operational_context_survives():
     rendered = safe_diagnostic({"code": -32000, "message": "datasource unavailable", "retryable": True})
     assert "-32000" in rendered
