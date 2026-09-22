@@ -39,9 +39,22 @@ def test_rejects_nested_sample_lookalike_under_data() -> None:
     assert not contains_prometheus_sample(payload)
 
 
+def test_rejects_nested_series_shaped_lookalike_under_data() -> None:
+    # QueryPrometheusResult.Data is model.Value. Vector/matrix JSON is a direct list;
+    # a nested series-shaped object is not a shape the pinned upstream contract emits.
+    payload = {"data": {"metadata": [{"metric": {}, "value": [1789990000, "0.2"]}]}}
+    assert not contains_prometheus_sample(payload)
+
+
 def test_rejects_non_string_metric_labels() -> None:
     payload = {"data": [{"metric": {"production_id": 7}, "value": [1789990000, "0.2"]}]}
     assert not contains_prometheus_sample(payload)
+
+
+def test_rejects_prometheus_scalar_as_stageguard_series_evidence() -> None:
+    # prometheus/common/model.Value can also be a Scalar, encoded as a sample pair.
+    # StageGuard probes a named metric series, so scalar output must fail closed.
+    assert not contains_prometheus_sample({"data": [1789990000, "0.2"]})
 
 
 def test_rejects_non_finite_sample_values() -> None:
