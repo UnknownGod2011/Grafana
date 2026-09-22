@@ -25,11 +25,15 @@ def test_successful_tool_call_with_empty_content_is_not_accepted_as_evidence() -
         [{"type": "text", "text": ""}],
         [{"type": "text", "text": "   "}],
         [{"type": "text", "annotations": {"audience": ["assistant"]}}],
+        [{"type": "resource", "resource": {}}],
+        [{"type": "resource", "resource": {"uri": "   "}}],
+        [{"type": "resource", "resource": {"contents": []}}],
+        [{"type": "resource", "resource": {"contents": [{"text": ""}]}}],
         ["not-an-mcp-content-object"],
     ],
 )
 def test_metadata_only_or_blank_content_is_not_accepted_as_evidence(content: list[object]) -> None:
-    """Content metadata without a payload must not satisfy release acceptance."""
+    """Content metadata or structurally non-empty containers without payload must fail closed."""
     with pytest.raises(McpError, match="content"):
         _assert_tool_result("query_prometheus", {"isError": False, "content": content})
 
@@ -54,4 +58,23 @@ def test_non_text_content_with_nonempty_payload_remains_format_tolerant() -> Non
     _assert_tool_result(
         "query_prometheus",
         {"isError": False, "content": [{"type": "resource", "resource": {"uri": "stageguard://evidence/1"}}]},
+    )
+
+
+def test_nested_resource_with_actual_text_payload_remains_acceptable() -> None:
+    _assert_tool_result(
+        "query_prometheus",
+        {
+            "isError": False,
+            "content": [
+                {
+                    "type": "resource",
+                    "resource": {
+                        "contents": [
+                            {"text": '[{"metric":{"production_id":"broadcast-alpha"},"value":[1,"0.2"]}]'}
+                        ]
+                    },
+                }
+            ],
+        },
     )
