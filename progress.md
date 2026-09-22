@@ -15,7 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Demo services without production authentication are loopback-only.
 - Local Grafana MCP is opt-in/on-demand stdio, file-secret-backed, read-only, capability-free, no-new-privileges, and resource/result bounded.
 - MCP startup waits for Grafana HTTP readiness; local rehearsals establish a healthy baseline before fault injection.
-- MCP release acceptance requires meaningful evidence payload, not merely a successful JSON-RPC/tool envelope, metadata, status flags, or structurally non-empty but blank nested containers.
+- MCP release acceptance requires meaningful evidence payload and proof that the exact configured Grafana datasource UID is visible before querying it.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -31,44 +31,49 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 
 - Hardened local lifecycle startup/cleanup, Docker timeout handling, all-state teardown verification, and loopback-only host publishing.
 - Pinned official Grafana MCP to `1.4.1`; disabled write/proxied tools; constrained tool groups, results, CPU/memory/PIDs, privileges, capabilities, root filesystem, transport, and token handling.
-- Added Grafana readiness gating with `service_healthy`; readiness uses the same `curl -sf http://localhost:3000/api/health` convention as the official MCP integration for pinned Grafana `13.2.1`.
+- Added Grafana readiness gating with `service_healthy`; readiness uses the official MCP integration convention for pinned Grafana `13.2.1`.
 - Added regression contracts for Compose exposure, MCP hardening/readiness, lifecycle behavior, incident rehearsal semantics, and semantic MCP smoke acceptance.
 - Corrected runtime docs to healthy-baseline -> explicit fault -> recovery and documented one-off stdio MCP lifecycle.
 - Hardened MCP evidence acceptance from envelope/content presence to bounded recursive meaningful-payload validation, including nested metadata and status-flag rejection.
+- Hardened MCP datasource discovery so a successful but unrelated `list_datasources` result cannot make the smoke proceed against an unverified configured UID.
 
-## Latest run — 2026-09-22 — nested MCP metadata/status hardening
+## Latest run — 2026-09-22 — configured datasource identity verification
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding on work. Inspected the repository tree, `runtime/mcp_smoke.py`, and `runtime/tests/test_mcp_smoke_semantic_acceptance.py`.
+Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py`, its semantic acceptance tests, and current upstream `grafana/mcp-grafana` datasource implementation.
 
 ### Finding
 
-The recursive MCP evidence validator introduced in the prior run still treated booleans as evidence and traversed metadata dictionaries without key awareness. Therefore payloads such as `{"resource":{"ok":true}}`, `{"resource":{"cached":false}}`, or nested `annotations`/`meta` objects could make the release smoke green despite carrying no telemetry or datasource evidence.
+The smoke required `list_datasources` to return meaningful content but never proved that the exact datasource subsequently passed to `query_prometheus` was actually present. A healthy Grafana containing only an unrelated datasource could therefore pass the discovery stage. Upstream `mcp-grafana` currently defines `list_datasources` specifically to discover datasource UIDs and its result summary includes `uid`, `name`, `type`, `id`, and `isDefault`, so StageGuard can safely make datasource identity part of release acceptance.
 
 ### Exact changes made
 
-- Added one shared `_CONTENT_METADATA_KEYS` set and apply it at every dictionary nesting level, not only at the outer MCP content object.
-- Boolean values no longer qualify as operational evidence. This prevents generic status/cache flags from satisfying the smoke.
-- Finite numeric values remain valid evidence so legitimate telemetry such as a zero-valued metric is not rejected.
-- Preserved bounded recursion and serialization tolerance for actual strings, numeric samples, resources, and structured evidence.
-- Expanded semantic regression coverage for nested `annotations`, `meta`, `_meta`, `ok=true`, `cached=false`, and positive numeric-zero telemetry.
-- Implementation commit: `f5042266c02dff548f6666bb6ab3d55d88e4f93e`.
-- Test commit: `5f096e6dd05822b1d6aa4eb6bd9693c2427ccc19`.
+- Added bounded `_value_contains_string()` traversal that decodes JSON text where possible and compares the configured UID as an exact string rather than accepting substring matches.
+- Added `_assert_datasource_present()` which first applies the existing semantic content checks and then requires the exact configured datasource UID to be represented in the MCP result.
+- Changed the smoke to verify datasource identity before invoking `query_prometheus`.
+- Updated the PASS contract to state that the configured datasource was resolved.
+- Added regressions for an unrelated datasource, a UID that only contains the expected UID as a substring, official-style JSON text containing the exact UID, and structured non-text content containing the exact UID.
+- Implementation commit: `9dfa5bbedfb3462efdccadc246fc8fc90ab86dfc`.
+- Test commit: `5f1737df5ca3c949df87ccd0cb8f317b674a7eaa`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
+
+### Research / attribution
+
+- Inspected the current official `grafana/mcp-grafana` `tools/datasources.go`. `list_datasources` is documented as the discovery mechanism for available datasource UIDs and returns a `ListDatasourcesResult` whose datasource summaries include the UID. This is the upstream contract used for the new identity assertion.
 
 ### Checks / results
 
-- GitHub accepted both implementation and regression-test updates.
+- GitHub accepted the implementation and regression-test updates.
 - This connector environment does not expose an executable repository checkout, so the tests were not executed here and are not recorded as green.
-- Static inspection confirms numeric zero remains accepted while boolean-only and nested metadata-only structures now fail closed.
+- Static inspection confirms UID matching is exact after JSON decoding; `stageguard-prometheus-copy` does not satisfy `stageguard-prometheus`.
 
 ### Decisions
 
-1. MCP metadata must remain metadata regardless of nesting depth; moving annotations/meta inside a resource cannot turn it into evidence.
-2. Generic booleans are status, not evidence. Numeric zero remains evidence because zero is a legitimate telemetry sample.
-3. Keep format tolerance until pinned MCP `1.4.1` is observed live; then prefer a query-specific sample assertion over further generic structural heuristics.
-4. Do not add noisy CI solely to validate connector-authored changes.
+1. Datasource discovery is now an identity gate, not a generic connectivity check.
+2. Keep serialization tolerance: official MCP may return JSON text today, but structured MCP content can be accepted without weakening exact UID matching.
+3. Do not attempt to infer the configured datasource from a name or type; StageGuard's query contract is UID-bound.
+4. Stop adding generic MCP payload heuristics after this boundary; the next semantic improvement should use the observed pinned `1.4.1` query result format.
 
 ### Blockers / unknowns
 
@@ -80,4 +85,4 @@ The recursive MCP evidence validator introduced in the prior run still treated b
 
 ## Single best next step
 
-Execute the semantic MCP contract tests and local Docker acceptance gate. Observe the real pinned MCP `1.4.1` `query_prometheus` payload through Grafana `13.2.1`; if its result representation is stable, replace generic payload acceptance for `query_prometheus` with a query-specific assertion that the requested StageGuard series contains at least one real sample.
+Execute the semantic MCP contract tests and local Docker acceptance gate. Observe the real pinned MCP `1.4.1` `query_prometheus` payload through Grafana `13.2.1`; if its result representation is stable, replace generic query-result payload acceptance with a query-specific assertion that the requested StageGuard series contains at least one real sample.
