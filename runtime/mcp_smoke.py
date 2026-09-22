@@ -23,6 +23,7 @@ MAX_SERVER_INFO_FIELD_CHARS = 128
 MAX_TOOL_NAME_CHARS = 128
 MAX_DIAGNOSTIC_CHARS = 2048
 MAX_CONFIG_TEXT_CHARS = 512
+MAX_PAYLOAD_NESTING_DEPTH = 16
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv("STAGEGUARD_MCP_SMOKE_QUERY", 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}')
 REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
@@ -263,18 +264,31 @@ def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
         raise McpError("MCP advertised tools without readOnlyHint=true while StageGuard is configured as an evidence-only plane: " f"{sorted(not_explicitly_read_only)}")
 
 
+def _has_meaningful_value(value: Any, *, depth: int = 0) -> bool:
+    """Return whether a bounded decoded JSON-like value contains operational payload."""
+    if depth > MAX_PAYLOAD_NESTING_DEPTH:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return not isinstance(value, float) or math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_has_meaningful_value(child, depth=depth + 1) for child in value.values())
+    if isinstance(value, list):
+        return any(_has_meaningful_value(child, depth=depth + 1) for child in value)
+    return False
+
+
 def _has_nonempty_content_payload(item: Any) -> bool:
-    """Accept only MCP content entries that carry a non-empty payload, not metadata alone."""
+    """Accept only MCP content entries that carry a meaningful payload, not metadata alone."""
     if not isinstance(item, dict):
         return False
     for key, value in item.items():
         if key in {"type", "mimeType", "annotations", "meta", "_meta"}:
             continue
-        if isinstance(value, str) and value.strip():
-            return True
-        if isinstance(value, (dict, list)) and value:
-            return True
-        if isinstance(value, (int, float, bool)):
+        if _has_meaningful_value(value):
             return True
     return False
 
