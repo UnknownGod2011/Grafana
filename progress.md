@@ -16,7 +16,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Local Grafana MCP is opt-in/on-demand stdio, file-secret-backed, read-only, capability-free, no-new-privileges, and resource/result bounded.
 - MCP startup waits for Grafana HTTP readiness; local rehearsals establish a healthy baseline before fault injection.
 - MCP release acceptance requires meaningful evidence payload and proof that the exact configured Grafana datasource UID is visible before querying it.
-- Prometheus sample semantics are parsed separately from generic MCP-envelope validity; arbitrary numbers or metadata do not count as telemetry.
+- Prometheus sample semantics are parsed separately from generic MCP-envelope validity; only samples under the official query result `data` field qualify as telemetry.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -35,47 +35,48 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added Grafana readiness gating with `service_healthy`; readiness uses the official MCP integration convention for pinned Grafana `13.2.1`.
 - Hardened MCP evidence acceptance from envelope/content presence to bounded recursive meaningful-payload validation.
 - Added a schema-aware datasource identity parser that accepts only exact string-valued `uid` fields and wired the release smoke to it.
-- Added a bounded Prometheus evidence parser that recognizes actual instant/range samples while rejecting metadata-only, arbitrary numeric-pair, boolean, non-finite, empty-result, and over-depth lookalikes.
+- Added bounded Prometheus evidence parsing and then aligned it to the pinned official `mcp-grafana v1.4.1` `QueryPrometheusResult` contract.
 
-## Latest run — 2026-09-22 — Prometheus sample semantics prepared
+## Latest run — 2026-09-22 — official query-result contract verified
 
 ### Inspected at start
 
-Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py` and `runtime/tests/test_mcp_smoke_semantic_acceptance.py`. The release smoke currently proves datasource identity and generic meaningful query content, but still does not prove that `query_prometheus` returned an actual telemetry sample.
+Read `progress.md` completely before deciding on work. Inspected `runtime/mcp_smoke.py`, `runtime/mcp_prometheus_evidence.py`, and its regression suite. The production smoke still checks meaningful query content rather than semantic samples.
+
+### Research / upstream verification
+
+Inspected the source of official `grafana/mcp-grafana` tag `v1.4.1`, `tools/prometheus.go`. The pinned implementation defines `QueryPrometheusResult` with `Data model.Value` serialized as JSON key `data`, plus optional `hints` and `warnings`; `query_prometheus` returns that wrapper. This removes the prior uncertainty about where genuine Prometheus samples appear in the tool payload and gives StageGuard a stable pinned-version contract to validate against.
 
 ### Exact changes made
 
-- Added `runtime/mcp_prometheus_evidence.py` with bounded, transport-tolerant Prometheus sample detection.
-- The parser accepts standard Prometheus instant `value: [timestamp, value]` and range `values: [[timestamp, value], ...]` representations, including JSON serialized inside MCP text and already-structured MCP content.
-- It rejects arbitrary numeric pairs not attached to Prometheus sample fields, booleans, non-finite values (`NaN`/`Inf`), metadata-only results, empty results, malformed JSON, and payloads beyond the nesting bound.
-- Added `runtime/tests/test_mcp_prometheus_evidence.py` with 10 focused regression cases, including legitimate zero-valued telemetry.
-- Parser commit: `9aab3da5a6a781f11e5bc937db4ce1854e24ee08`.
-- Regression commit: `691c2f4c5fcf2c7c654e750cb65cb334d031d7a4`.
-- Deliberately did not wire this parser into the release smoke yet: the pinned official MCP `1.4.1` query response has not been observed live, and enforcing an assumed representation at the release gate could create a false negative.
+- Hardened `runtime/mcp_prometheus_evidence.py`: a sample now qualifies only when it is beneath an official query-result `data` field. The parser still tolerates MCP JSON text and structured transport envelopes, remains depth/size bounded, and recognizes instant `value` and range `values` sample pairs.
+- This closes a false-positive class where sample-looking numeric pairs inside `hints`, `warnings`, metadata, or arbitrary envelope fields could previously count as telemetry.
+- Updated the regression suite to model the pinned v1.4.1 response shape and added explicit rejection tests for sample lookalikes in `hints`, `warnings`, and bare sample objects without the query-result `data` envelope.
+- Parser commit: `8e694e70f295b43dea68479209f56168820274fb`.
+- Test commit: `fd0c64cc53a38b230a513586f3f1f90d1ca8688d`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 
-- GitHub accepted both new files.
-- Static review confirms sample recognition is field-aware and bounded rather than a generic recursive numeric search.
-- This connector environment does not expose an executable repository checkout, so the new tests and prior MCP semantic suites were not executed; no green result is claimed.
+- GitHub accepted the parser and regression updates.
+- Static contract review is now grounded in the exact pinned upstream `v1.4.1` source rather than an assumed Prometheus HTTP envelope.
+- This connector environment still does not expose an executable repository checkout, so the changed tests were not executed and no green test claim is made.
 
 ### Decisions
 
-1. Keep MCP envelope/content validation, datasource identity, and Prometheus sample semantics as separate layers.
-2. A finite numeric zero is valid telemetry; booleans and non-finite numeric strings are not.
-3. Do not make the production smoke depend on the new parser until the exact pinned `mcp-grafana:1.4.1` response representation is observed.
-4. Preserve historical executable results separately from connector-authored unexecuted changes.
+1. Treat the pinned upstream Go type as the semantic contract: only `QueryPrometheusResult.data` may establish telemetry evidence.
+2. Do not accept sample-shaped values from hints/warnings/metadata.
+3. Keep transport-envelope traversal separate from sample-field recognition.
+4. The prior reason for withholding production integration (unknown v1.4.1 response schema) is now resolved by source verification; live Docker validation is still required for end-to-end serialization/transport behavior.
 
 ### Blockers / unknowns
 
-- The new Prometheus evidence tests plus datasource-identity and semantic MCP smoke suites need execution in a checkout.
+- The Prometheus evidence, datasource-identity, and semantic MCP suites need execution in a checkout.
 - `docker compose config`, Grafana `13.2.1` health observation, Viewer-token bootstrap, and hardened MCP `1.4.1` smoke still require an executable Docker checkout.
-- The exact pinned `query_prometheus` response representation remains unobserved.
 - Accumulated lifecycle/security/MCP tests need Linux and Windows execution.
 - Historical full-suite failures/errors still need classification.
 - A live unattended Docker rehearsal remains required after the hardening changes.
 
 ## Single best next step
 
-Run the three focused MCP suites, then execute the pinned Grafana `13.2.1` + official MCP `1.4.1` acceptance gate. Compare the real `query_prometheus` payload with `mcp_prometheus_evidence.py`; if it matches the documented Prometheus sample shape, wire `contains_prometheus_sample()` into the release smoke so PASS requires at least one actual telemetry sample, and add the observed payload as a regression fixture.
+Wire `contains_prometheus_sample(query_result["content"])` into the production MCP smoke immediately after `_assert_tool_result("query_prometheus", query_result)`, failing closed when the pinned official response contains no sample; then execute the focused MCP suites and the Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance run to validate actual transport serialization end to end.
