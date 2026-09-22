@@ -9,10 +9,10 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Required evidence unavailability prevents briefing, approval, and execution from becoming actionable.
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
 - Fresh Grafana telemetry is required to verify recovery; ambiguous execution cannot replay remediation.
-- MCP release acceptance requires meaningful evidence, the exact datasource UID, and a genuine Prometheus vector/matrix sample.
-- Prometheus release evidence is bound to expected labels on the same sampled series; unrelated valid series cannot prove the requested StageGuard series.
-- Operator-visible smoke configuration rejects terminal/log-spoofing control and bidi characters before normalized identities are reported.
+- MCP release acceptance requires meaningful evidence, the exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
+- Operator-visible smoke configuration rejects terminal/log-spoofing controls and bidi characters.
 - Raw PromQL/evidence/sample payloads must not be emitted by the normal release-smoke success report.
+- Upstream MCP failure material must pass through secret-aware bounded diagnostics before it is operator-visible.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -30,41 +30,43 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added expected-label binding and bounded `STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS` parsing with deterministic demo defaults.
 - Wired expected-series binding into the production MCP release smoke and protected it with a credential-free AST invariant.
 - Hardened expected-label configuration against C0/C1 controls, Unicode line/paragraph separators, and bidi/isolate controls while retaining safe printable Unicode values.
-- Added a bounded safe-report builder so release success output has no API for raw PromQL, MCP evidence content, or sample values.
-- Wired the safe-report builder into the production smoke and added a source-level release invariant preventing legacy raw success fields from returning.
+- Added and wired a bounded safe-report builder so release success output has no API for raw PromQL, MCP evidence content, or sample values.
+- Added a standalone secret-aware MCP diagnostic sanitizer plus credential-free regression coverage for recursive sensitive fields, inline credentials, auth URLs, bounds, and hostile object repr behavior.
 
-## Latest run — 2026-09-22 — production safe-report integration
+## Latest run — 2026-09-23 — MCP failure-diagnostic redaction foundation
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/mcp_smoke_reporting.py`, and the existing production Prometheus-gate regression. Confirmed the prior run's blocker: the semantic evidence gate was correctly series-bound, but normal PASS output still serialized the raw PromQL query and a bounded `repr` of MCP evidence content.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and its failure paths. Confirmed the next recorded security gap: `_bounded_diagnostic()` bounded output length but used raw `repr(value)`, and JSON-RPC errors / `isError` tool content could therefore echo an upstream Authorization header, API key, cookie, password, token, URL password, or similar secret into operator logs.
 
 ### Exact changes made
-- Updated `runtime/mcp_smoke.py` in commit `78c7dee24c6295587b2af800ec73937196ab6185`.
-- Production PASS reporting now calls `build_safe_smoke_report(...)` only after datasource and expected-series evidence gates succeed.
-- Removed the legacy `query` and `result_summary` fields from normal success JSON. The smoke no longer serializes `query_result` or MCP content on the PASS path.
-- Added fail-closed translation from `SmokeReportError` to `McpError`; malformed/unsafe operator-visible metadata cannot bypass the normal smoke failure path.
-- Added `runtime/tests/test_mcp_smoke_safe_reporting_gate.py` in commit `9b931e756d304d86e8ed8ecb5b1678be595e5c58`.
-- The credential-free AST regression requires the safe-report import/call boundary, constrains the fields passed to it, requires normal `json.dumps` success serialization to use only the sanitized `report`, rejects the legacy `query`/`result_summary` success keys, and verifies reporter errors fail closed through `McpError`.
+- Added `runtime/mcp_diagnostics.py` in commit `9c6b388b573d71599b7046b6a0c5bd0a91e7cdf8`.
+- Added `safe_diagnostic()` as a dependency-free, bounded sanitization boundary for untrusted MCP failure material.
+- Sensitive mapping keys are punctuation-normalized before matching so common variants such as `Authorization`, `api_key`, `x-api-key`, access-token, cookie, password, credential, client-secret, and private-key are redacted recursively.
+- Inline Bearer/Basic credentials, common `key=value` / `key: value` secret forms, and HTTP(S) URL passwords are redacted from free-form upstream error strings.
+- Added depth, collection-width, per-string, and final-render bounds. Unknown objects are represented by type only so attacker-controlled `__repr__` is never invoked.
+- Added `runtime/tests/test_mcp_diagnostics.py` in commit `3631b4fac0c5ef7b983b754a16518397934fb29b` covering recursive secret fields, inline credentials, Basic auth, URL passwords, bounded hostile payloads, hostile repr, and retention of useful non-secret error context.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted the production integration and regression-test commits.
-- Source inspection confirms normal PASS JSON is now produced only from `build_safe_smoke_report` output; the previous raw query/evidence success dictionary is gone.
-- The new regression is credential-free, but this connector environment does not expose an executable repository checkout. Pytest and Docker acceptance were therefore not executed, and no new runtime-green claim is made.
-- Historical validation numbers above remain historical rather than being silently promoted to current status.
+- GitHub accepted both implementation and regression-test commits.
+- Source inspection confirms the sanitizer is independent of application/cloud credentials and suitable for credential-free unit execution.
+- The production `mcp_smoke.py` call sites are intentionally not yet claimed hardened: they still call their local legacy `_bounded_diagnostic()` until the next wiring change.
+- This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
+- Historical validation numbers above remain historical.
 
 ### Decisions
-1. Treat successful MCP release-smoke output strictly as an audit/status record, not a telemetry dump.
-2. Keep normalized expected-series labels in PASS output because they identify what evidence identity was enforced; omit query syntax and evidence/sample values because they are unnecessary after verification.
-3. Fail closed if even nominally safe report metadata violates the reporter's independent bounds/display-safety contract.
-4. Protect the production call site with a source-level invariant in addition to unit tests for the report builder itself.
-5. Avoid GitHub Actions execution because local validation is preferred and historical Actions storage pressure exists.
+1. Sanitize structured data before rendering rather than regexing only the final `repr`, so sensitive keyed values can be removed regardless of their contents.
+2. Also redact common credential syntax in free-form strings because upstream HTTP/JSON-RPC errors frequently flatten headers or request details into messages.
+3. Never call arbitrary `repr` implementations while constructing diagnostics.
+4. Preserve non-secret error codes/messages so redaction does not destroy operator triage value.
+5. Keep this module dependency-free and deterministic so it can protect the earliest release-smoke failure paths.
+6. Avoid GitHub Actions execution because local validation is preferred and historical Actions storage pressure exists.
 
 ### Blockers / unknowns
+- `runtime/mcp_smoke.py` still needs to import/use `safe_diagnostic()` at every untrusted upstream diagnostic call site and remove the legacy raw-repr helper; a source-level invariant should prevent regression.
 - Focused MCP suites still require execution in a checkout.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
-- The failure path intentionally retains bounded diagnostics for troubleshooting; a later security review should verify those diagnostics cannot expose secrets supplied by an upstream MCP error.
 
 ## Single best next step
-Audit and harden MCP failure diagnostics so upstream JSON-RPC/tool errors cannot echo credentials or sensitive headers into logs, add credential-free redaction regressions, then run the focused MCP suites and pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke in an executable checkout.
+Wire `safe_diagnostic()` into every `runtime/mcp_smoke.py` JSON-RPC/tool failure diagnostic, remove the raw-repr `_bounded_diagnostic()` implementation, add an AST/source invariant proving untrusted failure material cannot bypass the sanitizer, then execute the focused MCP suites and pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke in a checkout.
