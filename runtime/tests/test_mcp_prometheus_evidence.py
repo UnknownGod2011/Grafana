@@ -110,6 +110,16 @@ def test_supports_structured_mcp_content() -> None:
     assert contains_prometheus_sample(payload)
 
 
+def test_supports_text_mcp_content() -> None:
+    payload = [{"type": "text", "text": '{"data":[{"metric":{"production_id":"broadcast-alpha"},"value":[1789990000,"0.2"]}]}'}]
+    assert contains_prometheus_sample(payload, expected_labels={"production_id": "broadcast-alpha"})
+
+
+def test_supports_structured_content_envelope() -> None:
+    payload = {"structuredContent": {"data": [{"metric": {"uplink": "uplink-b"}, "value": [1789990000, "0.2"]}]}}
+    assert contains_prometheus_sample(payload, expected_labels={"uplink": "uplink-b"})
+
+
 def test_rejects_sample_lookalike_in_hints() -> None:
     payload = {"data": [], "hints": {"metric": {}, "value": [1789990000, "99"]}}
     assert not contains_prometheus_sample(payload)
@@ -120,6 +130,28 @@ def test_rejects_sample_lookalike_in_warnings() -> None:
     assert not contains_prometheus_sample(payload)
 
 
+def test_rejects_full_query_result_spoof_nested_in_warning() -> None:
+    payload = {
+        "data": [],
+        "warnings": [{"data": [{"metric": {"production_id": "broadcast-alpha"}, "value": [1789990000, "99"]}]}],
+    }
+    assert not contains_prometheus_sample(payload, expected_labels={"production_id": "broadcast-alpha"})
+
+
+def test_rejects_full_query_result_spoof_nested_in_annotations() -> None:
+    payload = {
+        "type": "text",
+        "text": "not-json operational message",
+        "annotations": {"data": [{"metric": {"uplink": "uplink-b"}, "value": [1789990000, "99"]}]},
+    }
+    assert not contains_prometheus_sample(payload, expected_labels={"uplink": "uplink-b"})
+
+
+def test_rejects_full_query_result_spoof_in_arbitrary_extension_field() -> None:
+    payload = {"vendorExtension": {"data": [{"metric": {}, "value": [1789990000, "99"]}]}}
+    assert not contains_prometheus_sample(payload)
+
+
 def test_rejects_bare_sample_without_query_result_data_envelope() -> None:
     assert not contains_prometheus_sample({"metric": {}, "value": [1789990000, "0.2"]})
 
@@ -127,5 +159,5 @@ def test_rejects_bare_sample_without_query_result_data_envelope() -> None:
 def test_depth_limit_fails_closed() -> None:
     payload: object = {"data": [{"metric": {}, "value": [1789990000, "0.2"]}]}
     for _ in range(18):
-        payload = {"nested": payload}
+        payload = {"content": payload}
     assert not contains_prometheus_sample(payload)
