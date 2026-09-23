@@ -39,37 +39,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added explicit fail-closed collection/work and scalar-size ceilings.
 - Hardened JSON-text evidence decoding so the 1 MiB ceiling precedes `strip()`, parser resource-guard failures fail closed, duplicate object member names are rejected, and Python-only NaN/Infinity constants cannot create parser-differential acceptance.
 - Hardened already-structured numeric evidence so arbitrary-precision Python integers that cannot be represented by the upstream float64-oriented Prometheus model are rejected rather than bypassing JSON decoder digit limits.
+- Added focused validation-gate selection so the MCP regression boundary can be executed without paying the cost of the entire production safety suite.
 
-## Latest run — 2026-09-23 — structured numeric representability boundary
+## Latest run — 2026-09-23 — focused executable validation path
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. JSON text already had an interpreter digit guard, but already-structured MCP objects could still inject an arbitrary-precision Python `int` as a timestamp or sample value. `_finite_timestamp` accepted every exact `int`, and `_finite_sample_value` did the same, so this path bypassed the JSON decoder's integer resource guard and admitted values not representable by the upstream float64-oriented Prometheus model.
+Read `progress.md` completely, then inspected the hardened MCP evidence boundary, the runtime test inventory, `scripts/run_stageguard_validation.py`, and its validation-runner regressions. The repository already had a comprehensive isolated validation harness and a dedicated `Grafana MCP` gate, but there was no way to execute only that gate. That made the repeatedly identified next step—running the focused MCP suites—unnecessarily expensive and encouraged either ad-hoc test commands or a full validation run.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `ef349dda221fabf4c3a989249b46c0989f5d1a49`.
-- Added `_finite_builtin_number`, shared by timestamp and sample validation.
-- Exact built-in floats must remain finite. Exact built-in integers must be convertible to a finite float64-like Python float; `OverflowError` fails closed. Booleans and numeric subclasses remain rejected by exact-type checks.
-- Numeric string sample behavior and its existing 128-character ceiling are unchanged.
-- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `2580c3b5effb67d5a34b168548844d12be16d072` with arbitrary-precision structured timestamp and sample-value regressions plus a finite numeric positive control.
+- Updated `scripts/run_stageguard_validation.py` in commit `4718190c1396ef52d03b9e489209098a48989cee`.
+- Added repeatable `--gate NAME` selection using exact canonical gate names. No `--gate` preserves the existing all-gates behavior.
+- Selection preserves canonical gate order and deduplicates repeated names; unknown names fail closed before any test subprocess launches.
+- `--require-full-coverage` remains a global repository-coverage assertion even when execution is focused, so selecting one gate cannot hide newly unowned runtime tests.
+- Added `runtime/tests/test_validation_gate_selection.py` in commit `6021bdec0616165a08db9d30ee997721573a645e` with coverage for default behavior, canonical ordering/deduplication, unknown-gate rejection, focused MCP-only execution, and global full-coverage semantics.
+- The new regression file is automatically owned by the existing `validation harness` gate through its `test_validation_*.py` pattern.
+- Focused MCP execution is now: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both implementation and regression-test commits.
-- Static review confirms `float(10**10000)` raises `OverflowError`, which the new helper converts to non-evidence, while ordinary finite integer/float samples remain accepted.
-- This connector runtime does not expose an executable repository checkout, so pytest and Docker acceptance were not run. No runtime-green claim is made for these connector-authored changes.
+- GitHub accepted the runner and regression-test commits.
+- Static review confirms the default path still selects `GATES` unchanged and that focused selection happens before the execution plan is built.
+- This connector runtime still does not expose an executable repository checkout, so the newly simplified MCP command and its tests were not executed here. No runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Structured MCP objects must not have a looser numeric domain than JSON-decoded evidence.
-2. Numeric evidence should be representable by the upstream Prometheus model rather than merely by Python's arbitrary-precision integer type.
-3. Preserve exact-type checks so hostile numeric subclasses and booleans remain opaque/non-evidentiary.
+1. Prefer extending the existing credential-scrubbed validation harness over introducing another MCP-specific runner.
+2. Gate names are exact rather than fuzzy to prevent typo-driven partial validation.
+3. Focused execution must not weaken `--require-full-coverage`; coverage ownership is a repository-wide invariant.
 4. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of a checkout.
 
 ### Blockers / unknowns
-- Focused MCP suites still require execution in a checkout with repository files available to Python.
+- The focused MCP gate still requires one executable checkout run; it is now a single explicit command rather than a full-suite requirement.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
 - JSON decoding still materializes the complete document up to 1 MiB before post-decode structural ceilings apply; executable memory/time profiling remains pending.
 
 ## Single best next step
-Execute the focused MCP evidence/diagnostic suites in a real checkout and fix any regressions, then perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` transport fixture for permanent integration coverage.
+In an executable checkout run `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going` and fix any regression it exposes; if green, immediately perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` transport fixture for permanent integration coverage.
