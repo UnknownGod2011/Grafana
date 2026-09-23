@@ -12,8 +12,8 @@ JSON-like built-ins. Extension-defined subclasses are opaque so evidence validat
 not execute attacker-controlled container/scalar hooks while inspecting an MCP response.
 Traversal is cardinality- and scalar-size-bounded so a syntactically valid but oversized
 MCP response cannot force unbounded Python work during release acceptance. JSON text with
-duplicate object keys is rejected to avoid parser-differential ambiguity at the evidence
-boundary.
+duplicate object keys or non-standard numeric constants is rejected to avoid parser-
+differential ambiguity at the evidence boundary.
 """
 from __future__ import annotations
 
@@ -35,17 +35,23 @@ _MCP_PAYLOAD_KEYS = frozenset({"content", "text", "structuredContent", "result"}
 _MCP_CONTENT_TYPES = frozenset({"text", "image", "audio", "resource", "resource_link"})
 
 
-class _DuplicateJsonKey(ValueError):
-    """Internal signal for ambiguous JSON objects with repeated member names."""
+class _AmbiguousJson(ValueError):
+    """Internal signal for JSON that is not unambiguous RFC-compatible evidence."""
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise _DuplicateJsonKey(key)
+            raise _AmbiguousJson(f"duplicate member: {key}")
         result[key] = value
     return result
+
+
+def _reject_json_constant(token: str) -> Any:
+    # Python's json module accepts NaN/Infinity/-Infinity by default even though they are
+    # not JSON numbers. Evidence must not depend on that permissive implementation detail.
+    raise _AmbiguousJson(f"non-standard numeric constant: {token}")
 
 
 def _finite_timestamp(value: Any) -> bool:
@@ -116,15 +122,18 @@ def _decode_json_text(value: str) -> Any | None:
     if len(value) > MAX_JSON_TEXT_CHARS or not value.strip():
         return None
     try:
-        # Reject duplicate object member names instead of inheriting json.loads' normal
-        # last-key-wins behavior. Evidence is a security decision; accepting ambiguous
-        # JSON creates parser-differential risk if another component interprets the same
-        # transport with first-key-wins or duplicate-preserving semantics.
-        return json.loads(value, object_pairs_hook=_unique_json_object)
+        # Reject duplicate object member names and Python's permissive NaN/Infinity
+        # extensions. Evidence is a security decision; accepting ambiguous/non-standard
+        # JSON creates parser-differential risk across runtimes and transports.
+        return json.loads(
+            value,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
     except (json.JSONDecodeError, RecursionError, ValueError):
-        # ValueError covers duplicate-key rejection and interpreter integer-digit limits
-        # on hostile JSON numbers; RecursionError keeps deeply nested-but-size-bounded
-        # JSON fail-closed.
+        # ValueError covers strict-key/constant rejection and interpreter integer-digit
+        # limits on hostile JSON numbers; RecursionError keeps deeply nested-but-size-
+        # bounded JSON fail-closed.
         return None
 
 
