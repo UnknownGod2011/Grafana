@@ -16,6 +16,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Untrusted extension/container subclasses are opaque to MCP diagnostics; sanitizer traversal is limited to exact JSON-like built-ins so attacker hooks cannot execute.
 - Opaque diagnostic type markers are themselves bounded and display-safe; mutable class names cannot become a log-spoofing or output-amplification surface.
 - Sanitized mapping-key collisions must preserve each bounded diagnostic value rather than silently overwrite earlier evidence.
+- Assignment-style credentials in diagnostics must be fully redacted even when quoted values contain whitespace or escaped quote characters.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -37,33 +38,33 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Restricted diagnostic traversal to exact JSON-like built-ins and made extension-defined container/scalar subclasses opaque.
 - Hardened opaque type markers against mutable hostile class names containing controls, bidi formatting, or oversized text.
 - Preserved colliding sanitized mapping keys with deterministic bounded suffixes so one upstream diagnostic field cannot silently erase another.
+- Hardened inline assignment redaction so quoted credentials containing spaces or escaped quote characters are removed as one complete value rather than leaking a tail.
 
-## Latest run — 2026-09-23 — MCP sanitized-key collision hardening
+## Latest run — 2026-09-23 — quoted credential diagnostic hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The diagnostic sanitizer was secret-aware, display-safe, bounded, and protected from extension hooks, but different upstream mapping keys could collapse to the same sanitized display key. In particular, multiple opaque keys of the same extension type all render as `<Type-key>`. Building the sanitized Python dict therefore silently overwrote earlier diagnostic values, making failure evidence order-dependent and potentially hiding useful/redacted context.
+Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py`, `runtime/tests/test_mcp_diagnostics.py`, the runtime tree, MCP smoke, semantic evidence gate/parser, and repository Actions state. The prior diagnostic hardening covered recursive keyed secrets, Bearer/Basic auth, URL passwords, unquoted assignments, hostile objects, display controls, and output bounds. A remaining concrete leak existed in assignment-style error strings: the assignment regex stopped at whitespace, so an upstream message such as `password="correct horse battery staple"` redacted only the first token and left the remainder operator-visible. Repository Actions currently reports zero workflow runs, so no noisy CI was triggered.
 
 ### Exact changes made
-- Updated `runtime/mcp_diagnostics.py` in commit `509edb3129ac3ffc570ac6a8063a133457bf94d7`.
-- Added `_unique_key()` to preserve collisions using deterministic `#2`, `#3`, ... suffixes bounded by the existing maximum diagnostic item count.
-- Collision handling operates only on already-sanitized trusted strings and the sanitized output dict; it does not invoke hooks on untrusted key objects.
-- Preserved sensitive-key redaction based on the original exact-string key before the child value is admitted to diagnostics.
-- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `9852503aa1f5d32bb76f555fec1017dc4edcf27e`.
-- Added a regression proving two distinct opaque keys of the same type retain both failure values and receive stable display keys.
-- Kept hostile-key hook protection by using identity hashing in the test key fixture rather than relying on a constant hash.
+- Updated `runtime/mcp_diagnostics.py` in commit `18b1a0119af87caab7ff58aee5d695f08b22a274`.
+- Changed assignment credential matching to consume complete single- or double-quoted values, including escaped characters, before falling back to the existing unquoted token form.
+- Preserved the existing sensitive field names and replacement contract: only the field name/separator survive and the credential becomes `<redacted>`.
+- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `c16e4f8dca4c89340285639aab5e7e363b4e3ff3`.
+- Added regression coverage for double-quoted passwords with spaces, single-quoted secrets with spaces, and a quoted API key containing an escaped quote; the test also proves adjacent non-secret operational context survives.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression-test commits.
-- Source inspection confirms sanitized-key collisions no longer silently overwrite prior values and collision suffix generation does not touch untrusted objects.
+- Source inspection confirms quoted assignment alternatives are matched before the unquoted fallback, preventing whitespace-delimited credential tails from surviving redaction.
+- GitHub Actions API currently reports zero workflow runs for this repository; no CI execution was initiated solely for this connector-authored change.
 - This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Preserve every bounded diagnostic field rather than accept last-write-wins behavior after display sanitization.
-2. Resolve collisions after `_safe_key()` but retain sensitivity classification from the original key, keeping display identity and secret classification separate.
-3. Keep the suffix space bounded by `MAX_DIAGNOSTIC_ITEMS`; the sanitizer already rejects wider diagnostic traversal.
-4. Avoid GitHub Actions solely for this connector-authored change; executable local validation remains preferable.
+1. Fix the concrete secret-leak edge case rather than continue broad speculative sanitizer changes.
+2. Keep redaction dependency-free and local to the MCP smoke path so release diagnostics remain available before application services start.
+3. Preserve non-secret neighboring error context because operator triage still needs actionable failure information.
+4. Do not add or trigger GitHub Actions merely to compensate for the missing executable checkout; the project explicitly prioritizes low-noise local validation.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout.
