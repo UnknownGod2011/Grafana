@@ -27,9 +27,22 @@ MAX_JSON_TEXT_CHARS = 1_048_576
 _MCP_PAYLOAD_KEYS = frozenset({"content", "text", "resource", "structuredContent", "result"})
 
 
-def _finite_number(value: Any) -> bool:
-    # Exact built-ins only: bool is never numeric evidence, and subclasses may override
-    # conversion/string hooks. JSON decoding itself produces only these exact types.
+def _finite_timestamp(value: Any) -> bool:
+    """Require Prometheus' JSON timestamp position to be a finite JSON number.
+
+    Prometheus sample pairs encode timestamps as JSON numbers and sample values as JSON
+    strings. Accepting a numeric-looking timestamp string would make a merely similar
+    payload sufficient for release evidence, so timestamp validation is intentionally
+    stricter than sample-value validation.
+    """
+    value_type = type(value)
+    if value_type is int:
+        return True
+    return value_type is float and math.isfinite(value)
+
+
+def _finite_sample_value(value: Any) -> bool:
+    """Accept a finite Prometheus sample value without invoking extension hooks."""
     value_type = type(value)
     if value_type is int:
         return True
@@ -46,7 +59,12 @@ def _finite_number(value: Any) -> bool:
 
 def _is_sample_pair(value: Any) -> bool:
     """Recognize Prometheus instant/range sample pairs: [timestamp, value]."""
-    return type(value) is list and len(value) == 2 and _finite_number(value[0]) and _finite_number(value[1])
+    return (
+        type(value) is list
+        and len(value) == 2
+        and _finite_timestamp(value[0])
+        and _finite_sample_value(value[1])
+    )
 
 
 def _is_metric_map(value: Any) -> bool:
