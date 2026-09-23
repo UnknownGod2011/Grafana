@@ -30,6 +30,11 @@ def _execution_plan(selections):
  for gate,files in selections:
   runnable=tuple(p for p in files if p.name not in seen);covered=tuple(p for p in files if p.name in seen);seen.update(p.name for p in files);plan.append((gate,runnable,covered))
  return tuple(plan)
+def _select_gates(names):
+ if not names:return GATES
+ requested=set(names); known={g.name for g in GATES}; unknown=sorted(requested-known)
+ if unknown:raise ValueError("unknown validation gate(s): "+", ".join(unknown))
+ return tuple(g for g in GATES if g.name in requested)
 def _command(path):
  if not _safe_test_file(path):raise ValueError(f"unsafe validation test path: {path}")
  return [sys.executable,"-m","unittest","discover","-s",str(TESTS),"-p",path.name]
@@ -49,11 +54,13 @@ def _positive_timeout(value):
  return timeout
 def _run_test_file(path,*,timeout,env):return subprocess.run(_command(path),cwd=ROOT,check=False,timeout=timeout,env=env,stdin=subprocess.DEVNULL).returncode
 def main():
- parser=argparse.ArgumentParser(description="Run dependency-light StageGuard safety/MCP regression gates.");parser.add_argument("--keep-going",action="store_true");parser.add_argument("--list",action="store_true");parser.add_argument("--require-full-coverage",action="store_true",help="fail if any safe runtime test is not owned by a production validation gate");parser.add_argument("--file-timeout",type=_positive_timeout,default=DEFAULT_FILE_TIMEOUT_SECONDS,metavar="SECONDS");args=parser.parse_args()
+ parser=argparse.ArgumentParser(description="Run dependency-light StageGuard safety/MCP regression gates.");parser.add_argument("--keep-going",action="store_true");parser.add_argument("--list",action="store_true");parser.add_argument("--gate",action="append",metavar="NAME",help="run only this exact validation gate; repeat to select multiple gates");parser.add_argument("--require-full-coverage",action="store_true",help="fail if any safe runtime test is not owned by a production validation gate");parser.add_argument("--file-timeout",type=_positive_timeout,default=DEFAULT_FILE_TIMEOUT_SECONDS,metavar="SECONDS");args=parser.parse_args()
  if not TESTS.is_dir() or TESTS.is_symlink():print(f"error: safe test directory not found: {TESTS}",file=sys.stderr);return 2
- selections=tuple((g,_files(g)) for g in GATES);empty=[g.name for g,f in selections if not f]
+ try:selected_gates=_select_gates(args.gate)
+ except ValueError as exc:print(f"error: {exc}",file=sys.stderr);return 2
+ all_selections=tuple((g,_files(g)) for g in GATES); selections=tuple((g,_files(g)) for g in selected_gates);empty=[g.name for g,f in selections if not f]
  if empty:print("error: validation gate matched no safe tests: "+", ".join(empty),file=sys.stderr);return 2
- unowned=_unowned_tests(selections)
+ unowned=_unowned_tests(all_selections)
  if args.require_full_coverage and unowned:print("error: safe runtime tests are not owned by validation gates: "+", ".join(p.name for p in unowned),file=sys.stderr);return 2
  plan=_execution_plan(selections)
  if args.list:
