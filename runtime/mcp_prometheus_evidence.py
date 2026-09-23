@@ -10,8 +10,8 @@ Scalar/string model values are not sufficient evidence for the StageGuard series
 This module is a trust boundary. Structured values are accepted only when they are exact
 JSON-like built-ins. Extension-defined subclasses are opaque so evidence validation does
 not execute attacker-controlled container/scalar hooks while inspecting an MCP response.
-Traversal is also cardinality-bounded so a syntactically valid but oversized MCP response
-cannot force unbounded Python iteration during release acceptance.
+Traversal is cardinality- and scalar-size-bounded so a syntactically valid but oversized
+MCP response cannot force unbounded Python work during release acceptance.
 """
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ MAX_MCP_COLLECTION_ITEMS = 128
 MAX_PROMETHEUS_SERIES = 256
 MAX_SAMPLES_PER_SERIES = 4_096
 MAX_LABELS_PER_SERIES = 128
+MAX_SAMPLE_VALUE_CHARS = 128
+MAX_LABEL_NAME_CHARS = 1_024
+MAX_LABEL_VALUE_CHARS = 4_096
 _MCP_PAYLOAD_KEYS = frozenset({"content", "text", "structuredContent", "result"})
 _MCP_CONTENT_TYPES = frozenset({"text", "image", "audio", "resource", "resource_link"})
 
@@ -44,6 +47,8 @@ def _finite_sample_value(value: Any) -> bool:
     if value_type is float:
         return math.isfinite(value)
     if value_type is str:
+        if len(value) > MAX_SAMPLE_VALUE_CHARS:
+            return False
         try:
             parsed = float(value.strip())
         except (TypeError, ValueError):
@@ -56,11 +61,20 @@ def _is_sample_pair(value: Any) -> bool:
     return type(value) is list and len(value) == 2 and _finite_timestamp(value[0]) and _finite_sample_value(value[1])
 
 
+def _valid_label_pair(key: Any, value: Any) -> bool:
+    return (
+        type(key) is str
+        and type(value) is str
+        and len(key) <= MAX_LABEL_NAME_CHARS
+        and len(value) <= MAX_LABEL_VALUE_CHARS
+    )
+
+
 def _is_metric_map(value: Any) -> bool:
     return (
         type(value) is dict
         and len(value) <= MAX_LABELS_PER_SERIES
-        and all(type(key) is str and type(label) is str for key, label in value.items())
+        and all(_valid_label_pair(key, label) for key, label in value.items())
     )
 
 
@@ -69,7 +83,7 @@ def _normalize_expected_labels(expected_labels: Mapping[str, str] | None) -> dic
         return None
     if type(expected_labels) is not dict or len(expected_labels) > MAX_LABELS_PER_SERIES:
         return None
-    if not all(type(key) is str and type(value) is str for key, value in expected_labels.items()):
+    if not all(_valid_label_pair(key, value) for key, value in expected_labels.items()):
         return None
     return dict(expected_labels)
 
@@ -115,12 +129,7 @@ def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
 
 
 def _embedded_resource_payload(value: dict[Any, Any]) -> str | None:
-    """Return JSON-capable text from a standards-shaped MCP EmbeddedResource.
-
-    ResourceContents carries its payload in ``text`` or ``blob``. StageGuard only admits
-    exact-string ``text`` because query evidence is JSON; arbitrary resource extension
-    fields and binary blobs are deliberately non-evidentiary.
-    """
+    """Return JSON-capable text from a standards-shaped MCP EmbeddedResource."""
     resource = value.get("resource")
     if type(resource) is not dict:
         return None
