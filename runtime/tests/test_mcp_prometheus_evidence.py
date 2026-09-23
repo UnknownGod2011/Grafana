@@ -77,6 +77,16 @@ def test_rejects_non_finite_sample_values() -> None:
     assert not contains_prometheus_sample({"data": [{"metric": {}, "value": [1789990000, "Inf"]}]})
 
 
+def test_rejects_string_timestamp_even_when_numeric_looking() -> None:
+    payload = {"data": [{"metric": {}, "value": ["1789990000.25", "0.2"]}]}
+    assert not contains_prometheus_sample(payload)
+
+
+def test_rejects_non_finite_numeric_timestamp() -> None:
+    payload = {"data": [{"metric": {}, "value": [float("inf"), "0.2"]}]}
+    assert not contains_prometheus_sample(payload)
+
+
 def test_rejects_boolean_lookalikes() -> None:
     assert not contains_prometheus_sample({"data": [{"metric": {}, "value": [True, False]}]})
 
