@@ -10,6 +10,10 @@ Scalar/string model values are not sufficient evidence for the StageGuard series
 Callers may additionally bind acceptance to expected metric labels. This prevents a
 successful query transport from being mistaken for proof of the requested StageGuard
 series when an unrelated series is returned.
+
+This module is a trust boundary. Structured values are accepted only when they are exact
+JSON-like built-ins. Extension-defined subclasses are opaque so evidence validation does
+not execute attacker-controlled container/scalar hooks while inspecting an MCP response.
 """
 from __future__ import annotations
 
@@ -20,18 +24,18 @@ from typing import Any
 
 MAX_EVIDENCE_NESTING_DEPTH = 16
 MAX_JSON_TEXT_CHARS = 1_048_576
-# Only these MCP transport fields may contain the actual tool payload. Do not recurse
-# through annotations, metadata, warnings, hints, or arbitrary extension fields: a
-# series-shaped object there is not evidence returned by query_prometheus.
 _MCP_PAYLOAD_KEYS = frozenset({"content", "text", "resource", "structuredContent", "result"})
 
 
 def _finite_number(value: Any) -> bool:
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return not isinstance(value, float) or math.isfinite(value)
-    if isinstance(value, str):
+    # Exact built-ins only: bool is never numeric evidence, and subclasses may override
+    # conversion/string hooks. JSON decoding itself produces only these exact types.
+    value_type = type(value)
+    if value_type is int:
+        return True
+    if value_type is float:
+        return math.isfinite(value)
+    if value_type is str:
         try:
             parsed = float(value.strip())
         except (TypeError, ValueError):
@@ -42,18 +46,22 @@ def _finite_number(value: Any) -> bool:
 
 def _is_sample_pair(value: Any) -> bool:
     """Recognize Prometheus instant/range sample pairs: [timestamp, value]."""
-    return isinstance(value, list) and len(value) == 2 and _finite_number(value[0]) and _finite_number(value[1])
+    return type(value) is list and len(value) == 2 and _finite_number(value[0]) and _finite_number(value[1])
 
 
 def _is_metric_map(value: Any) -> bool:
     """Require the label map carried by a Prometheus vector/matrix series."""
-    return isinstance(value, dict) and all(isinstance(key, str) and isinstance(label, str) for key, label in value.items())
+    return type(value) is dict and all(type(key) is str and type(label) is str for key, label in value.items())
 
 
 def _normalize_expected_labels(expected_labels: Mapping[str, str] | None) -> dict[str, str] | None:
     if expected_labels is None:
         return None
-    if not all(isinstance(key, str) and isinstance(value, str) for key, value in expected_labels.items()):
+    # This is caller-owned configuration rather than upstream MCP material, but avoid
+    # invoking extension hooks here as well. Public callers should provide a plain dict.
+    if type(expected_labels) is not dict:
+        return None
+    if not all(type(key) is str and type(value) is str for key, value in expected_labels.items()):
         return None
     return dict(expected_labels)
 
@@ -75,7 +83,7 @@ def _decode_json_text(value: str) -> Any | None:
 
 def _series_has_sample(value: Any, expected_labels: dict[str, str] | None) -> bool:
     """Validate one Prometheus vector/matrix series object."""
-    if not isinstance(value, dict) or not _is_metric_map(value.get("metric")):
+    if type(value) is not dict or not _is_metric_map(value.get("metric")):
         return False
     metric = value["metric"]
     if not _metric_matches_expected_labels(metric, expected_labels):
@@ -85,18 +93,12 @@ def _series_has_sample(value: Any, expected_labels: dict[str, str] | None) -> bo
         return True
 
     samples = value.get("values")
-    return isinstance(samples, list) and any(_is_sample_pair(sample) for sample in samples)
+    return type(samples) is list and any(_is_sample_pair(sample) for sample in samples)
 
 
 def _data_contains_series_sample(value: Any, expected_labels: dict[str, str] | None) -> bool:
-    """Accept only the direct JSON shape of Prometheus vector/matrix model.Value.
-
-    In mcp-grafana v1.4.1 QueryPrometheusResult.Data is prometheus/common/model.Value.
-    Vector and matrix values marshal as a top-level JSON array of series. Recursing
-    through arbitrary objects below ``data`` would accept shapes the pinned upstream
-    contract cannot produce and would weaken this release gate.
-    """
-    return isinstance(value, list) and any(_series_has_sample(series, expected_labels) for series in value)
+    """Accept only the direct JSON shape of Prometheus vector/matrix model.Value."""
+    return type(value) is list and any(_series_has_sample(series, expected_labels) for series in value)
 
 
 def contains_prometheus_sample(
@@ -117,24 +119,27 @@ def contains_prometheus_sample(
     content block or expose structured content. Traversal is bounded and restricted to
     known MCP payload-bearing fields; telemetry itself must have the direct
     vector/matrix shape under ``data``. Metadata, annotations, warnings, hints, and
-    arbitrary extension fields cannot satisfy the evidence gate.
+    arbitrary extension fields cannot satisfy the evidence gate. Only exact JSON-like
+    built-ins are traversed; extension subclasses fail closed without invoking hooks.
     """
     normalized_labels = _normalize_expected_labels(expected_labels)
     if expected_labels is not None and normalized_labels is None:
         return False
     if depth > MAX_EVIDENCE_NESTING_DEPTH:
         return False
-    if isinstance(value, str):
+
+    value_type = type(value)
+    if value_type is str:
         decoded = _decode_json_text(value)
         return decoded is not None and contains_prometheus_sample(
             decoded, expected_labels=normalized_labels, depth=depth + 1
         )
-    if isinstance(value, list):
+    if value_type is list:
         return any(
             contains_prometheus_sample(item, expected_labels=normalized_labels, depth=depth + 1)
             for item in value
         )
-    if not isinstance(value, dict):
+    if value_type is not dict:
         return False
 
     if "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
