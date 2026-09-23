@@ -13,6 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Prometheus sample timestamps must be finite JSON numbers; numeric-looking timestamp strings are rejected.
 - Evidence traversal is limited to known MCP payload envelopes and exact JSON-like built-ins; extension subclasses are opaque.
 - Standard MCP content blocks are transport envelopes. Text and embedded-resource evidence must come from their actual textual payload; image/audio/resource-link blocks cannot smuggle query evidence through extension fields.
+- Embedded resources admit evidence only through exact-string `resource.text`; URI-less `resource.data`, blob payloads, and arbitrary resource extensions are non-evidentiary.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
@@ -31,30 +32,30 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added bounded semantic Prometheus evidence parsing with expected-label binding and strict sample-pair semantics.
 - Added secret-aware MCP diagnostics with hostile-object protection, collision preservation, display-control escaping, credential redaction, strict output ceilings, exact truncation accounting, and metaclass-hook isolation.
 - Restricted evidence traversal so warning/annotation/extension lookalikes and standard content-block `data` siblings cannot create false release acceptance.
-- Hardened embedded MCP resources so standards-shaped ResourceContents (`uri` present) only admit JSON evidence through their `text` payload; blob/resource-link extension fields cannot masquerade as telemetry.
+- Hardened embedded MCP resources so only textual payloads can carry JSON evidence; blob/resource-link/extension fields cannot masquerade as telemetry.
+- Removed the temporary URI-less `resource.data` compatibility path after inspecting the pinned official mcp-grafana v1.4.1 `QueryPrometheusResult` contract.
 
-## Latest run — 2026-09-23 — MCP embedded-resource boundary
+## Latest run — 2026-09-23 — official MCP contract alignment
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and its existing regression suite. The prior content-block hardening correctly rejected a `data` sibling on the outer `type: resource` block, but recursively treated the entire inner `resource` object as a generic query-result envelope. A standards-shaped MCP EmbeddedResource could therefore put valid-looking series in an unrelated `resource.data` extension and satisfy StageGuard's release gate even when its real `text`/`blob` payload contained no query evidence.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py`, the embedded-resource regression suite, and the pinned upstream `grafana/mcp-grafana` v1.4.1 `tools/prometheus.go` source. The previous run intentionally retained a URI-less `resource: {data: ...}` compatibility branch pending evidence about the official response contract.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commits `72976d22215d63767900246ef62854e16e87337f` and `06e1b44a463ebf6cb2c5282c57bd48c399eb952d`.
-- Standard `type: resource` blocks now extract evidence only from exact-string `resource.text`; blob resources provide no JSON evidence path.
-- `resource_link`, image, and audio content blocks fail closed rather than traversing extension fields.
-- Preserved the repository's historical URI-less `resource: {data: ...}` fixture as an explicitly legacy compatibility branch; once a resource has `uri`, it is treated as standards-shaped ResourceContents and arbitrary `data` is ignored.
-- Added `runtime/tests/test_mcp_resource_evidence_boundary.py` in commit `103f8318004b487dd4a8b360a59bfc532b896c1e`, covering valid JSON-in-resource-text plus resource-data, blob-data, and resource-link smuggling regressions.
+- Verified from the pinned upstream v1.4.1 source that `query_prometheus` returns `QueryPrometheusResult` with `Data model.Value` serialized as top-level JSON `data`, plus optional `hints` and `warnings`; the tool itself does not define a URI-less EmbeddedResource result contract.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `9653754c16554dd159ae5aa7ff47ff5ed5d6fdcf` to remove the legacy URI-less `resource.data` acceptance branch. Embedded resources now expose evidence only through exact-string `resource.text`; blobs and arbitrary extension fields fail closed.
+- Updated `runtime/tests/test_mcp_resource_evidence_boundary.py` in commit `92fdc00c7e0e8c82007d6d00e56c11bd7b5a22c2` with an explicit regression proving URI-less `resource.data` cannot satisfy the release gate.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted all implementation/test commits.
-- This connector runtime does not expose a repository checkout to Python, so pytest and Docker acceptance were not executed. No runtime-green claim is made.
+- GitHub accepted both implementation/test commits.
+- Upstream source inspection was performed against the exact pinned `grafana/mcp-grafana` v1.4.1 tag, not an inferred/latest contract.
+- This connector runtime still does not provide an executable repository checkout, so pytest and Docker acceptance were not run. No runtime-green claim is made for connector-authored changes.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Model MCP EmbeddedResource according to its payload semantics rather than recursively trusting every inner resource field.
-2. Keep blob resources non-evidentiary because decoding arbitrary binary content is unnecessary for the Prometheus release gate.
-3. Retain the URI-less historical structured-resource fixture temporarily to avoid silently breaking existing tests before executable validation; remove that compatibility branch after a real official MCP response fixture confirms it is unnecessary.
+1. Prefer the exact pinned upstream tool contract over preserving a speculative historical fixture.
+2. Treat `QueryPrometheusResult.data` as the canonical structured evidence shape; MCP text/structured envelopes may transport that object, but unrelated resource extension fields cannot create evidence.
+3. Keep EmbeddedResource text support as transport tolerance while maintaining a narrow fail-closed boundary.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout with repository files available to Python.
@@ -62,4 +63,4 @@ Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.p
 - Historical full-suite failures/errors still need classification.
 
 ## Single best next step
-Execute the focused MCP unit/invariant suites in a real checkout. Then run Grafana `13.2.1` + official MCP `1.4.1`, capture a sanitized real `query_prometheus` response, replace the legacy URI-less resource compatibility path with the observed official transport shape, and rerun the release smoke without logging credentials, raw PromQL, or sample values.
+Execute the focused MCP unit/invariant suites in a real checkout. Then run Grafana `13.2.1` + official MCP `1.4.1`, capture a sanitized real `query_prometheus` response to confirm the transport envelope around the now-verified `QueryPrometheusResult` payload, and rerun the release smoke without logging credentials, raw PromQL, or sample values.
