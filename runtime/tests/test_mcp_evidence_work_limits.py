@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from runtime.mcp_prometheus_evidence import (
+    MAX_JSON_TEXT_CHARS,
     MAX_LABEL_NAME_CHARS,
     MAX_LABEL_VALUE_CHARS,
     MAX_LABELS_PER_SERIES,
@@ -85,3 +86,18 @@ def test_expected_label_scalar_limits_are_fail_closed() -> None:
     payload = {"data": [_series(metric={"service": "stageguard"})]}
     assert not contains_prometheus_sample(payload, expected_labels={"k" * (MAX_LABEL_NAME_CHARS + 1): "v"})
     assert not contains_prometheus_sample(payload, expected_labels={"k": "v" * (MAX_LABEL_VALUE_CHARS + 1)})
+
+
+def test_oversized_json_text_fails_closed() -> None:
+    payload = " " * (MAX_JSON_TEXT_CHARS + 1)
+    assert not contains_prometheus_sample(payload)
+
+
+def test_json_integer_digit_limit_fails_closed_instead_of_escaping_decoder() -> None:
+    # CPython normally rejects integer literals above its configured digit ceiling with
+    # ValueError. The evidence boundary must turn that parser resource guard into a
+    # simple non-evidentiary result rather than crashing release acceptance.
+    hostile_number = "9" * 10_000
+    payload = '{"data":' + hostile_number + "}"
+    assert len(payload) < MAX_JSON_TEXT_CHARS
+    assert not contains_prometheus_sample(payload)
