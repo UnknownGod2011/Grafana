@@ -12,9 +12,9 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - MCP release acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
 - Prometheus sample timestamps must be finite JSON numbers; numeric-looking timestamp strings are rejected.
 - Evidence traversal is limited to known MCP payload envelopes and exact JSON-like built-ins; extension subclasses are opaque.
-- Structured MCP evidence work is bounded by collection cardinality and scalar sizes: transport collections, Prometheus series, samples, label maps, sample-value strings, and label strings have explicit fail-closed ceilings.
-- JSON text evidence is size-gated before whole-string whitespace processing, and decoder resource-guard failures fail closed rather than escaping release acceptance.
-- Standard MCP content blocks are transport envelopes. Text and embedded-resource evidence must come from their actual textual payload; image/audio/resource-link blocks cannot smuggle query evidence through extension fields.
+- Structured MCP evidence work is bounded by collection cardinality and scalar sizes.
+- JSON text evidence is size-gated before whole-string whitespace processing; decoder resource-guard failures and duplicate JSON object keys fail closed.
+- Standard MCP content blocks are transport envelopes; only actual textual payloads can carry JSON evidence.
 - Embedded resources admit evidence only through exact-string `resource.text`; URI-less `resource.data`, blob payloads, and arbitrary resource extensions are non-evidentiary.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
@@ -36,33 +36,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Restricted evidence traversal so warning/annotation/extension lookalikes and standard content-block `data` siblings cannot create false release acceptance.
 - Hardened embedded MCP resources so only textual payloads can carry JSON evidence; blob/resource-link/extension fields cannot masquerade as telemetry.
 - Removed the temporary URI-less `resource.data` compatibility path after inspecting the pinned official mcp-grafana v1.4.1 `QueryPrometheusResult` contract.
-- Reconciled the older focused MCP regression suite with that hardened resource contract so it no longer expects forbidden `resource.data` evidence.
-- Added explicit fail-closed collection/work ceilings for MCP transport collections, Prometheus series, samples, metric labels, and expected-label maps.
-- Added explicit scalar-size ceilings for numeric sample strings and metric/expected label names and values so bounded collection counts cannot still carry attacker-sized scalar work.
-- Hardened JSON-text evidence decoding so the 1 MiB ceiling is checked before `strip()`, and parser `ValueError`/`RecursionError` resource guards fail closed.
+- Added explicit fail-closed collection/work and scalar-size ceilings.
+- Hardened JSON-text evidence decoding so the 1 MiB ceiling precedes `strip()`, parser resource-guard failures fail closed, and duplicate object member names are rejected.
 
-## Latest run — 2026-09-23 — JSON text decoder resource hardening
+## Latest run — 2026-09-23 — duplicate-key JSON evidence hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. The parser already imposed a 1 MiB JSON-text ceiling, but `_decode_json_text` called `value.strip()` before checking that ceiling. An oversized upstream text payload therefore still incurred a full-string scan/allocation before rejection. I also found that `json.loads` was only catching `JSONDecodeError`; CPython resource guards such as the integer digit limit can raise `ValueError`, and pathological nesting can raise `RecursionError`, allowing hostile but size-bounded text to escape the evidence boundary as an exception.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. The JSON evidence decoder used Python `json.loads` default object semantics, which silently keep the last value for duplicate member names. At a security-sensitive evidence boundary this permits parser-differential ambiguity: another component can interpret the same transport differently while StageGuard accepts the last duplicate `data`, `metric`, or other structural key.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `4c18da2bbf6b78a62a7c040cf38af6cf60803aa2`.
-- Reordered JSON text validation so `len(value) > MAX_JSON_TEXT_CHARS` fails before whitespace stripping or JSON parsing.
-- Extended decoder failure handling to `ValueError` and `RecursionError` in addition to `JSONDecodeError`, preserving fail-closed release semantics for interpreter parser resource guards.
-- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `287301c14bb7a5279ee51d3830df260af05dcea7` with oversized-text rejection and a 10,000-digit JSON integer regression that must return non-evidentiary rather than escape as an exception.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `879b0f3ec57a1f5e8ccabb5dfd3ead41db906a9f`.
+- Added a strict `object_pairs_hook` that rejects any duplicate JSON object member name at every nesting level before semantic evidence validation.
+- Duplicate-key rejection uses an internal `ValueError` subtype and therefore follows the existing fail-closed decoder path without exposing hostile material.
+- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `d7317c61d9d9ce9be85c033d38ab744340954713` with regressions for duplicate top-level `data`, duplicate nested metric labels, and a positive unique-key control.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both implementation and regression-test commits.
-- Static review confirms the text-size ceiling now precedes `strip()` and parsing, and known JSON parser resource-guard exceptions are converted to a non-evidentiary result.
+- GitHub accepted the implementation and regression-test commits.
+- Static review confirms duplicate detection runs during JSON object construction, including nested objects, before evidence matching can accept a sample.
 - This connector runtime does not expose an executable repository checkout, so pytest and Docker acceptance were not run. No runtime-green claim is made for these connector-authored changes.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. A resource ceiling must be enforced before operations proportional to the rejected input size; checking it after `strip()` undermines the boundary's purpose.
-2. Interpreter JSON resource guards are expected hostile-input outcomes at this trust boundary and should fail closed, not crash release acceptance.
-3. Keep the existing 1 MiB text ceiling for compatibility until executable profiling or a real MCP fixture justifies a tighter production value.
+1. Ambiguous JSON is not acceptable as release evidence even if Python can deterministically choose one duplicate value.
+2. Reject duplicates globally rather than only `data`/`metric`, because structural meaning can move through MCP envelopes and future schema fields.
+3. Preserve ordinary unique-key JSON compatibility and all existing size/cardinality ceilings.
 4. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of a checkout.
 
 ### Blockers / unknowns
