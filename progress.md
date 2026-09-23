@@ -14,6 +14,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Evidence traversal is limited to known MCP payload envelopes and exact JSON-like built-ins; extension subclasses are opaque.
 - Structured MCP evidence work is bounded by collection cardinality and scalar sizes.
 - JSON text evidence is size-gated before whole-string whitespace processing; decoder resource-guard failures, duplicate object keys, and non-standard NaN/Infinity constants fail closed.
+- JSON-RPC transport frames are also decoded strictly: duplicate object members and Python-only NaN/Infinity constants fail closed before protocol state is interpreted.
 - Standard MCP content blocks are transport envelopes; only actual textual payloads can carry JSON evidence.
 - Embedded resources admit evidence only through exact-string `resource.text`; URI-less `resource.data`, blob payloads, and arbitrary resource extensions are non-evidentiary.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
@@ -40,39 +41,38 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened JSON-text evidence decoding so the 1 MiB ceiling precedes `strip()`, parser resource-guard failures fail closed, duplicate object member names are rejected, and Python-only NaN/Infinity constants cannot create parser-differential acceptance.
 - Hardened already-structured numeric evidence so arbitrary-precision Python integers that cannot be represented by the upstream float64-oriented Prometheus model are rejected rather than bypassing JSON decoder digit limits.
 - Added focused validation-gate selection so the MCP regression boundary can be executed without paying the cost of the entire production safety suite.
+- Hardened MCP stdio JSON-RPC decoding so ambiguous duplicate members and non-standard numeric constants cannot alter response IDs, result/error selection, or nested tool payload interpretation.
 
-## Latest run — 2026-09-23 — focused executable validation path
+## Latest run — 2026-09-24 — strict MCP JSON-RPC transport decoding
 
 ### Inspected at start
-Read `progress.md` completely, then inspected the hardened MCP evidence boundary, the runtime test inventory, `scripts/run_stageguard_validation.py`, and its validation-runner regressions. The repository already had a comprehensive isolated validation harness and a dedicated `Grafana MCP` gate, but there was no way to execute only that gate. That made the repeatedly identified next step—running the focused MCP suites—unnecessarily expensive and encouraged either ad-hoc test commands or a full validation run.
+Read `progress.md` completely, then inspected the repository tree, pinned `docker-compose.yml`, `runtime/mcp_smoke.py`, and the MCP transport regression suite. The evidence parser itself had already been hardened against duplicate JSON members and NaN/Infinity, but the outer stdio JSON-RPC transport still used Python's permissive default `json.loads`. That left a parser-differential boundary before the hardened evidence parser: duplicate `id`, `result`, `error`, or nested members used last-value-wins semantics, and Python-only NaN/Infinity tokens were accepted.
 
 ### Exact changes made
-- Updated `scripts/run_stageguard_validation.py` in commit `4718190c1396ef52d03b9e489209098a48989cee`.
-- Added repeatable `--gate NAME` selection using exact canonical gate names. No `--gate` preserves the existing all-gates behavior.
-- Selection preserves canonical gate order and deduplicates repeated names; unknown names fail closed before any test subprocess launches.
-- `--require-full-coverage` remains a global repository-coverage assertion even when execution is focused, so selecting one gate cannot hide newly unowned runtime tests.
-- Added `runtime/tests/test_validation_gate_selection.py` in commit `6021bdec0616165a08db9d30ee997721573a645e` with coverage for default behavior, canonical ordering/deduplication, unknown-gate rejection, focused MCP-only execution, and global full-coverage semantics.
-- The new regression file is automatically owned by the existing `validation harness` gate through its `test_validation_*.py` pattern.
-- Focused MCP execution is now: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
+- Updated `runtime/mcp_smoke.py` in commit `859310001cd7e8461a8ccdcd5c4f02254cdf2fe6`.
+- Added `_strict_json_rpc_loads`, a transport decoder that rejects duplicate object member names at every nesting level and rejects NaN/Infinity/-Infinity before any JSON-RPC protocol state is interpreted.
+- Decoder failures, including JSON syntax errors, duplicate-member/non-standard-constant `ValueError`, and pathological nesting `RecursionError`, are converted to bounded `McpError` failures rather than leaking parser-specific exceptions.
+- Replaced the direct `json.loads(line)` call in `StdioClient.request` with the strict transport decoder. The existing 1 MiB frame-size ceiling remains ahead of decoding.
+- Updated `runtime/tests/test_mcp_smoke_transport.py` in commit `6daac48e073e60115b3168ee2d4f8fb1b1e66cb0` with positive strict-JSON coverage plus duplicate top-level ID, duplicate nested content, and all three non-standard numeric-constant regressions.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted the runner and regression-test commits.
-- Static review confirms the default path still selects `GATES` unchanged and that focused selection happens before the execution plan is built.
-- This connector runtime still does not expose an executable repository checkout, so the newly simplified MCP command and its tests were not executed here. No runtime-green claim is made.
+- GitHub accepted both implementation and regression-test commits.
+- Static review confirms every stdio response frame now crosses the strict decoder before notification/response classification, request-ID comparison, error handling, or result extraction.
+- This connector runtime still does not expose an executable checkout, so the focused `Grafana MCP` gate was not executed here. No runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Prefer extending the existing credential-scrubbed validation harness over introducing another MCP-specific runner.
-2. Gate names are exact rather than fuzzy to prevent typo-driven partial validation.
-3. Focused execution must not weaken `--require-full-coverage`; coverage ownership is a repository-wide invariant.
-4. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of a checkout.
+1. Apply strict JSON semantics at the transport boundary as well as inside evidence text; otherwise ambiguous JSON can affect protocol routing before evidence validation runs.
+2. Reject duplicate members globally rather than only security-critical names, avoiding schema-dependent parser differentials as MCP response shapes evolve.
+3. Preserve the existing frame-size bound and fail closed on decoder recursion/resource errors.
+4. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of an executable checkout.
 
 ### Blockers / unknowns
-- The focused MCP gate still requires one executable checkout run; it is now a single explicit command rather than a full-suite requirement.
+- The focused MCP gate still requires one executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
-- JSON decoding still materializes the complete document up to 1 MiB before post-decode structural ceilings apply; executable memory/time profiling remains pending.
+- JSON decoding still materializes a complete transport frame up to 1 MiB; executable memory/time profiling remains pending.
 
 ## Single best next step
-In an executable checkout run `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going` and fix any regression it exposes; if green, immediately perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` transport fixture for permanent integration coverage.
+In an executable checkout run `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`; if green, immediately perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` transport fixture for permanent integration coverage.
