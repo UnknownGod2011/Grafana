@@ -17,6 +17,7 @@ from mcp_datasource_identity import contains_datasource_uid
 from mcp_diagnostics import safe_diagnostic
 from mcp_smoke_gate import PrometheusEvidenceError, assert_expected_prometheus_sample
 from mcp_smoke_reporting import SmokeReportError, build_safe_smoke_report
+from mcp_tool_surface import ToolSurfaceError, validated_read_only_tool_map
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
@@ -24,12 +25,10 @@ MAX_REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_STDIO_LINE_CHARS = 1_048_576
 MAX_STDOUT_QUEUE_FRAMES = 16
 MAX_SERVER_INFO_FIELD_CHARS = 128
-MAX_TOOL_NAME_CHARS = 128
 MAX_CONFIG_TEXT_CHARS = 512
 MAX_PAYLOAD_NESTING_DEPTH = 16
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv("STAGEGUARD_MCP_SMOKE_QUERY", 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}')
-REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
 _CONTENT_METADATA_KEYS = frozenset({"type", "mimeType", "annotations", "meta", "_meta"})
 _UNSAFE_DISPLAY_CODEPOINTS = frozenset({0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069})
 _SENSITIVE_ARG_MARKERS = frozenset({"token", "secret", "password", "passwd", "apikey", "api-key", "authorization", "cookie", "credential", "credentials"})
@@ -53,14 +52,7 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _strict_json_rpc_loads(line: str) -> Any:
-    """Decode one JSON-RPC frame without Python-specific parser extensions.
-
-    JSON-RPC peers must agree on the meaning of security-critical members such
-    as ``id``, ``result`` and ``error``. Python's default decoder accepts both
-    duplicate object names (last value wins) and NaN/Infinity tokens, so the
-    smoke boundary rejects those ambiguous/non-standard documents everywhere
-    in the frame before interpreting protocol state.
-    """
+    """Decode one JSON-RPC frame without Python-specific parser extensions."""
     try:
         return json.loads(line, object_pairs_hook=_strict_json_object, parse_constant=_reject_json_constant)
     except (json.JSONDecodeError, ValueError, RecursionError) as exc:
@@ -253,40 +245,15 @@ class StdioClient:
             self.proc.stdout.close()
 
 
-def _tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    tools = result.get("tools", [])
-    if not isinstance(tools, list):
-        raise McpError("tools/list returned a non-list tools field")
-    mapped: dict[str, dict[str, Any]] = {}
-    for tool in tools:
-        if not isinstance(tool, dict):
-            raise McpError("tools/list returned a malformed tool entry")
-        name = tool.get("name")
-        if not isinstance(name, str) or not name.strip():
-            raise McpError("tools/list returned a tool without a valid name")
-        if len(name) > MAX_TOOL_NAME_CHARS or _contains_unsafe_display_char(name):
-            raise McpError("tools/list returned a tool with an unsafe name")
-        if name in mapped:
-            raise McpError(f"tools/list returned duplicate tool name: {name}")
-        mapped[name] = tool
-    return mapped
-
-
-def _assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
-    missing = sorted(REQUIRED_READ_TOOLS - tools.keys())
-    if missing:
-        raise McpError(f"Required read tools are missing: {missing}; available={sorted(tools)}")
-    not_explicitly_read_only = []
-    for name, tool in tools.items():
-        annotations = tool.get("annotations")
-        if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
-            not_explicitly_read_only.append(name)
-    if not_explicitly_read_only:
-        raise McpError("MCP advertised tools without readOnlyHint=true while StageGuard is configured as an evidence-only plane: " f"{sorted(not_explicitly_read_only)}")
+def _validated_tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Apply the sole tools/list structural + evidence-only policy boundary."""
+    try:
+        return validated_read_only_tool_map(result)
+    except ToolSurfaceError as exc:
+        raise McpError(f"unsafe MCP tool surface: {exc}") from exc
 
 
 def _has_meaningful_value(value: Any, *, depth: int = 0) -> bool:
-    """Return whether a bounded decoded JSON-like value contains operational payload."""
     if depth > MAX_PAYLOAD_NESTING_DEPTH:
         return False
     if isinstance(value, str):
@@ -309,7 +276,6 @@ def _has_nonempty_content_payload(item: Any) -> bool:
 
 
 def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
-    """Require an error-free MCP call that returned actual evidence content."""
     if result.get("isError"):
         raise McpError(f"{name} returned isError=true: {safe_diagnostic(result.get('content'))}")
     content = result.get("content")
@@ -320,7 +286,6 @@ def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
 
 
 def _assert_datasource_present(result: dict[str, Any], datasource_uid: str) -> None:
-    """Require list_datasources to prove that the exact configured datasource UID is visible."""
     _assert_tool_result("list_datasources", result)
     if not contains_datasource_uid(result.get("content"), datasource_uid):
         raise McpError(f"list_datasources did not return configured datasource UID {datasource_uid!r}")
@@ -338,8 +303,7 @@ def main() -> None:
         initialized = client.request("initialize", {"protocolVersion": requested_protocol, "capabilities": {}, "clientInfo": {"name": "stageguard-mcp-smoke", "version": "0.1.0"}})
         _assert_initialize_result(initialized, requested_protocol)
         client.send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-        tools = _tool_map(client.request("tools/list"))
-        _assert_read_only_tool_surface(tools)
+        tools = _validated_tool_map(client.request("tools/list"))
         datasources = client.request("tools/call", {"name": "list_datasources", "arguments": {}})
         _assert_datasource_present(datasources, datasource_uid)
         query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
