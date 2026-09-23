@@ -59,9 +59,6 @@ def _truncate(value: str, limit: int) -> str:
     if limit <= 0:
         return ""
 
-    # The marker length depends on the number of omitted characters, while the
-    # omitted count itself depends on how much room the marker consumes. Resolve
-    # that tiny fixed point so operator diagnostics do not under-report loss.
     omitted = len(value)
     while True:
         marker = f"...<truncated {omitted} chars>"
@@ -84,8 +81,15 @@ def _safe_text(value: str) -> str:
 
 
 def _safe_type_name(value: Any) -> str:
-    """Return a bounded/display-safe type name without invoking value hooks."""
-    name = type(value).__name__
+    """Return a bounded/display-safe type name without invoking extension hooks."""
+    cls = type(value)
+    try:
+        # Calling type.__getattribute__ directly bypasses a hostile metaclass'
+        # overridden __getattribute__. Merely evaluating cls.__name__ would let
+        # extension code run while formatting an otherwise opaque diagnostic.
+        name = type.__getattribute__(cls, "__name__")
+    except Exception:
+        return "unknown"
     if type(name) is not str:
         return "unknown"
     return _truncate(_display_safe(name), MAX_TYPE_NAME_CHARS)
@@ -114,10 +118,6 @@ def _unique_key(candidate: str, existing: dict[str, Any]) -> str:
 def _sanitize(value: Any, *, depth: int = 0) -> Any:
     if depth > MAX_DIAGNOSTIC_DEPTH:
         return "<max-depth>"
-    # Exact built-in type checks are intentional. Container/scalar subclasses may
-    # override iteration, slicing, len(), items(), or stringification hooks. MCP
-    # JSON decoding produces plain built-ins; extension-defined subclasses are
-    # therefore opaque diagnostic values rather than structures to traverse.
     if type(value) is str:
         return _safe_text(value)
     if value is None or type(value) in (bool, int, float):
