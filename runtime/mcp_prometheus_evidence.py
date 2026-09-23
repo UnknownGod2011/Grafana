@@ -7,10 +7,6 @@ mcp-grafana v1.4.1 QueryPrometheusResult contract: ``data`` is a Prometheus
 series, represented as a top-level list of objects with a metric label map and value(s).
 Scalar/string model values are not sufficient evidence for the StageGuard series probe.
 
-Callers may additionally bind acceptance to expected metric labels. This prevents a
-successful query transport from being mistaken for proof of the requested StageGuard
-series when an unrelated series is returned.
-
 This module is a trust boundary. Structured values are accepted only when they are exact
 JSON-like built-ins. Extension-defined subclasses are opaque so evidence validation does
 not execute attacker-controlled container/scalar hooks while inspecting an MCP response.
@@ -24,12 +20,11 @@ from typing import Any
 
 MAX_EVIDENCE_NESTING_DEPTH = 16
 MAX_JSON_TEXT_CHARS = 1_048_576
-_MCP_PAYLOAD_KEYS = frozenset({"content", "text", "resource", "structuredContent", "result"})
+_MCP_PAYLOAD_KEYS = frozenset({"content", "text", "structuredContent", "result"})
 _MCP_CONTENT_TYPES = frozenset({"text", "image", "audio", "resource", "resource_link"})
 
 
 def _finite_timestamp(value: Any) -> bool:
-    """Require Prometheus' JSON timestamp position to be a finite JSON number."""
     value_type = type(value)
     if value_type is int:
         return True
@@ -37,7 +32,6 @@ def _finite_timestamp(value: Any) -> bool:
 
 
 def _finite_sample_value(value: Any) -> bool:
-    """Accept a finite Prometheus sample value without invoking extension hooks."""
     value_type = type(value)
     if value_type is int:
         return True
@@ -53,17 +47,10 @@ def _finite_sample_value(value: Any) -> bool:
 
 
 def _is_sample_pair(value: Any) -> bool:
-    """Recognize Prometheus instant/range sample pairs: [timestamp, value]."""
-    return (
-        type(value) is list
-        and len(value) == 2
-        and _finite_timestamp(value[0])
-        and _finite_sample_value(value[1])
-    )
+    return type(value) is list and len(value) == 2 and _finite_timestamp(value[0]) and _finite_sample_value(value[1])
 
 
 def _is_metric_map(value: Any) -> bool:
-    """Require the label map carried by a Prometheus vector/matrix series."""
     return type(value) is dict and all(type(key) is str and type(label) is str for key, label in value.items())
 
 
@@ -93,34 +80,38 @@ def _decode_json_text(value: str) -> Any | None:
 
 
 def _series_has_sample(value: Any, expected_labels: dict[str, str] | None) -> bool:
-    """Validate one Prometheus vector/matrix series object."""
     if type(value) is not dict or not _is_metric_map(value.get("metric")):
         return False
     metric = value["metric"]
     if not _metric_matches_expected_labels(metric, expected_labels):
         return False
-
     if _is_sample_pair(value.get("value")):
         return True
-
     samples = value.get("values")
     return type(samples) is list and any(_is_sample_pair(sample) for sample in samples)
 
 
 def _data_contains_series_sample(value: Any, expected_labels: dict[str, str] | None) -> bool:
-    """Accept only the direct JSON shape of Prometheus vector/matrix model.Value."""
     return type(value) is list and any(_series_has_sample(series, expected_labels) for series in value)
 
 
 def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
-    """Identify standard MCP content blocks without coercing extension values.
-
-    A content block's top-level fields are transport metadata/payload slots, not the
-    QueryPrometheusResult itself. In particular, an extension ``data`` sibling on a
-    ``type: text``/``resource`` block must not be able to satisfy release evidence.
-    """
     block_type = value.get("type")
     return type(block_type) is str and block_type in _MCP_CONTENT_TYPES
+
+
+def _embedded_resource_payload(value: dict[Any, Any]) -> Any | None:
+    """Return only the textual payload of a standard MCP EmbeddedResource.
+
+    MCP resource content wraps TextResourceContents/BlobResourceContents. Arbitrary
+    siblings inside ``resource`` are resource metadata/extensions, not tool-result
+    envelopes, and therefore cannot satisfy telemetry evidence.
+    """
+    resource = value.get("resource")
+    if type(resource) is not dict:
+        return None
+    text = resource.get("text")
+    return text if type(text) is str else None
 
 
 def contains_prometheus_sample(
@@ -129,23 +120,7 @@ def contains_prometheus_sample(
     expected_labels: Mapping[str, str] | None = None,
     depth: int = 0,
 ) -> bool:
-    """Return True only for a qualifying series sample in a Grafana MCP query envelope.
-
-    ``expected_labels`` is an optional exact subset match against each series' metric
-    labels. Extra labels are allowed, but every expected key/value must be present on
-    the same series that carries the accepted sample. Invalid expected-label types fail
-    closed rather than silently disabling binding.
-
-    mcp-grafana v1.4.1 returns ``QueryPrometheusResult`` with ``data``, optional
-    ``hints``, and optional ``warnings``. MCP may serialize that object into a text
-    content block or expose structured content. Traversal is bounded and restricted to
-    known MCP payload-bearing fields; telemetry itself must have the direct
-    vector/matrix shape under ``data``. Standard MCP content blocks are transport
-    envelopes, so a sibling extension named ``data`` on such a block is never treated
-    as QueryPrometheusResult evidence. Metadata, annotations, warnings, hints, and
-    arbitrary extension fields cannot satisfy the evidence gate. Only exact JSON-like
-    built-ins are traversed; extension subclasses fail closed without invoking hooks.
-    """
+    """Return True only for a qualifying series sample in a Grafana MCP query envelope."""
     normalized_labels = _normalize_expected_labels(expected_labels)
     if expected_labels is not None and normalized_labels is None:
         return False
@@ -155,18 +130,24 @@ def contains_prometheus_sample(
     value_type = type(value)
     if value_type is str:
         decoded = _decode_json_text(value)
-        return decoded is not None and contains_prometheus_sample(
-            decoded, expected_labels=normalized_labels, depth=depth + 1
-        )
+        return decoded is not None and contains_prometheus_sample(decoded, expected_labels=normalized_labels, depth=depth + 1)
     if value_type is list:
-        return any(
-            contains_prometheus_sample(item, expected_labels=normalized_labels, depth=depth + 1)
-            for item in value
-        )
+        return any(contains_prometheus_sample(item, expected_labels=normalized_labels, depth=depth + 1) for item in value)
     if value_type is not dict:
         return False
 
-    if not _is_mcp_content_block(value) and "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
+    if _is_mcp_content_block(value):
+        block_type = value.get("type")
+        if block_type == "text":
+            payload = value.get("text")
+            return type(payload) is str and contains_prometheus_sample(payload, expected_labels=normalized_labels, depth=depth + 1)
+        if block_type == "resource":
+            payload = _embedded_resource_payload(value)
+            return payload is not None and contains_prometheus_sample(payload, expected_labels=normalized_labels, depth=depth + 1)
+        # image/audio/resource_link blocks do not carry JSON tool-result evidence.
+        return False
+
+    if "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
         return True
 
     return any(
