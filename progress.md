@@ -11,6 +11,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; ambiguous execution cannot replay remediation.
 - MCP release acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
 - Prometheus evidence traversal is limited to known MCP payload-bearing envelopes; warnings, hints, annotations, metadata, and arbitrary extension fields cannot satisfy the release gate.
+- MCP evidence parsing traverses only exact JSON-like built-ins; extension subclasses are opaque and cannot execute container/scalar hooks during validation.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
 - Diagnostic traversal is restricted to exact JSON-like built-ins; hostile extension subclasses are opaque.
@@ -34,36 +35,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added safe success reporting with no API for raw PromQL, MCP evidence content, or sample values.
 - Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, including hostile-object protection, collision preservation, display-control escaping, quoted-assignment redaction, strict output ceilings, exact truncation accounting, and metaclass-hook isolation.
 - Restricted semantic evidence traversal to actual MCP payload-bearing envelope fields so nested warning/annotation/extension lookalikes cannot create a false-positive release acceptance.
+- Hardened semantic evidence parsing so hostile dict/list/string/numeric subclasses and caller label mappings fail closed without extension-hook execution.
 
-## Latest run — 2026-09-23 — fail-closed MCP evidence envelope traversal
+## Latest run — 2026-09-23 — MCP evidence extension-hook isolation
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/mcp_smoke_gate.py`, `runtime/mcp_prometheus_evidence.py`, and its focused tests. The semantic sample validator correctly required the pinned v1.4.1 direct vector/matrix shape beneath `data`, but its transport traversal recursively visited every dictionary value. Therefore a complete series-shaped `{"data": [...]}` object nested inside a warning, annotation, metadata field, or arbitrary extension could incorrectly satisfy release acceptance even when the real query result was empty.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and its focused regression suite. The envelope allowlist correctly prevented warning/metadata spoofing, but the evidence parser still used `isinstance()` for upstream dict/list/string/numeric values. A malicious extension-defined subclass could therefore enter trusted traversal and execute overridden `items`, iteration, indexing, length, strip, or conversion hooks while StageGuard was validating an MCP response.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `c895841f99481474de691df1e6224cd3ba8aa2a6`.
-- Added an explicit allowlist of MCP payload-bearing envelope keys: `content`, `text`, `resource`, `structuredContent`, and `result`.
-- Direct pinned `QueryPrometheusResult.data` acceptance remains unchanged, but traversal no longer descends into warnings, hints, annotations, metadata, or unknown extension fields.
-- Updated module/docstring comments to make this trust boundary explicit.
-- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `e5a576a245068ef2b454384e20b4d7659d556c95`.
-- Added positive coverage for text and structured-content MCP envelopes.
-- Added fail-closed regressions for a full valid-looking query result nested inside `warnings`, `annotations`, and an arbitrary vendor extension.
-- Changed the depth-limit regression to use legitimate `content` envelopes, preserving actual bounded-traversal coverage after arbitrary-key recursion was removed.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `ecaf1ec5a7209b7a8f6bdf91f810d3bb1faf473d`.
+- Restricted structured evidence traversal, series/sample validation, metric maps, numeric/string parsing, and expected-label normalization to exact JSON-like built-ins.
+- Extension-defined subclasses now fail closed as opaque values; normal `json.loads` output remains compatible because it produces exact built-ins.
+- Added trust-boundary documentation explaining why extension subclasses are intentionally rejected.
+- Added hostile dict/list/string and expected-label mapping regressions. A follow-up commit `03931b1a5fd4a8a5df2848fa6f6fec47d145a4fa` preserved the full pre-existing evidence regression suite while retaining the new hostile-subclass cases.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
-### Research / attribution
-- Rechecked current Grafana MCP ecosystem material while evaluating the boundary. Official/community material continues to describe `query_prometheus` as the Grafana-backed PromQL evidence path and emphasizes service-account/Viewer-style access for read-oriented integrations. No third-party code was copied into StageGuard; the change is a local fail-closed parser policy around StageGuard's already-pinned upstream response contract.
-
 ### Checks / results
-- GitHub accepted both implementation and regression-test commits.
-- This run still has no executable repository checkout attached to Python/Docker, so the focused pytest suite and live Docker acceptance could not be executed here.
-- No new runtime-green claim is made; historical validation numbers above remain historical.
+- GitHub accepted the implementation and regression-test commits.
+- No executable checkout is attached to this runtime, so pytest and Docker acceptance were not executed. No runtime-green claim is made.
+- Historical validation numbers above remain historical.
 
 ### Decisions
-1. Transport tolerance must not mean arbitrary recursive trust: only documented/known payload-bearing MCP envelope fields may lead to evidence.
-2. Warning, hint, annotation, metadata, and vendor-extension material is contextual information, never proof that the requested StageGuard telemetry series exists.
-3. Keep direct `QueryPrometheusResult.data` parsing strict and non-recursive so only the pinned vector/matrix model shape can satisfy the gate.
-4. Do not trigger noisy GitHub Actions solely to compensate for the unavailable executable checkout.
+1. MCP response validation is a trust boundary, not merely schema parsing; arbitrary Python extension hooks must never execute while proving telemetry evidence.
+2. Exact JSON built-ins are sufficient for real MCP JSON transport and provide a simple fail-closed contract.
+3. Caller-supplied expected-label mappings use the same exact-built-in rule to avoid a secondary hook-execution path.
+4. Preserve all existing evidence regressions while adding security invariants; do not trade coverage for narrower tests.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout with repository files available to Python.
