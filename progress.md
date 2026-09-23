@@ -15,6 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before it is operator-visible.
 - Untrusted extension/container subclasses are opaque to MCP diagnostics; sanitizer traversal is limited to exact JSON-like built-ins so attacker hooks cannot execute.
 - Opaque diagnostic type markers are themselves bounded and display-safe; mutable class names cannot become a log-spoofing or output-amplification surface.
+- Sanitized mapping-key collisions must preserve each bounded diagnostic value rather than silently overwrite earlier evidence.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -35,31 +36,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, with credential redaction, output bounds, display-control escaping, and hostile-object protection.
 - Restricted diagnostic traversal to exact JSON-like built-ins and made extension-defined container/scalar subclasses opaque.
 - Hardened opaque type markers against mutable hostile class names containing controls, bidi formatting, or oversized text.
+- Preserved colliding sanitized mapping keys with deterministic bounded suffixes so one upstream diagnostic field cannot silently erase another.
 
-## Latest run — 2026-09-23 — MCP opaque type-marker hardening
+## Latest run — 2026-09-23 — MCP sanitized-key collision hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The previous run correctly made extension-defined values opaque, but their markers still interpolated `type(value).__name__` directly. Python class names are mutable metadata, so extension code can assign a name containing terminal controls, Unicode bidi/isolate characters, or very large text. That left a secondary operator-log spoofing/output-amplification surface even though instance `__str__`/`__repr__` hooks were no longer executed.
+Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The diagnostic sanitizer was secret-aware, display-safe, bounded, and protected from extension hooks, but different upstream mapping keys could collapse to the same sanitized display key. In particular, multiple opaque keys of the same extension type all render as `<Type-key>`. Building the sanitized Python dict therefore silently overwrote earlier diagnostic values, making failure evidence order-dependent and potentially hiding useful/redacted context.
 
 ### Exact changes made
-- Updated `runtime/mcp_diagnostics.py` in commit `48f49fc8b0207d201c4e79bfd9aa1f9709368f24`.
-- Added `_safe_type_name()` and a 96-character type-name bound.
-- Opaque value and mapping-key markers now pass class names through the existing display-control neutralization before bounded rendering.
-- Preserved exact-built-in traversal, recursive secret redaction, inline Bearer/Basic/assignment/URL credential redaction, depth/item/string/final-output bounds, and useful plain-JSON error context.
-- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `3fbcd9c9015bc8ec165f593d344fc674750a3897`.
-- Added regressions for hostile mutable class names containing CR/LF, ESC, bidi/isolate controls, and hundreds of characters in both opaque values and opaque mapping keys.
+- Updated `runtime/mcp_diagnostics.py` in commit `509edb3129ac3ffc570ac6a8063a133457bf94d7`.
+- Added `_unique_key()` to preserve collisions using deterministic `#2`, `#3`, ... suffixes bounded by the existing maximum diagnostic item count.
+- Collision handling operates only on already-sanitized trusted strings and the sanitized output dict; it does not invoke hooks on untrusted key objects.
+- Preserved sensitive-key redaction based on the original exact-string key before the child value is admitted to diagnostics.
+- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `9852503aa1f5d32bb76f555fec1017dc4edcf27e`.
+- Added a regression proving two distinct opaque keys of the same type retain both failure values and receive stable display keys.
+- Kept hostile-key hook protection by using identity hashing in the test key fixture rather than relying on a constant hash.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression-test commits.
-- Source inspection confirms opaque type names now cross the same display-safety boundary as other operator-visible diagnostic text and are independently bounded.
+- Source inspection confirms sanitized-key collisions no longer silently overwrite prior values and collision suffix generation does not touch untrusted objects.
 - This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Preserve useful type identity in diagnostics rather than collapsing all unknown values to one marker, but treat class-name metadata as untrusted display text.
-2. Reuse `_display_safe()` rather than credential-redaction logic for type names: class names are structural metadata, while the relevant risk is display spoofing/output amplification.
-3. Keep local/free executable validation as the next priority and avoid triggering GitHub Actions solely for connector-authored hardening.
+1. Preserve every bounded diagnostic field rather than accept last-write-wins behavior after display sanitization.
+2. Resolve collisions after `_safe_key()` but retain sensitivity classification from the original key, keeping display identity and secret classification separate.
+3. Keep the suffix space bounded by `MAX_DIAGNOSTIC_ITEMS`; the sanitizer already rejects wider diagnostic traversal.
+4. Avoid GitHub Actions solely for this connector-authored change; executable local validation remains preferable.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout.
