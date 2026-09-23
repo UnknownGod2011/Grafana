@@ -2,6 +2,7 @@ from mcp_diagnostics import (
     MAX_DIAGNOSTIC_CHARS,
     MAX_DIAGNOSTIC_STRING_CHARS,
     _safe_text,
+    _truncate,
     safe_diagnostic,
 )
 
@@ -59,6 +60,20 @@ def test_string_and_final_diagnostic_caps_include_truncation_marker():
     rendered = safe_diagnostic({f"field-{i}": "x" * 2000 for i in range(32)})
     assert len(rendered) == MAX_DIAGNOSTIC_CHARS
     assert "truncated" in rendered
+
+
+def test_truncation_marker_reports_exact_number_of_omitted_characters():
+    source = "x" * 1000
+    rendered = _truncate(source, 80)
+    assert len(rendered) == 80
+    kept = len(rendered.split("...<truncated ", 1)[0])
+    assert f"...<truncated {len(source) - kept} chars>" in rendered
+
+
+def test_truncate_handles_tiny_and_zero_limits_without_exceeding_them():
+    assert _truncate("abcdef", 0) == ""
+    for limit in range(1, 24):
+        assert len(_truncate("x" * 1000, limit)) <= limit
 
 
 def test_unknown_objects_do_not_execute_repr():
