@@ -20,6 +20,10 @@ from typing import Any
 
 MAX_EVIDENCE_NESTING_DEPTH = 16
 MAX_JSON_TEXT_CHARS = 1_048_576
+# Only these MCP transport fields may contain the actual tool payload. Do not recurse
+# through annotations, metadata, warnings, hints, or arbitrary extension fields: a
+# series-shaped object there is not evidence returned by query_prometheus.
+_MCP_PAYLOAD_KEYS = frozenset({"content", "text", "resource", "structuredContent", "result"})
 
 
 def _finite_number(value: Any) -> bool:
@@ -110,8 +114,10 @@ def contains_prometheus_sample(
 
     mcp-grafana v1.4.1 returns ``QueryPrometheusResult`` with ``data``, optional
     ``hints``, and optional ``warnings``. MCP may serialize that object into a text
-    content block or expose structured content. Transport/envelope traversal remains
-    bounded, but telemetry itself must have the direct vector/matrix shape under data.
+    content block or expose structured content. Traversal is bounded and restricted to
+    known MCP payload-bearing fields; telemetry itself must have the direct
+    vector/matrix shape under ``data``. Metadata, annotations, warnings, hints, and
+    arbitrary extension fields cannot satisfy the evidence gate.
     """
     normalized_labels = _normalize_expected_labels(expected_labels)
     if expected_labels is not None and normalized_labels is None:
@@ -134,9 +140,8 @@ def contains_prometheus_sample(
     if "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
         return True
 
-    # Traverse only MCP transport/envelope objects to locate QueryPrometheusResult.
-    # Once `data` is reached, acceptance is deliberately non-recursive.
     return any(
-        contains_prometheus_sample(child, expected_labels=normalized_labels, depth=depth + 1)
-        for child in value.values()
+        contains_prometheus_sample(value[key], expected_labels=normalized_labels, depth=depth + 1)
+        for key in _MCP_PAYLOAD_KEYS
+        if key in value
     )
