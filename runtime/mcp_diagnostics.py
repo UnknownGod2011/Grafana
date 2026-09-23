@@ -26,9 +26,13 @@ _SENSITIVE_KEY_PARTS = (
 _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
 _BASIC_RE = re.compile(r"(?i)\b(basic)\s+[A-Za-z0-9+/=]+")
 _URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://[^\s:/@]+:)[^\s@/]+(@)")
+# Assignment-style diagnostics often quote values containing whitespace. Match a
+# complete single/double-quoted value (including escaped characters) before the
+# unquoted fallback so redaction cannot leave the tail of a credential visible.
 _ASSIGNMENT_RE = re.compile(
     r"(?i)\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|token)"
-    r"(\s*[:=]\s*)([^\s,;]+)"
+    r"(\s*[:=]\s*)"
+    r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;]+)"
 )
 
 
