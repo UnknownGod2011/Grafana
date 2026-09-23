@@ -13,6 +13,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Prometheus sample timestamps must be finite JSON numbers; numeric-looking timestamp strings are rejected.
 - Evidence traversal is limited to known MCP payload envelopes and exact JSON-like built-ins; extension subclasses are opaque.
 - Structured MCP evidence work is bounded by collection cardinality and scalar sizes: transport collections, Prometheus series, samples, label maps, sample-value strings, and label strings have explicit fail-closed ceilings.
+- JSON text evidence is size-gated before whole-string whitespace processing, and decoder resource-guard failures fail closed rather than escaping release acceptance.
 - Standard MCP content blocks are transport envelopes. Text and embedded-resource evidence must come from their actual textual payload; image/audio/resource-link blocks cannot smuggle query evidence through extension fields.
 - Embedded resources admit evidence only through exact-string `resource.text`; URI-less `resource.data`, blob payloads, and arbitrary resource extensions are non-evidentiary.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
@@ -38,38 +39,37 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Reconciled the older focused MCP regression suite with that hardened resource contract so it no longer expects forbidden `resource.data` evidence.
 - Added explicit fail-closed collection/work ceilings for MCP transport collections, Prometheus series, samples, metric labels, and expected-label maps.
 - Added explicit scalar-size ceilings for numeric sample strings and metric/expected label names and values so bounded collection counts cannot still carry attacker-sized scalar work.
+- Hardened JSON-text evidence decoding so the 1 MiB ceiling is checked before `strip()`, and parser `ValueError`/`RecursionError` resource guards fail closed.
 
-## Latest run — 2026-09-23 — MCP evidence scalar-size ceilings
+## Latest run — 2026-09-23 — JSON text decoder resource hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. The previous run correctly bounded collection cardinalities, but exact built-in strings inside already-structured MCP payloads remained independently unbounded. In particular, a sample value could force `strip()`/`float()` over an attacker-sized string and label matching could hash/compare attacker-sized names or values repeatedly despite the label-count ceiling.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. The parser already imposed a 1 MiB JSON-text ceiling, but `_decode_json_text` called `value.strip()` before checking that ceiling. An oversized upstream text payload therefore still incurred a full-string scan/allocation before rejection. I also found that `json.loads` was only catching `JSONDecodeError`; CPython resource guards such as the integer digit limit can raise `ValueError`, and pathological nesting can raise `RecursionError`, allowing hostile but size-bounded text to escape the evidence boundary as an exception.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `bb45ed20507ecd933514cb7551b2c744594e74f3`.
-- Added fail-closed scalar ceilings: 128 characters for numeric sample-value strings, 1,024 characters for label names, and 4,096 characters for label values.
-- Sample strings are length-checked before `strip()` and numeric conversion.
-- Metric labels and caller-supplied expected labels now share one exact-built-in/type-and-size validator before matching.
-- Preserved finite numeric semantics, collection ceilings, nesting limits, JSON text limits, exact-built-in checks, expected-label binding, and MCP envelope/resource trust boundaries.
-- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `179d27b7ef1bda8a15ee07e2d6b86d70bccbc777` with at-limit/over-limit sample-value coverage and metric/expected-label scalar-bound regressions.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `4c18da2bbf6b78a62a7c040cf38af6cf60803aa2`.
+- Reordered JSON text validation so `len(value) > MAX_JSON_TEXT_CHARS` fails before whitespace stripping or JSON parsing.
+- Extended decoder failure handling to `ValueError` and `RecursionError` in addition to `JSONDecodeError`, preserving fail-closed release semantics for interpreter parser resource guards.
+- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `287301c14bb7a5279ee51d3830df260af05dcea7` with oversized-text rejection and a 10,000-digit JSON integer regression that must return non-evidentiary rather than escape as an exception.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression-test commits.
-- Static review confirms oversized sample strings are rejected before whitespace stripping/float parsing and oversized labels before evidence matching.
+- Static review confirms the text-size ceiling now precedes `strip()` and parsing, and known JSON parser resource-guard exceptions are converted to a non-evidentiary result.
 - This connector runtime does not expose an executable repository checkout, so pytest and Docker acceptance were not run. No runtime-green claim is made for these connector-authored changes.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Cardinality bounds alone are insufficient for untrusted structured data; per-scalar bounds are part of the same release-gate resource-security invariant.
-2. Keep label value allowance materially larger than names to accommodate legitimate media-workflow identifiers while still imposing a deterministic ceiling.
-3. Apply the same label constraints to observed metrics and expected labels so caller-controlled matching cannot bypass the resource bound.
+1. A resource ceiling must be enforced before operations proportional to the rejected input size; checking it after `strip()` undermines the boundary's purpose.
+2. Interpreter JSON resource guards are expected hostile-input outcomes at this trust boundary and should fail closed, not crash release acceptance.
+3. Keep the existing 1 MiB text ceiling for compatibility until executable profiling or a real MCP fixture justifies a tighter production value.
 4. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of a checkout.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout with repository files available to Python.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
-- JSON decoding is bounded by input character count but still materializes the complete <=1 MiB document before post-decode structural ceilings apply; executable memory/time profiling remains pending.
+- JSON decoding still materializes the complete document up to 1 MiB before post-decode structural ceilings apply; executable memory/time profiling remains pending.
 
 ## Single best next step
 Execute the focused MCP evidence/diagnostic suites in a real checkout and fix any regressions, then perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` transport fixture for permanent integration coverage.
