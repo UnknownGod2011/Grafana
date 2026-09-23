@@ -100,23 +100,18 @@ def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
     return type(block_type) is str and block_type in _MCP_CONTENT_TYPES
 
 
-def _embedded_resource_payload(value: dict[Any, Any]) -> Any | None:
-    """Return the evidence-bearing payload of an MCP EmbeddedResource.
+def _embedded_resource_payload(value: dict[Any, Any]) -> str | None:
+    """Return JSON-capable text from a standards-shaped MCP EmbeddedResource.
 
-    A standards-shaped resource has a URI and carries text/blob content. Only textual
-    resource content can contain JSON query evidence. The URI-less ``resource: {data:}``
-    branch is retained solely for the repository's historical pre-spec fixture; it is
-    not accepted once the object identifies itself as real ResourceContents via ``uri``.
+    ResourceContents carries its payload in ``text`` or ``blob``. StageGuard only admits
+    exact-string ``text`` because query evidence is JSON; arbitrary resource extension
+    fields and binary blobs are deliberately non-evidentiary.
     """
     resource = value.get("resource")
     if type(resource) is not dict:
         return None
     text = resource.get("text")
-    if type(text) is str:
-        return text
-    if "uri" not in resource and "data" in resource:
-        return resource
-    return None
+    return text if type(text) is str else None
 
 
 def contains_prometheus_sample(
