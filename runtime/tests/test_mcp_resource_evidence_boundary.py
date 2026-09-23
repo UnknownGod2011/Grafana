@@ -27,6 +27,16 @@ def test_rejects_data_extension_inside_standard_embedded_resource() -> None:
     assert not contains_prometheus_sample(payload, expected_labels={"production_id": "broadcast-alpha"})
 
 
+def test_rejects_legacy_uriless_resource_data_extension() -> None:
+    payload = [{
+        "type": "resource",
+        "resource": {
+            "data": [{"metric": {"production_id": "broadcast-alpha"}, "value": [1789990000, "99"]}],
+        },
+    }]
+    assert not contains_prometheus_sample(payload, expected_labels={"production_id": "broadcast-alpha"})
+
+
 def test_rejects_data_extension_inside_blob_resource() -> None:
     payload = [{
         "type": "resource",
