@@ -56,7 +56,6 @@ def test_string_and_final_diagnostic_caps_include_truncation_marker():
     safe_text = _safe_text("x" * (MAX_DIAGNOSTIC_STRING_CHARS * 4))
     assert len(safe_text) == MAX_DIAGNOSTIC_STRING_CHARS
     assert "truncated" in safe_text
-
     rendered = safe_diagnostic({f"field-{i}": "x" * 2000 for i in range(32)})
     assert len(rendered) == MAX_DIAGNOSTIC_CHARS
     assert "truncated" in rendered
@@ -78,8 +77,7 @@ def test_truncate_handles_tiny_and_zero_limits_without_exceeding_them():
 
 def test_unknown_objects_do_not_execute_repr():
     class Dangerous:
-        def __repr__(self):
-            raise AssertionError("repr must not be called")
+        def __repr__(self): raise AssertionError("repr must not be called")
     assert safe_diagnostic(Dangerous()) == "'<Dangerous>'"
 
 
@@ -124,6 +122,17 @@ def test_scalar_subclasses_are_opaque_and_do_not_execute_stringification():
         def __repr__(self): raise AssertionError("repr must not be called")
     assert safe_diagnostic(DangerousInt(7)) == "'<DangerousInt>'"
     assert safe_diagnostic(DangerousStr("Bearer must-not-leak")) == "'<DangerousStr>'"
+
+
+def test_opaque_type_name_lookup_bypasses_hostile_metaclass_hooks():
+    class HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise AssertionError("metaclass __getattribute__ must not be called")
+            return super().__getattribute__(name)
+    class Opaque(metaclass=HostileMeta):
+        pass
+    assert safe_diagnostic(Opaque()) == "'<Opaque>'"
 
 
 def test_opaque_type_names_are_display_safe_and_bounded():
