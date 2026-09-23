@@ -106,6 +106,24 @@ def test_supports_structured_content_envelope() -> None:
     assert contains_prometheus_sample(payload, expected_labels={"uplink": "uplink-b"})
 
 
+def test_rejects_data_extension_on_text_content_block() -> None:
+    payload = [{
+        "type": "text",
+        "text": "operational message, not query evidence",
+        "data": [{"metric": {"production_id": "broadcast-alpha"}, "value": [1789990000, "99"]}],
+    }]
+    assert not contains_prometheus_sample(payload, expected_labels={"production_id": "broadcast-alpha"})
+
+
+def test_rejects_data_extension_on_resource_content_block() -> None:
+    payload = [{
+        "type": "resource",
+        "resource": {"uri": "stageguard://status", "text": "not query evidence"},
+        "data": [{"metric": {"uplink": "uplink-b"}, "value": [1789990000, "99"]}],
+    }]
+    assert not contains_prometheus_sample(payload, expected_labels={"uplink": "uplink-b"})
+
+
 def test_rejects_sample_lookalike_in_hints() -> None:
     payload = {"data": [], "hints": {"metric": {}, "value": [1789990000, "99"]}}
     assert not contains_prometheus_sample(payload)
