@@ -34,33 +34,36 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Restricted evidence traversal so warning/annotation/extension lookalikes and standard content-block `data` siblings cannot create false release acceptance.
 - Hardened embedded MCP resources so only textual payloads can carry JSON evidence; blob/resource-link/extension fields cannot masquerade as telemetry.
 - Removed the temporary URI-less `resource.data` compatibility path after inspecting the pinned official mcp-grafana v1.4.1 `QueryPrometheusResult` contract.
+- Reconciled the older focused MCP regression suite with that hardened resource contract so it no longer expects forbidden `resource.data` evidence.
 
-## Latest run — 2026-09-23 — official MCP contract alignment
+## Latest run — 2026-09-23 — MCP regression-suite consistency
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py`, the embedded-resource regression suite, and the pinned upstream `grafana/mcp-grafana` v1.4.1 `tools/prometheus.go` source. The previous run intentionally retained a URI-less `resource: {data: ...}` compatibility branch pending evidence about the official response contract.
+Read `progress.md` completely, inspected the repository tree, `runtime/mcp_prometheus_evidence.py`, and `runtime/tests/test_mcp_prometheus_evidence.py`. The implementation correctly rejected URI-less `resource.data`, but the older focused regression suite still contained `test_supports_structured_mcp_content`, which expected that now-forbidden shape to pass. That stale test would make the next executable focused-suite run fail for the wrong reason and contradicted the security invariant established in the previous run.
 
 ### Exact changes made
-- Verified from the pinned upstream v1.4.1 source that `query_prometheus` returns `QueryPrometheusResult` with `Data model.Value` serialized as top-level JSON `data`, plus optional `hints` and `warnings`; the tool itself does not define a URI-less EmbeddedResource result contract.
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `9653754c16554dd159ae5aa7ff47ff5ed5d6fdcf` to remove the legacy URI-less `resource.data` acceptance branch. Embedded resources now expose evidence only through exact-string `resource.text`; blobs and arbitrary extension fields fail closed.
-- Updated `runtime/tests/test_mcp_resource_evidence_boundary.py` in commit `92fdc00c7e0e8c82007d6d00e56c11bd7b5a22c2` with an explicit regression proving URI-less `resource.data` cannot satisfy the release gate.
+- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `e7280bd3a3e98f3636964466609c85c9460f8d9b`.
+- Replaced the stale URI-less `resource.data` positive fixture with a standards-shaped EmbeddedResource carrying serialized query JSON in exact-string `resource.text` plus a URI.
+- Preserved the rest of the focused evidence regression coverage, including label binding, timestamp/sample semantics, extension smuggling rejection, nesting limits, and hostile-subclass fail-closed tests.
+- No implementation behavior was weakened to satisfy an obsolete test; the test was brought into alignment with the pinned upstream contract and current trust boundary.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both implementation/test commits.
-- Upstream source inspection was performed against the exact pinned `grafana/mcp-grafana` v1.4.1 tag, not an inferred/latest contract.
+- GitHub accepted the regression-suite commit.
+- Static consistency review now shows the focused positive EmbeddedResource fixture agrees with the implementation and the dedicated resource-boundary tests.
 - This connector runtime still does not provide an executable repository checkout, so pytest and Docker acceptance were not run. No runtime-green claim is made for connector-authored changes.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Prefer the exact pinned upstream tool contract over preserving a speculative historical fixture.
-2. Treat `QueryPrometheusResult.data` as the canonical structured evidence shape; MCP text/structured envelopes may transport that object, but unrelated resource extension fields cannot create evidence.
-3. Keep EmbeddedResource text support as transport tolerance while maintaining a narrow fail-closed boundary.
+1. Never preserve a contradictory test merely because it predates a security hardening; positive fixtures must represent contracts StageGuard intentionally supports.
+2. Keep EmbeddedResource compatibility narrow: JSON query evidence may arrive in `resource.text`, not arbitrary resource extensions.
+3. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of a checkout.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout with repository files available to Python.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
+- The evidence parser has depth and JSON-text-size limits, but collection cardinality/work limits should be reviewed before treating hostile oversized structured MCP payloads as fully resource-bounded.
 
 ## Single best next step
-Execute the focused MCP unit/invariant suites in a real checkout. Then run Grafana `13.2.1` + official MCP `1.4.1`, capture a sanitized real `query_prometheus` response to confirm the transport envelope around the now-verified `QueryPrometheusResult` payload, and rerun the release smoke without logging credentials, raw PromQL, or sample values.
+Add explicit work/cardinality ceilings to structured MCP evidence traversal (top-level content items, series, samples, and label counts) with fail-closed regression tests, then execute the focused MCP suite and pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke when a real checkout is available.
