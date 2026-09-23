@@ -55,7 +55,7 @@ def test_unknown_objects_do_not_execute_repr():
 def test_unknown_mapping_keys_do_not_execute_str_or_repr():
     class DangerousKey:
         def __hash__(self):
-            return 1
+            return id(self)
 
         def __str__(self):
             raise AssertionError("str must not be called")
@@ -66,6 +66,20 @@ def test_unknown_mapping_keys_do_not_execute_str_or_repr():
     rendered = safe_diagnostic({DangerousKey(): "datasource unavailable"})
     assert "<DangerousKey-key>" in rendered
     assert "datasource unavailable" in rendered
+
+
+def test_colliding_opaque_mapping_keys_preserve_each_diagnostic_value():
+    class OpaqueKey:
+        pass
+
+    first = OpaqueKey()
+    second = OpaqueKey()
+    payload = {first: "first failure", second: "second failure"}
+    rendered = safe_diagnostic(payload)
+    assert "<OpaqueKey-key>" in rendered
+    assert "<OpaqueKey-key>#2" in rendered
+    assert "first failure" in rendered
+    assert "second failure" in rendered
 
 
 def test_container_subclasses_are_opaque_and_do_not_execute_hooks():
