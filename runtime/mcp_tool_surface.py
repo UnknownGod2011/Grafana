@@ -28,6 +28,8 @@ def _unsafe_name(value: str) -> bool:
 
 def bounded_tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return a unique name->tool map after enforcing deterministic work bounds."""
+    if type(result) is not dict:
+        raise ToolSurfaceError("tools/list result must be an exact dictionary")
     tools = result.get("tools", [])
     if type(tools) is not list:
         raise ToolSurfaceError("tools/list returned a non-list tools field")
@@ -52,7 +54,7 @@ def bounded_tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
     """Require StageGuard's mandatory evidence tools and explicit read-only annotations.
 
-    The official Grafana MCP is an evidence plane, never a remediation plane.  Treat
+    The official Grafana MCP is an evidence plane, never a remediation plane. Treat
     annotations as security-relevant protocol data: only exact built-in dictionaries
     are interpreted and ``readOnlyHint`` must be the literal boolean ``True``.
     """
@@ -75,3 +77,15 @@ def assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
             "MCP advertised tools without readOnlyHint=true while StageGuard is configured "
             f"as an evidence-only plane: {sorted(not_explicitly_read_only)}"
         )
+
+
+def validated_read_only_tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate one tools/list result as a single fail-closed trust-boundary operation.
+
+    Keeping mapping and policy application atomic prevents callers from accidentally
+    consuming the advertised tool surface after structural validation but before the
+    evidence-only policy has been enforced.
+    """
+    tools = bounded_tool_map(result)
+    assert_read_only_tool_surface(tools)
+    return tools
