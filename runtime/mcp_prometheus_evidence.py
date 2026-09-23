@@ -95,11 +95,16 @@ def _metric_matches_expected_labels(metric: dict[str, str], expected_labels: dic
 
 
 def _decode_json_text(value: str) -> Any | None:
-    if not value.strip() or len(value) > MAX_JSON_TEXT_CHARS:
+    # Check the hard size ceiling before any whole-string transformation/scan such as
+    # strip(). Oversized upstream MCP text must fail closed with constant auxiliary
+    # memory rather than first allocating a second attacker-sized string.
+    if len(value) > MAX_JSON_TEXT_CHARS or not value.strip():
         return None
     try:
         return json.loads(value)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        # ValueError also covers interpreter integer-digit limits on hostile JSON
+        # numbers; RecursionError keeps deeply nested-but-size-bounded JSON fail-closed.
         return None
 
 
