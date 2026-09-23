@@ -119,3 +119,15 @@ def test_duplicate_nested_metric_keys_are_rejected_even_if_last_matches() -> Non
 def test_unique_json_object_members_remain_accepted() -> None:
     payload = '{"data":[{"metric":{"service":"stageguard"},"value":[1789990000,"1"]}]}'
     assert contains_prometheus_sample(payload, expected_labels={"service": "stageguard"})
+
+
+def test_non_standard_json_constants_fail_closed_even_outside_evidence_path() -> None:
+    valid_data = '[{"metric":{},"value":[1789990000,"1"]}]'
+    for token in ("NaN", "Infinity", "-Infinity"):
+        payload = '{"extension":' + token + ',"data":' + valid_data + "}"
+        assert not contains_prometheus_sample(payload)
+
+
+def test_standard_finite_json_number_in_extension_does_not_block_evidence() -> None:
+    payload = '{"extension":1.5,"data":[{"metric":{},"value":[1789990000,"1"]}]}'
+    assert contains_prometheus_sample(payload)
