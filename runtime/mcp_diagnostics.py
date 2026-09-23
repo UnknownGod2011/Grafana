@@ -53,14 +53,25 @@ def _display_safe(value: str) -> str:
 
 
 def _truncate(value: str, limit: int) -> str:
-    """Return text no longer than limit, including its truncation marker."""
+    """Return text no longer than limit with an exact omitted-character count."""
     if len(value) <= limit:
         return value
-    omitted = len(value) - limit
-    marker = f"...<truncated {omitted} chars>"
-    if len(marker) >= limit:
-        return marker[:limit]
-    return value[: limit - len(marker)] + marker
+    if limit <= 0:
+        return ""
+
+    # The marker length depends on the number of omitted characters, while the
+    # omitted count itself depends on how much room the marker consumes. Resolve
+    # that tiny fixed point so operator diagnostics do not under-report loss.
+    omitted = len(value)
+    while True:
+        marker = f"...<truncated {omitted} chars>"
+        if len(marker) >= limit:
+            return marker[:limit]
+        kept = limit - len(marker)
+        exact_omitted = len(value) - kept
+        if exact_omitted == omitted:
+            return value[:kept] + marker
+        omitted = exact_omitted
 
 
 def _safe_text(value: str) -> str:
