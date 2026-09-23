@@ -49,25 +49,35 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _reject_json_constant(token: str) -> Any:
-    # Python's json module accepts NaN/Infinity/-Infinity by default even though they are
-    # not JSON numbers. Evidence must not depend on that permissive implementation detail.
     raise _AmbiguousJson(f"non-standard numeric constant: {token}")
 
 
-def _finite_timestamp(value: Any) -> bool:
+def _finite_builtin_number(value: Any) -> bool:
+    """Accept only exact built-in numbers representable as finite float64 values.
+
+    Prometheus timestamps and samples originate from float64-oriented model values. A
+    structured transport can otherwise inject an arbitrary-precision Python ``int`` that
+    bypasses JSON decoder digit guards and is not representable by the upstream model.
+    """
     value_type = type(value)
-    if value_type is int:
-        return True
-    return value_type is float and math.isfinite(value)
+    if value_type is float:
+        return math.isfinite(value)
+    if value_type is not int:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
+def _finite_timestamp(value: Any) -> bool:
+    return _finite_builtin_number(value)
 
 
 def _finite_sample_value(value: Any) -> bool:
-    value_type = type(value)
-    if value_type is int:
+    if _finite_builtin_number(value):
         return True
-    if value_type is float:
-        return math.isfinite(value)
-    if value_type is str:
+    if type(value) is str:
         if len(value) > MAX_SAMPLE_VALUE_CHARS:
             return False
         try:
@@ -83,20 +93,11 @@ def _is_sample_pair(value: Any) -> bool:
 
 
 def _valid_label_pair(key: Any, value: Any) -> bool:
-    return (
-        type(key) is str
-        and type(value) is str
-        and len(key) <= MAX_LABEL_NAME_CHARS
-        and len(value) <= MAX_LABEL_VALUE_CHARS
-    )
+    return type(key) is str and type(value) is str and len(key) <= MAX_LABEL_NAME_CHARS and len(value) <= MAX_LABEL_VALUE_CHARS
 
 
 def _is_metric_map(value: Any) -> bool:
-    return (
-        type(value) is dict
-        and len(value) <= MAX_LABELS_PER_SERIES
-        and all(_valid_label_pair(key, label) for key, label in value.items())
-    )
+    return type(value) is dict and len(value) <= MAX_LABELS_PER_SERIES and all(_valid_label_pair(key, label) for key, label in value.items())
 
 
 def _normalize_expected_labels(expected_labels: Mapping[str, str] | None) -> dict[str, str] | None:
@@ -116,24 +117,11 @@ def _metric_matches_expected_labels(metric: dict[str, str], expected_labels: dic
 
 
 def _decode_json_text(value: str) -> Any | None:
-    # Check the hard size ceiling before any whole-string transformation/scan such as
-    # strip(). Oversized upstream MCP text must fail closed with constant auxiliary
-    # memory rather than first allocating a second attacker-sized string.
     if len(value) > MAX_JSON_TEXT_CHARS or not value.strip():
         return None
     try:
-        # Reject duplicate object member names and Python's permissive NaN/Infinity
-        # extensions. Evidence is a security decision; accepting ambiguous/non-standard
-        # JSON creates parser-differential risk across runtimes and transports.
-        return json.loads(
-            value,
-            object_pairs_hook=_unique_json_object,
-            parse_constant=_reject_json_constant,
-        )
+        return json.loads(value, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
     except (json.JSONDecodeError, RecursionError, ValueError):
-        # ValueError covers strict-key/constant rejection and interpreter integer-digit
-        # limits on hostile JSON numbers; RecursionError keeps deeply nested-but-size-
-        # bounded JSON fail-closed.
         return None
 
 
@@ -163,7 +151,6 @@ def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
 
 
 def _embedded_resource_payload(value: dict[Any, Any]) -> str | None:
-    """Return JSON-capable text from a standards-shaped MCP EmbeddedResource."""
     resource = value.get("resource")
     if type(resource) is not dict:
         return None
@@ -171,12 +158,7 @@ def _embedded_resource_payload(value: dict[Any, Any]) -> str | None:
     return text if type(text) is str else None
 
 
-def contains_prometheus_sample(
-    value: Any,
-    *,
-    expected_labels: Mapping[str, str] | None = None,
-    depth: int = 0,
-) -> bool:
+def contains_prometheus_sample(value: Any, *, expected_labels: Mapping[str, str] | None = None, depth: int = 0) -> bool:
     """Return True only for a qualifying series sample in a Grafana MCP query envelope."""
     normalized_labels = _normalize_expected_labels(expected_labels)
     if expected_labels is not None and normalized_labels is None:
@@ -208,8 +190,4 @@ def contains_prometheus_sample(
     if "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
         return True
 
-    return any(
-        contains_prometheus_sample(value[key], expected_labels=normalized_labels, depth=depth + 1)
-        for key in _MCP_PAYLOAD_KEYS
-        if key in value
-    )
+    return any(contains_prometheus_sample(value[key], expected_labels=normalized_labels, depth=depth + 1) for key in _MCP_PAYLOAD_KEYS if key in value)
