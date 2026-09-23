@@ -26,6 +26,19 @@ def test_redacts_credentials_embedded_in_error_strings():
     assert "request failed" in rendered
 
 
+def test_redacts_quoted_assignment_credentials_without_leaking_tail():
+    payload = (
+        'request failed: password="correct horse battery staple" '
+        "secret='alpha beta gamma' "
+        'api_key="escaped\\\" quote tail" retryable=true'
+    )
+    rendered = safe_diagnostic(payload)
+    for secret_fragment in ("correct", "horse", "battery", "staple", "alpha", "beta", "gamma", "escaped", "quote tail"):
+        assert secret_fragment not in rendered
+    assert rendered.count("<redacted>") == 3
+    assert "retryable=true" in rendered
+
+
 def test_redacts_basic_auth_and_url_passwords():
     rendered = safe_diagnostic("Basic dXNlcjpwYXNz https://alice:swordfish@example.test/api")
     assert "dXNlcjpwYXNz" not in rendered
