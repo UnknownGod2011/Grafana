@@ -65,12 +65,7 @@ def _safe_text(value: str) -> str:
 
 
 def _safe_type_name(value: Any) -> str:
-    """Return a bounded/display-safe type name without invoking value hooks.
-
-    ``type(value).__name__`` is metadata on the class rather than an instance hook,
-    but extension code can mutate it to contain terminal controls or enormous text.
-    Keep opaque markers useful without creating a second log-spoofing surface.
-    """
+    """Return a bounded/display-safe type name without invoking value hooks."""
     name = type(value).__name__
     if type(name) is not str:
         return "unknown"
@@ -87,6 +82,23 @@ def _safe_key(key: Any) -> str:
     if key is None or type(key) in (bool, int, float):
         return _safe_text(str(key))
     return f"<{_safe_type_name(key)}-key>"
+
+
+def _unique_key(candidate: str, existing: dict[str, Any]) -> str:
+    """Preserve colliding sanitized keys without consulting untrusted objects.
+
+    Different upstream keys can collapse to the same display-safe marker (notably
+    multiple opaque keys of one extension type). Silent dict overwrite would make
+    diagnostics order-dependent and could hide an earlier redacted/operational
+    field. Add a bounded deterministic suffix using only trusted strings.
+    """
+    if candidate not in existing:
+        return candidate
+    for index in range(2, MAX_DIAGNOSTIC_ITEMS + 2):
+        alternate = f"{candidate}#{index}"
+        if alternate not in existing:
+            return alternate
+    return f"{candidate}#overflow"
 
 
 def _sanitize(value: Any, *, depth: int = 0) -> Any:
@@ -106,7 +118,7 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
             if index >= MAX_DIAGNOSTIC_ITEMS:
                 sanitized["<truncated-items>"] = len(value) - MAX_DIAGNOSTIC_ITEMS
                 break
-            display_key = _safe_key(key)
+            display_key = _unique_key(_safe_key(key), sanitized)
             sanitized[display_key] = _REDACTED if _sensitive_key(key) else _sanitize(child, depth=depth + 1)
         return sanitized
     if type(value) in (list, tuple):
