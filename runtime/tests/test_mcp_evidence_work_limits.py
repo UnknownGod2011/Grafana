@@ -94,13 +94,26 @@ def test_oversized_json_text_fails_closed() -> None:
 
 
 def test_json_integer_digit_limit_fails_closed_instead_of_escaping_decoder() -> None:
-    # CPython normally rejects integer literals above its configured digit ceiling with
-    # ValueError. The evidence boundary must turn that parser resource guard into a
-    # simple non-evidentiary result rather than crashing release acceptance.
     hostile_number = "9" * 10_000
     payload = '{"data":' + hostile_number + "}"
     assert len(payload) < MAX_JSON_TEXT_CHARS
     assert not contains_prometheus_sample(payload)
+
+
+def test_structured_arbitrary_precision_timestamp_fails_closed() -> None:
+    huge = 10**10_000
+    payload = {"data": [{"metric": {}, "value": [huge, "1"]}]}
+    assert not contains_prometheus_sample(payload)
+
+
+def test_structured_arbitrary_precision_sample_value_fails_closed() -> None:
+    huge = 10**10_000
+    payload = {"data": [{"metric": {}, "value": [1789990000, huge]}]}
+    assert not contains_prometheus_sample(payload)
+
+
+def test_finite_builtin_numeric_timestamp_and_sample_remain_accepted() -> None:
+    assert contains_prometheus_sample({"data": [{"metric": {}, "value": [1789990000.5, 1]}]})
 
 
 def test_duplicate_top_level_data_keys_are_rejected_even_if_last_is_valid() -> None:
@@ -109,10 +122,7 @@ def test_duplicate_top_level_data_keys_are_rejected_even_if_last_is_valid() -> N
 
 
 def test_duplicate_nested_metric_keys_are_rejected_even_if_last_matches() -> None:
-    payload = (
-        '{"data":[{"metric":{"service":"wrong","service":"stageguard"},'
-        '"value":[1789990000,"1"]}]}'
-    )
+    payload = ('{"data":[{"metric":{"service":"wrong","service":"stageguard"},' '"value":[1789990000,"1"]}]}')
     assert not contains_prometheus_sample(payload, expected_labels={"service": "stageguard"})
 
 
