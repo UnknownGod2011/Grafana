@@ -10,7 +10,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
 - Fresh Grafana telemetry is required to verify recovery; ambiguous execution cannot replay remediation.
 - MCP release acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
-- Prometheus sample timestamps must be finite JSON numbers; numeric-looking timestamp strings are rejected.
+- Prometheus sample timestamps and numeric sample values must be finite, exact built-in numerics representable as float64; arbitrary-precision structured integers fail closed. Numeric-looking timestamp strings are rejected.
 - Evidence traversal is limited to known MCP payload envelopes and exact JSON-like built-ins; extension subclasses are opaque.
 - Structured MCP evidence work is bounded by collection cardinality and scalar sizes.
 - JSON text evidence is size-gated before whole-string whitespace processing; decoder resource-guard failures, duplicate object keys, and non-standard NaN/Infinity constants fail closed.
@@ -38,30 +38,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Removed the temporary URI-less `resource.data` compatibility path after inspecting the pinned official mcp-grafana v1.4.1 `QueryPrometheusResult` contract.
 - Added explicit fail-closed collection/work and scalar-size ceilings.
 - Hardened JSON-text evidence decoding so the 1 MiB ceiling precedes `strip()`, parser resource-guard failures fail closed, duplicate object member names are rejected, and Python-only NaN/Infinity constants cannot create parser-differential acceptance.
+- Hardened already-structured numeric evidence so arbitrary-precision Python integers that cannot be represented by the upstream float64-oriented Prometheus model are rejected rather than bypassing JSON decoder digit limits.
 
-## Latest run — 2026-09-23 — strict JSON numeric-constant boundary
+## Latest run — 2026-09-23 — structured numeric representability boundary
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. The decoder had already been hardened against duplicate object keys, but Python `json.loads` still accepts `NaN`, `Infinity`, and `-Infinity` by default. Those tokens are not standard JSON numbers. Even when such a token lived in an unrelated extension field, the document could still proceed to valid `data` and satisfy release evidence, creating another parser-differential acceptance path across runtimes.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_evidence_work_limits.py`. JSON text already had an interpreter digit guard, but already-structured MCP objects could still inject an arbitrary-precision Python `int` as a timestamp or sample value. `_finite_timestamp` accepted every exact `int`, and `_finite_sample_value` did the same, so this path bypassed the JSON decoder's integer resource guard and admitted values not representable by the upstream float64-oriented Prometheus model.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `0907ca85e0930b38538c52e1f5b9de57b7572f93`.
-- Added a strict `parse_constant` hook that rejects `NaN`, `Infinity`, and `-Infinity` anywhere in JSON text before semantic evidence matching.
-- Generalized the internal ambiguity signal so duplicate-member and non-standard-constant rejection share the existing fail-closed `ValueError` decoder path.
-- Kept ordinary finite JSON numbers compatible.
-- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `171d604bc9db0771c3fcad3ffbfd5d6864c54941` with regressions proving all three non-standard constants are rejected even outside the evidence path, plus a finite-number positive control.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `ef349dda221fabf4c3a989249b46c0989f5d1a49`.
+- Added `_finite_builtin_number`, shared by timestamp and sample validation.
+- Exact built-in floats must remain finite. Exact built-in integers must be convertible to a finite float64-like Python float; `OverflowError` fails closed. Booleans and numeric subclasses remain rejected by exact-type checks.
+- Numeric string sample behavior and its existing 128-character ceiling are unchanged.
+- Extended `runtime/tests/test_mcp_evidence_work_limits.py` in commit `2580c3b5effb67d5a34b168548844d12be16d072` with arbitrary-precision structured timestamp and sample-value regressions plus a finite numeric positive control.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression-test commits.
-- Static review confirms `parse_constant` is invoked by Python's JSON decoder wherever a non-standard constant occurs, so a valid `data` sibling cannot bypass it.
+- Static review confirms `float(10**10000)` raises `OverflowError`, which the new helper converts to non-evidence, while ordinary finite integer/float samples remain accepted.
 - This connector runtime does not expose an executable repository checkout, so pytest and Docker acceptance were not run. No runtime-green claim is made for these connector-authored changes.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Release evidence text must be strict, interoperable JSON rather than Python's permissive JSON superset.
-2. Reject non-standard constants globally, not only inside Prometheus samples, because otherwise an unrelated extension can make the same document parse differently across components.
-3. Preserve finite JSON-number compatibility and all existing cardinality/scalar/depth ceilings.
+1. Structured MCP objects must not have a looser numeric domain than JSON-decoded evidence.
+2. Numeric evidence should be representable by the upstream Prometheus model rather than merely by Python's arbitrary-precision integer type.
+3. Preserve exact-type checks so hostile numeric subclasses and booleans remain opaque/non-evidentiary.
 4. Do not trigger GitHub Actions solely to compensate for the connector runtime's lack of a checkout.
 
 ### Blockers / unknowns
