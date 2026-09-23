@@ -10,6 +10,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Approval is exact-revision-bound and single-use; provider acceptance never counts as recovery.
 - Fresh Grafana telemetry is required to verify recovery; ambiguous execution cannot replay remediation.
 - MCP release acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
+- Prometheus sample timestamps must be finite JSON numbers; numeric-looking timestamp strings are not accepted as genuine Prometheus sample-pair evidence.
 - Prometheus evidence traversal is limited to known MCP payload-bearing envelopes; warnings, hints, annotations, metadata, and arbitrary extension fields cannot satisfy the release gate.
 - MCP evidence parsing traverses only exact JSON-like built-ins; extension subclasses are opaque and cannot execute container/scalar hooks during validation.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
@@ -36,30 +37,29 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, including hostile-object protection, collision preservation, display-control escaping, quoted-assignment redaction, strict output ceilings, exact truncation accounting, and metaclass-hook isolation.
 - Restricted semantic evidence traversal to actual MCP payload-bearing envelope fields so nested warning/annotation/extension lookalikes cannot create a false-positive release acceptance.
 - Hardened semantic evidence parsing so hostile dict/list/string/numeric subclasses and caller label mappings fail closed without extension-hook execution.
+- Tightened Prometheus sample-pair semantics so timestamps must be finite JSON numbers rather than merely numeric-looking strings.
 
-## Latest run — 2026-09-23 — MCP evidence extension-hook isolation
+## Latest run — 2026-09-23 — strict Prometheus timestamp evidence shape
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and its focused regression suite. The envelope allowlist correctly prevented warning/metadata spoofing, but the evidence parser still used `isinstance()` for upstream dict/list/string/numeric values. A malicious extension-defined subclass could therefore enter trusted traversal and execute overridden `items`, iteration, indexing, length, strip, or conversion hooks while StageGuard was validating an MCP response.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and its focused regression suite. The parser correctly rejected non-finite sample values and hostile scalar subclasses, but it used one permissive numeric helper for both positions of a Prometheus sample pair. That allowed a numeric-looking string in the timestamp position even though Prometheus JSON sample pairs encode timestamps as JSON numbers. A merely similar payload could therefore satisfy the release evidence gate.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `ecaf1ec5a7209b7a8f6bdf91f810d3bb1faf473d`.
-- Restricted structured evidence traversal, series/sample validation, metric maps, numeric/string parsing, and expected-label normalization to exact JSON-like built-ins.
-- Extension-defined subclasses now fail closed as opaque values; normal `json.loads` output remains compatible because it produces exact built-ins.
-- Added trust-boundary documentation explaining why extension subclasses are intentionally rejected.
-- Added hostile dict/list/string and expected-label mapping regressions. A follow-up commit `03931b1a5fd4a8a5df2848fa6f6fec47d145a4fa` preserved the full pre-existing evidence regression suite while retaining the new hostile-subclass cases.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `a4a3b29a21acea86d0370727ac032fccb8a5a6fe`.
+- Split timestamp validation from sample-value validation: timestamps now require an exact finite built-in `int`/`float`, while sample values retain finite numeric-string support required by Prometheus JSON responses.
+- Preserved the exact-built-in trust boundary so bools and extension subclasses cannot masquerade as numeric evidence or execute conversion hooks.
+- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `2e303bda61df365cb4e4bd48d84bde2e9b221e30` with regressions rejecting numeric-looking string timestamps and non-finite numeric timestamps while preserving the existing evidence suite.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted the implementation and regression-test commits.
+- GitHub accepted both implementation and regression-test commits.
 - No executable checkout is attached to this runtime, so pytest and Docker acceptance were not executed. No runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. MCP response validation is a trust boundary, not merely schema parsing; arbitrary Python extension hooks must never execute while proving telemetry evidence.
-2. Exact JSON built-ins are sufficient for real MCP JSON transport and provide a simple fail-closed contract.
-3. Caller-supplied expected-label mappings use the same exact-built-in rule to avoid a secondary hook-execution path.
-4. Preserve all existing evidence regressions while adding security invariants; do not trade coverage for narrower tests.
+1. Release evidence should match the actual Prometheus wire shape, not merely values that can be coerced into an equivalent number.
+2. Timestamp and sample-value positions intentionally have different validation rules because Prometheus JSON encodes them differently.
+3. Keep the parser fail-closed and exact-built-in-only rather than adding coercion that broadens the trust boundary.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout with repository files available to Python.
