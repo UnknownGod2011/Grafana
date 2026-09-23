@@ -25,16 +25,11 @@ from typing import Any
 MAX_EVIDENCE_NESTING_DEPTH = 16
 MAX_JSON_TEXT_CHARS = 1_048_576
 _MCP_PAYLOAD_KEYS = frozenset({"content", "text", "resource", "structuredContent", "result"})
+_MCP_CONTENT_TYPES = frozenset({"text", "image", "audio", "resource", "resource_link"})
 
 
 def _finite_timestamp(value: Any) -> bool:
-    """Require Prometheus' JSON timestamp position to be a finite JSON number.
-
-    Prometheus sample pairs encode timestamps as JSON numbers and sample values as JSON
-    strings. Accepting a numeric-looking timestamp string would make a merely similar
-    payload sufficient for release evidence, so timestamp validation is intentionally
-    stricter than sample-value validation.
-    """
+    """Require Prometheus' JSON timestamp position to be a finite JSON number."""
     value_type = type(value)
     if value_type is int:
         return True
@@ -75,8 +70,6 @@ def _is_metric_map(value: Any) -> bool:
 def _normalize_expected_labels(expected_labels: Mapping[str, str] | None) -> dict[str, str] | None:
     if expected_labels is None:
         return None
-    # This is caller-owned configuration rather than upstream MCP material, but avoid
-    # invoking extension hooks here as well. Public callers should provide a plain dict.
     if type(expected_labels) is not dict:
         return None
     if not all(type(key) is str and type(value) is str for key, value in expected_labels.items()):
@@ -119,6 +112,17 @@ def _data_contains_series_sample(value: Any, expected_labels: dict[str, str] | N
     return type(value) is list and any(_series_has_sample(series, expected_labels) for series in value)
 
 
+def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
+    """Identify standard MCP content blocks without coercing extension values.
+
+    A content block's top-level fields are transport metadata/payload slots, not the
+    QueryPrometheusResult itself. In particular, an extension ``data`` sibling on a
+    ``type: text``/``resource`` block must not be able to satisfy release evidence.
+    """
+    block_type = value.get("type")
+    return type(block_type) is str and block_type in _MCP_CONTENT_TYPES
+
+
 def contains_prometheus_sample(
     value: Any,
     *,
@@ -136,7 +140,9 @@ def contains_prometheus_sample(
     ``hints``, and optional ``warnings``. MCP may serialize that object into a text
     content block or expose structured content. Traversal is bounded and restricted to
     known MCP payload-bearing fields; telemetry itself must have the direct
-    vector/matrix shape under ``data``. Metadata, annotations, warnings, hints, and
+    vector/matrix shape under ``data``. Standard MCP content blocks are transport
+    envelopes, so a sibling extension named ``data`` on such a block is never treated
+    as QueryPrometheusResult evidence. Metadata, annotations, warnings, hints, and
     arbitrary extension fields cannot satisfy the evidence gate. Only exact JSON-like
     built-ins are traversed; extension subclasses fail closed without invoking hooks.
     """
@@ -160,7 +166,7 @@ def contains_prometheus_sample(
     if value_type is not dict:
         return False
 
-    if "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
+    if not _is_mcp_content_block(value) and "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
         return True
 
     return any(
