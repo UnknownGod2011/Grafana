@@ -39,6 +39,34 @@ class McpError(RuntimeError):
     pass
 
 
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object member: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON numeric constant: {value}")
+
+
+def _strict_json_rpc_loads(line: str) -> Any:
+    """Decode one JSON-RPC frame without Python-specific parser extensions.
+
+    JSON-RPC peers must agree on the meaning of security-critical members such
+    as ``id``, ``result`` and ``error``. Python's default decoder accepts both
+    duplicate object names (last value wins) and NaN/Infinity tokens, so the
+    smoke boundary rejects those ambiguous/non-standard documents everywhere
+    in the frame before interpreting protocol state.
+    """
+    try:
+        return json.loads(line, object_pairs_hook=_strict_json_object, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise McpError("MCP stdio stdout contained invalid or ambiguous JSON; stdout is reserved for strict JSON-RPC") from exc
+
+
 def _contains_unsafe_display_char(value: str) -> bool:
     for char in value:
         codepoint = ord(char)
@@ -187,10 +215,7 @@ class StdioClient:
                 raise line
             if line is None:
                 raise McpError(f"MCP process exited before {method} response (exit={self.proc.poll()})")
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise McpError("MCP stdio stdout contained non-JSON data; stdout is reserved for JSON-RPC") from exc
+            message = _strict_json_rpc_loads(line)
             if not isinstance(message, dict):
                 raise McpError("MCP stdio stdout contained a non-object JSON-RPC message")
             if message.get("jsonrpc") != "2.0":
