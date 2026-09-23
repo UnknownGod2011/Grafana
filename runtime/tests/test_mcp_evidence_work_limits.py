@@ -101,3 +101,21 @@ def test_json_integer_digit_limit_fails_closed_instead_of_escaping_decoder() -> 
     payload = '{"data":' + hostile_number + "}"
     assert len(payload) < MAX_JSON_TEXT_CHARS
     assert not contains_prometheus_sample(payload)
+
+
+def test_duplicate_top_level_data_keys_are_rejected_even_if_last_is_valid() -> None:
+    payload = '{"data":[],"data":[{"metric":{},"value":[1789990000,"1"]}]}'
+    assert not contains_prometheus_sample(payload)
+
+
+def test_duplicate_nested_metric_keys_are_rejected_even_if_last_matches() -> None:
+    payload = (
+        '{"data":[{"metric":{"service":"wrong","service":"stageguard"},'
+        '"value":[1789990000,"1"]}]}'
+    )
+    assert not contains_prometheus_sample(payload, expected_labels={"service": "stageguard"})
+
+
+def test_unique_json_object_members_remain_accepted() -> None:
+    payload = '{"data":[{"metric":{"service":"stageguard"},"value":[1789990000,"1"]}]}'
+    assert contains_prometheus_sample(payload, expected_labels={"service": "stageguard"})
