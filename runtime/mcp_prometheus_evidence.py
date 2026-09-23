@@ -10,6 +10,8 @@ Scalar/string model values are not sufficient evidence for the StageGuard series
 This module is a trust boundary. Structured values are accepted only when they are exact
 JSON-like built-ins. Extension-defined subclasses are opaque so evidence validation does
 not execute attacker-controlled container/scalar hooks while inspecting an MCP response.
+Traversal is also cardinality-bounded so a syntactically valid but oversized MCP response
+cannot force unbounded Python iteration during release acceptance.
 """
 from __future__ import annotations
 
@@ -20,6 +22,10 @@ from typing import Any
 
 MAX_EVIDENCE_NESTING_DEPTH = 16
 MAX_JSON_TEXT_CHARS = 1_048_576
+MAX_MCP_COLLECTION_ITEMS = 128
+MAX_PROMETHEUS_SERIES = 256
+MAX_SAMPLES_PER_SERIES = 4_096
+MAX_LABELS_PER_SERIES = 128
 _MCP_PAYLOAD_KEYS = frozenset({"content", "text", "structuredContent", "result"})
 _MCP_CONTENT_TYPES = frozenset({"text", "image", "audio", "resource", "resource_link"})
 
@@ -51,13 +57,17 @@ def _is_sample_pair(value: Any) -> bool:
 
 
 def _is_metric_map(value: Any) -> bool:
-    return type(value) is dict and all(type(key) is str and type(label) is str for key, label in value.items())
+    return (
+        type(value) is dict
+        and len(value) <= MAX_LABELS_PER_SERIES
+        and all(type(key) is str and type(label) is str for key, label in value.items())
+    )
 
 
 def _normalize_expected_labels(expected_labels: Mapping[str, str] | None) -> dict[str, str] | None:
     if expected_labels is None:
         return None
-    if type(expected_labels) is not dict:
+    if type(expected_labels) is not dict or len(expected_labels) > MAX_LABELS_PER_SERIES:
         return None
     if not all(type(key) is str and type(value) is str for key, value in expected_labels.items()):
         return None
@@ -88,11 +98,15 @@ def _series_has_sample(value: Any, expected_labels: dict[str, str] | None) -> bo
     if _is_sample_pair(value.get("value")):
         return True
     samples = value.get("values")
-    return type(samples) is list and any(_is_sample_pair(sample) for sample in samples)
+    if type(samples) is not list or len(samples) > MAX_SAMPLES_PER_SERIES:
+        return False
+    return any(_is_sample_pair(sample) for sample in samples)
 
 
 def _data_contains_series_sample(value: Any, expected_labels: dict[str, str] | None) -> bool:
-    return type(value) is list and any(_series_has_sample(series, expected_labels) for series in value)
+    if type(value) is not list or len(value) > MAX_PROMETHEUS_SERIES:
+        return False
+    return any(_series_has_sample(series, expected_labels) for series in value)
 
 
 def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
@@ -132,6 +146,8 @@ def contains_prometheus_sample(
         decoded = _decode_json_text(value)
         return decoded is not None and contains_prometheus_sample(decoded, expected_labels=normalized_labels, depth=depth + 1)
     if value_type is list:
+        if len(value) > MAX_MCP_COLLECTION_ITEMS:
+            return False
         return any(contains_prometheus_sample(item, expected_labels=normalized_labels, depth=depth + 1) for item in value)
     if value_type is not dict:
         return False
