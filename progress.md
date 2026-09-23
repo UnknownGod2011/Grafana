@@ -15,6 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Structured MCP evidence work is bounded by collection cardinality and scalar sizes.
 - JSON text evidence is size-gated before whole-string whitespace processing; decoder resource-guard failures, duplicate object keys, and non-standard NaN/Infinity constants fail closed.
 - JSON-RPC transport frames are decoded strictly: duplicate object members and Python-only NaN/Infinity constants fail closed before protocol state is interpreted.
+- MCP tool discovery is bounded to 256 tools with exact built-in containers; the staged policy module also requires the mandatory evidence tools and literal `readOnlyHint=true` on every advertised tool.
 - Standard MCP content blocks are transport envelopes; only actual textual payloads can carry JSON evidence.
 - Embedded resources admit evidence only through exact-string `resource.text`; URI-less `resource.data`, blob payloads, and arbitrary resource extensions are non-evidentiary.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
@@ -37,36 +38,36 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added explicit fail-closed collection/work and scalar-size ceilings for Prometheus evidence.
 - Hardened JSON-text evidence and MCP JSON-RPC transport decoding against duplicate keys, parser resource failures, and non-standard numeric constants.
 - Added focused validation-gate selection for the MCP regression boundary.
-- Added a separately testable bounded MCP `tools/list` validator with exact-container checks and a 256-tool work ceiling; integration into the smoke path remains the immediate next change.
+- Added a separately testable bounded MCP `tools/list` validator and read-only policy with exact-container checks, a 256-tool work ceiling, mandatory evidence-tool checks, and strict read-only annotations; integration into the smoke path remains the immediate next change.
 
-## Latest run — 2026-09-24 — bounded MCP tool-surface validator
+## Latest run — 2026-09-24 — MCP read-only policy hardening
 
 ### Inspected at start
-Read `progress.md` completely, inspected the repository tree, then inspected `runtime/mcp_smoke.py` and its transport regressions. The transport frame is capped at 1 MiB, but `_tool_map` still iterates every advertised tool and accepts list/dict subclasses. That leaves avoidable attacker-controlled work and extension behavior at the `tools/list` trust boundary.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/mcp_tool_surface.py`, and the focused tool-surface regressions. The newly extracted bounded mapper was still staged outside the live smoke path, while the read-only policy remained duplicated in `mcp_smoke.py` and interpreted annotation dictionary subclasses permissively.
 
 ### Exact changes made
-- Added `runtime/mcp_tool_surface.py` in commit `53a5f22bd49408ff6ec8e6b66cdf083640f5789b`.
-- Added `MAX_MCP_TOOLS = 256` and `bounded_tool_map`, which rejects oversized tool surfaces before iteration, rejects list/dict subclasses, preserves duplicate-name rejection, and bounds/validates display-safe tool names.
-- Added `runtime/tests/test_mcp_tool_surface.py` in commit `0a45b7d849a2bb9005499c6be0c6c974e6b1937a` with at-limit acceptance, over-limit early rejection, duplicate-name, hostile-container-subclass, and unsafe-name coverage.
+- Extended `runtime/mcp_tool_surface.py` in commit `d6b7e59b2f426b87f17f898a0378d61c82e6b270` with `REQUIRED_READ_TOOLS` and `assert_read_only_tool_surface`.
+- The staged policy requires both `list_datasources` and `query_prometheus`, requires an exact built-in validated tool map, requires exact built-in annotation dictionaries, and accepts `readOnlyHint` only when it is the literal boolean `True`.
+- Extended `runtime/tests/test_mcp_tool_surface.py` in commit `c157c18bceacabaf52fb1bb59a25864f020c8d83` with positive required/additional read-tool coverage and negative coverage for missing mandatory tools, write-capable/unannotated tools, hostile annotation-dict subclasses, and truthy non-boolean hints.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both commits.
-- Static review confirms the new validator rejects a 257-entry surface before inspecting individual entries.
+- GitHub accepted both implementation/test commits.
+- Static review confirms the policy fails closed on annotation container subclasses and `readOnlyHint=1`, while preserving legitimate additional read-only Grafana tools.
 - This connector runtime does not expose an executable checkout, so the new tests were not executed and no green claim is made.
-- The validator is intentionally not yet claimed as an active runtime control: `runtime/mcp_smoke.py` still uses its local `_tool_map` until the next integration edit.
+- The module is still intentionally described as staged: `runtime/mcp_smoke.py` continues to use its duplicated local `_tool_map` and `_assert_read_only_tool_surface` until the integration edit is completed.
 
 ### Decisions
-1. Bound `tools/list` cardinality independently of the outer 1 MiB frame ceiling; byte bounds and semantic-work bounds protect different resources.
-2. Require exact built-in list/dict containers at this trust boundary so extension subclasses cannot introduce surprising iteration/access behavior.
-3. Keep the validator in a small module so its boundary behavior is directly testable without spawning Docker/MCP.
-4. Do not trigger GitHub Actions merely to compensate for the connector runtime lacking an executable checkout.
+1. Treat MCP tool annotations as security-relevant protocol data rather than advisory UI metadata because StageGuard relies on the official Grafana MCP as a read-only evidence plane.
+2. Require literal boolean `True` instead of truthiness to avoid cross-runtime/type ambiguity.
+3. Permit additional tools only when each is explicitly read-only; this keeps future official MCP versions compatible without silently admitting write-capable tools.
+4. Keep connector-authored tests distinct from executable validation and avoid noisy GitHub Actions runs.
 
 ### Blockers / unknowns
-- `bounded_tool_map` still needs to replace the local `_tool_map` implementation in `runtime/mcp_smoke.py`; until then the new cardinality control is staged, not active.
+- `bounded_tool_map` and `assert_read_only_tool_surface` still need to replace the duplicated local implementations in `runtime/mcp_smoke.py`; until then the stronger policy is staged, not active.
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
 
 ## Single best next step
-Wire `bounded_tool_map` into `runtime/mcp_smoke.py` (translating `ToolSurfaceError` to `McpError`), remove the duplicated local mapping logic, then run the focused `Grafana MCP` gate in an executable checkout before the pinned live Docker acceptance.
+Wire both `bounded_tool_map` and `assert_read_only_tool_surface` into `runtime/mcp_smoke.py`, translating `ToolSurfaceError` to `McpError` and deleting both duplicated local policy functions; then run the focused `Grafana MCP` gate before pinned live Docker acceptance.
