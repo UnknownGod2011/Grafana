@@ -26,9 +26,6 @@ _SENSITIVE_KEY_PARTS = (
 _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
 _BASIC_RE = re.compile(r"(?i)\b(basic)\s+[A-Za-z0-9+/=]+")
 _URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://[^\s:/@]+:)[^\s@/]+(@)")
-# Assignment-style diagnostics often quote values containing whitespace. Match a
-# complete single/double-quoted value (including escaped characters) before the
-# unquoted fallback so redaction cannot leave the tail of a credential visible.
 _ASSIGNMENT_RE = re.compile(
     r"(?i)\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|token)"
     r"(\s*[:=]\s*)"
@@ -55,17 +52,24 @@ def _display_safe(value: str) -> str:
     return "".join(parts)
 
 
+def _truncate(value: str, limit: int) -> str:
+    """Return text no longer than limit, including its truncation marker."""
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    marker = f"...<truncated {omitted} chars>"
+    if len(marker) >= limit:
+        return marker[:limit]
+    return value[: limit - len(marker)] + marker
+
+
 def _safe_text(value: str) -> str:
-    """Redact inline credentials, neutralize display controls, and bound text."""
+    """Redact inline credentials, neutralize display controls, and strictly bound text."""
     value = _BEARER_RE.sub(r"\1 " + _REDACTED, value)
     value = _BASIC_RE.sub(r"\1 " + _REDACTED, value)
     value = _URL_CREDENTIAL_RE.sub(r"\1" + _REDACTED + r"\2", value)
     value = _ASSIGNMENT_RE.sub(lambda m: m.group(1) + m.group(2) + _REDACTED, value)
-    value = _display_safe(value)
-    if len(value) > MAX_DIAGNOSTIC_STRING_CHARS:
-        omitted = len(value) - MAX_DIAGNOSTIC_STRING_CHARS
-        value = value[:MAX_DIAGNOSTIC_STRING_CHARS] + f"...<truncated {omitted} chars>"
-    return value
+    return _truncate(_display_safe(value), MAX_DIAGNOSTIC_STRING_CHARS)
 
 
 def _safe_type_name(value: Any) -> str:
@@ -73,10 +77,7 @@ def _safe_type_name(value: Any) -> str:
     name = type(value).__name__
     if type(name) is not str:
         return "unknown"
-    name = _display_safe(name)
-    if len(name) > MAX_TYPE_NAME_CHARS:
-        name = name[:MAX_TYPE_NAME_CHARS] + "..."
-    return name
+    return _truncate(_display_safe(name), MAX_TYPE_NAME_CHARS)
 
 
 def _safe_key(key: Any) -> str:
@@ -89,13 +90,7 @@ def _safe_key(key: Any) -> str:
 
 
 def _unique_key(candidate: str, existing: dict[str, Any]) -> str:
-    """Preserve colliding sanitized keys without consulting untrusted objects.
-
-    Different upstream keys can collapse to the same display-safe marker (notably
-    multiple opaque keys of one extension type). Silent dict overwrite would make
-    diagnostics order-dependent and could hide an earlier redacted/operational
-    field. Add a bounded deterministic suffix using only trusted strings.
-    """
+    """Preserve colliding sanitized keys without consulting untrusted objects."""
     if candidate not in existing:
         return candidate
     for index in range(2, MAX_DIAGNOSTIC_ITEMS + 2):
@@ -130,14 +125,9 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
         if len(value) > MAX_DIAGNOSTIC_ITEMS:
             items.append(f"<truncated {len(value) - MAX_DIAGNOSTIC_ITEMS} items>")
         return items
-    # Never invoke arbitrary repr/str/iteration implementations from untrusted extension types.
     return f"<{_safe_type_name(value)}>"
 
 
 def safe_diagnostic(value: Any) -> str:
-    """Return a bounded, secret-aware, display-safe representation of an MCP value."""
-    rendered = repr(_sanitize(value))
-    if len(rendered) <= MAX_DIAGNOSTIC_CHARS:
-        return rendered
-    omitted = len(rendered) - MAX_DIAGNOSTIC_CHARS
-    return rendered[:MAX_DIAGNOSTIC_CHARS] + f"...<truncated {omitted} chars>"
+    """Return a strictly bounded, secret-aware, display-safe MCP diagnostic."""
+    return _truncate(repr(_sanitize(value)), MAX_DIAGNOSTIC_CHARS)
