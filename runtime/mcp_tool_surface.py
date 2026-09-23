@@ -8,6 +8,7 @@ from typing import Any
 
 MAX_MCP_TOOLS = 256
 MAX_TOOL_NAME_CHARS = 128
+REQUIRED_READ_TOOLS = frozenset({"list_datasources", "query_prometheus"})
 _UNSAFE_DISPLAY_CODEPOINTS = frozenset(
     {0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069}
 )
@@ -46,3 +47,31 @@ def bounded_tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise ToolSurfaceError(f"tools/list returned duplicate tool name: {name}")
         mapped[name] = tool
     return mapped
+
+
+def assert_read_only_tool_surface(tools: dict[str, dict[str, Any]]) -> None:
+    """Require StageGuard's mandatory evidence tools and explicit read-only annotations.
+
+    The official Grafana MCP is an evidence plane, never a remediation plane.  Treat
+    annotations as security-relevant protocol data: only exact built-in dictionaries
+    are interpreted and ``readOnlyHint`` must be the literal boolean ``True``.
+    """
+    if type(tools) is not dict:
+        raise ToolSurfaceError("validated MCP tool map must be an exact dictionary")
+
+    missing = sorted(REQUIRED_READ_TOOLS - tools.keys())
+    if missing:
+        raise ToolSurfaceError(f"required read tools are missing: {missing}")
+
+    not_explicitly_read_only: list[str] = []
+    for name, tool in tools.items():
+        if type(name) is not str or type(tool) is not dict:
+            raise ToolSurfaceError("validated MCP tool map contains an invalid entry")
+        annotations = tool.get("annotations")
+        if type(annotations) is not dict or annotations.get("readOnlyHint") is not True:
+            not_explicitly_read_only.append(name)
+    if not_explicitly_read_only:
+        raise ToolSurfaceError(
+            "MCP advertised tools without readOnlyHint=true while StageGuard is configured "
+            f"as an evidence-only plane: {sorted(not_explicitly_read_only)}"
+        )
