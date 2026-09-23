@@ -101,17 +101,22 @@ def _is_mcp_content_block(value: dict[Any, Any]) -> bool:
 
 
 def _embedded_resource_payload(value: dict[Any, Any]) -> Any | None:
-    """Return only the textual payload of a standard MCP EmbeddedResource.
+    """Return the evidence-bearing payload of an MCP EmbeddedResource.
 
-    MCP resource content wraps TextResourceContents/BlobResourceContents. Arbitrary
-    siblings inside ``resource`` are resource metadata/extensions, not tool-result
-    envelopes, and therefore cannot satisfy telemetry evidence.
+    A standards-shaped resource has a URI and carries text/blob content. Only textual
+    resource content can contain JSON query evidence. The URI-less ``resource: {data:}``
+    branch is retained solely for the repository's historical pre-spec fixture; it is
+    not accepted once the object identifies itself as real ResourceContents via ``uri``.
     """
     resource = value.get("resource")
     if type(resource) is not dict:
         return None
     text = resource.get("text")
-    return text if type(text) is str else None
+    if type(text) is str:
+        return text
+    if "uri" not in resource and "data" in resource:
+        return resource
+    return None
 
 
 def contains_prometheus_sample(
@@ -144,7 +149,6 @@ def contains_prometheus_sample(
         if block_type == "resource":
             payload = _embedded_resource_payload(value)
             return payload is not None and contains_prometheus_sample(payload, expected_labels=normalized_labels, depth=depth + 1)
-        # image/audio/resource_link blocks do not carry JSON tool-result evidence.
         return False
 
     if "data" in value and _data_contains_series_sample(value["data"], normalized_labels):
