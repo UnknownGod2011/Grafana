@@ -13,10 +13,10 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Operator-visible smoke configuration rejects terminal/log-spoofing controls and bidi characters.
 - Raw PromQL/evidence/sample payloads must not be emitted by the normal release-smoke success report.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before it is operator-visible.
-- Untrusted extension/container subclasses are opaque to MCP diagnostics; sanitizer traversal is limited to exact JSON-like built-ins so attacker hooks cannot execute.
-- Opaque diagnostic type markers are themselves bounded and display-safe; mutable class names cannot become a log-spoofing or output-amplification surface.
-- Sanitized mapping-key collisions must preserve each bounded diagnostic value rather than silently overwrite earlier evidence.
-- Assignment-style credentials in diagnostics must be fully redacted even when quoted values contain whitespace or escaped quote characters.
+- Untrusted extension/container subclasses are opaque to MCP diagnostics; sanitizer traversal is limited to exact JSON-like built-ins.
+- Opaque diagnostic type markers are bounded and display-safe; sanitized mapping-key collisions preserve each bounded value.
+- Assignment-style credentials are fully redacted even when quoted values contain whitespace or escaped quotes.
+- Diagnostic limits are hard ceilings: truncation metadata itself must fit inside the configured string/final-output limit.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -31,46 +31,44 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened lifecycle startup/cleanup, Docker timeouts, teardown verification, loopback publishing, and MCP container privileges/resources.
 - Pinned Grafana `13.2.1` and official Grafana MCP `1.4.1`; release smoke verifies read-only tools and exact datasource UID.
 - Added bounded semantic Prometheus evidence parsing aligned to official v1.4.1 `QueryPrometheusResult`, expected-label binding, and bounded smoke configuration.
-- Wired expected-series binding into the production MCP release smoke and protected it with a credential-free AST invariant.
-- Hardened expected-label configuration against terminal/log spoofing while retaining safe printable Unicode.
-- Added and wired a bounded safe-report builder so release success output has no API for raw PromQL, MCP evidence content, or sample values.
-- Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, with credential redaction, output bounds, display-control escaping, and hostile-object protection.
-- Restricted diagnostic traversal to exact JSON-like built-ins and made extension-defined container/scalar subclasses opaque.
-- Hardened opaque type markers against mutable hostile class names containing controls, bidi formatting, or oversized text.
-- Preserved colliding sanitized mapping keys with deterministic bounded suffixes so one upstream diagnostic field cannot silently erase another.
-- Hardened inline assignment redaction so quoted credentials containing spaces or escaped quote characters are removed as one complete value rather than leaking a tail.
+- Wired expected-series binding into production release smoke and protected it with a credential-free AST invariant.
+- Added and wired a bounded safe-report builder so success output has no API for raw PromQL, MCP evidence content, or sample values.
+- Added and wired secret-aware MCP diagnostics for JSON-RPC/tool failures, with credential redaction, display-control escaping, hostile-object protection, collision preservation, and quoted-assignment redaction.
+- Restricted diagnostic traversal to exact JSON-like built-ins and hardened opaque type markers.
+- Made diagnostic string and final-output caps strict ceilings, including truncation metadata.
 
-## Latest run — 2026-09-23 — quoted credential diagnostic hardening
+## Latest run — 2026-09-23 — strict diagnostic output ceilings
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py`, `runtime/tests/test_mcp_diagnostics.py`, the runtime tree, MCP smoke, semantic evidence gate/parser, and repository Actions state. The prior diagnostic hardening covered recursive keyed secrets, Bearer/Basic auth, URL passwords, unquoted assignments, hostile objects, display controls, and output bounds. A remaining concrete leak existed in assignment-style error strings: the assignment regex stopped at whitespace, so an upstream message such as `password="correct horse battery staple"` redacted only the first token and left the remainder operator-visible. Repository Actions currently reports zero workflow runs, so no noisy CI was triggered.
+Read `progress.md` completely, then inspected `runtime/mcp_diagnostics.py` and `runtime/tests/test_mcp_diagnostics.py`. The sanitizer was semantically bounded but its truncation implementation appended a marker *after* taking the configured number of characters. Therefore `MAX_DIAGNOSTIC_STRING_CHARS=512` and `MAX_DIAGNOSTIC_CHARS=2048` were not true upper bounds: hostile payloads could exceed each advertised cap by the marker length. Existing tests tolerated this with `len(rendered) < 2200`, so the contract regression was not detected.
 
 ### Exact changes made
-- Updated `runtime/mcp_diagnostics.py` in commit `18b1a0119af87caab7ff58aee5d695f08b22a274`.
-- Changed assignment credential matching to consume complete single- or double-quoted values, including escaped characters, before falling back to the existing unquoted token form.
-- Preserved the existing sensitive field names and replacement contract: only the field name/separator survive and the credential becomes `<redacted>`.
-- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `c16e4f8dca4c89340285639aab5e7e363b4e3ff3`.
-- Added regression coverage for double-quoted passwords with spaces, single-quoted secrets with spaces, and a quoted API key containing an escaped quote; the test also proves adjacent non-secret operational context survives.
-- No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
+- Updated `runtime/mcp_diagnostics.py` in commit `80d8c85f42e71fc97c3bd358ad5dba64344d31d7`.
+- Added one dependency-free `_truncate(value, limit)` primitive that reserves room for its truncation marker and guarantees the returned string never exceeds `limit`.
+- Routed both per-string sanitization and final diagnostic rendering through that primitive.
+- Routed opaque type-name bounding through the same primitive, removing three subtly different truncation implementations.
+- Updated `runtime/tests/test_mcp_diagnostics.py` in commit `90fa754a7d651dee66b6be762cc4d992034f583b`.
+- Tightened the wide-payload assertion to `<= MAX_DIAGNOSTIC_CHARS` and added explicit regressions proving both the per-string and final diagnostic limits include truncation metadata.
+- Preserved the existing credential, hostile-object, display-spoofing, collision, Unicode, and operational-context regressions.
+- No cloud resources, credentials, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both implementation and regression-test commits.
-- Source inspection confirms quoted assignment alternatives are matched before the unquoted fallback, preventing whitespace-delimited credential tails from surviving redaction.
-- GitHub Actions API currently reports zero workflow runs for this repository; no CI execution was initiated solely for this connector-authored change.
-- This connector environment does not expose an executable repository checkout, so pytest/Docker acceptance was not executed and no new runtime-green claim is made.
+- GitHub accepted the implementation and regression-test commits.
+- Source-level inspection confirms `_truncate` computes marker size before slicing and is now the only truncation primitive in this module.
+- The connector environment still does not expose an executable checkout, so pytest/Docker acceptance was not run and no new runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Fix the concrete secret-leak edge case rather than continue broad speculative sanitizer changes.
-2. Keep redaction dependency-free and local to the MCP smoke path so release diagnostics remain available before application services start.
-3. Preserve non-secret neighboring error context because operator triage still needs actionable failure information.
-4. Do not add or trigger GitHub Actions merely to compensate for the missing executable checkout; the project explicitly prioritizes low-noise local validation.
+1. Treat configured diagnostic sizes as security/resource contracts, not approximate targets.
+2. Centralize truncation to prevent future call sites from repeating the append-after-cap bug.
+3. Keep the change dependency-free because release smoke diagnostics must work before application services start.
+4. Avoid noisy CI solely to compensate for the connector's missing executable checkout.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification.
-- The command-line redactor is separate from upstream-payload sanitization; its existing coverage should be rechecked during executable validation.
+- Command-line redactor coverage should be rechecked during executable validation.
 
 ## Single best next step
 Execute the focused MCP unit/invariant suites in a real checkout, fix any regressions, then run the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke and capture a sanitized real `query_prometheus` response as a regression fixture without logging credentials, raw PromQL, or sample values.
