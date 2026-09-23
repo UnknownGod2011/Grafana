@@ -11,7 +11,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Fresh Grafana telemetry is required to verify recovery; ambiguous execution cannot replay remediation.
 - MCP release acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
 - Prometheus sample timestamps must be finite JSON numbers; numeric-looking timestamp strings are not accepted as genuine Prometheus sample-pair evidence.
-- Prometheus evidence traversal is limited to known MCP payload-bearing envelopes; warnings, hints, annotations, metadata, and arbitrary extension fields cannot satisfy the release gate.
+- Prometheus evidence traversal is limited to known MCP payload-bearing envelopes; warnings, hints, annotations, metadata, arbitrary extension fields, and `data` extension siblings on standard MCP content blocks cannot satisfy the release gate.
 - MCP evidence parsing traverses only exact JSON-like built-ins; extension subclasses are opaque and cannot execute container/scalar hooks during validation.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
 - Upstream MCP failure material must pass through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
@@ -38,28 +38,30 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Restricted semantic evidence traversal to actual MCP payload-bearing envelope fields so nested warning/annotation/extension lookalikes cannot create a false-positive release acceptance.
 - Hardened semantic evidence parsing so hostile dict/list/string/numeric subclasses and caller label mappings fail closed without extension-hook execution.
 - Tightened Prometheus sample-pair semantics so timestamps must be finite JSON numbers rather than merely numeric-looking strings.
+- Hardened standard MCP content blocks so extension fields named `data` cannot masquerade as a direct `QueryPrometheusResult`; only their actual payload slots are traversed.
 
-## Latest run — 2026-09-23 — strict Prometheus timestamp evidence shape
+## Latest run — 2026-09-23 — MCP content-block evidence boundary
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and its focused regression suite. The parser correctly rejected non-finite sample values and hostile scalar subclasses, but it used one permissive numeric helper for both positions of a Prometheus sample pair. That allowed a numeric-looking string in the timestamp position even though Prometheus JSON sample pairs encode timestamps as JSON numbers. A merely similar payload could therefore satisfy the release evidence gate.
+Read `progress.md` completely, then inspected `runtime/mcp_prometheus_evidence.py` and `runtime/tests/test_mcp_prometheus_evidence.py`. The previous traversal hardening correctly ignored warnings, annotations, hints, and arbitrary extension fields, but direct `data` acceptance still occurred on every traversed dictionary. That left a false-positive path where a standard MCP content block such as `{"type":"text", ...}` or `{"type":"resource", ...}` could carry an unrelated extension sibling named `data` with a valid-looking series and satisfy release evidence even though the block's real payload did not contain query evidence.
 
 ### Exact changes made
-- Updated `runtime/mcp_prometheus_evidence.py` in commit `a4a3b29a21acea86d0370727ac032fccb8a5a6fe`.
-- Split timestamp validation from sample-value validation: timestamps now require an exact finite built-in `int`/`float`, while sample values retain finite numeric-string support required by Prometheus JSON responses.
-- Preserved the exact-built-in trust boundary so bools and extension subclasses cannot masquerade as numeric evidence or execute conversion hooks.
-- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `2e303bda61df365cb4e4bd48d84bde2e9b221e30` with regressions rejecting numeric-looking string timestamps and non-finite numeric timestamps while preserving the existing evidence suite.
+- Updated `runtime/mcp_prometheus_evidence.py` in commit `ca8f200633861de003672b66d4bc1af420b666d0`.
+- Added exact-string recognition for standard MCP content block types (`text`, `image`, `audio`, `resource`, `resource_link`).
+- Direct `QueryPrometheusResult.data` acceptance is now disabled on those transport content-block dictionaries; evidence must be reached through the block's legitimate payload-bearing field such as `text` or `resource`.
+- Preserved direct result acceptance for actual decoded/query-result objects and structured-content/result envelopes.
+- Updated `runtime/tests/test_mcp_prometheus_evidence.py` in commit `19c123b09bfb4deed6ce4f65bbbc95e0c24ee6c5` with regressions proving `data` extension siblings on text/resource content blocks fail closed while legitimate text/resource/structuredContent payloads remain represented by the existing acceptance tests.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both implementation and regression-test commits.
-- No executable checkout is attached to this runtime, so pytest and Docker acceptance were not executed. No runtime-green claim is made.
+- GitHub accepted the implementation and regression-test commits.
+- This runtime still does not provide an executable repository checkout through the GitHub connector, so pytest and Docker acceptance were not executed. No runtime-green claim is made.
 - Historical validation numbers above remain historical.
 
 ### Decisions
-1. Release evidence should match the actual Prometheus wire shape, not merely values that can be coerced into an equivalent number.
-2. Timestamp and sample-value positions intentionally have different validation rules because Prometheus JSON encodes them differently.
-3. Keep the parser fail-closed and exact-built-in-only rather than adding coercion that broadens the trust boundary.
+1. Treat MCP content blocks as transport envelopes, not as `QueryPrometheusResult` objects themselves.
+2. Keep direct `data` acceptance for genuine decoded/structured query-result objects so the parser remains transport-tolerant without accepting unrelated content-block extensions.
+3. Continue using exact built-in/string checks at this trust boundary; do not broaden parsing through coercion.
 
 ### Blockers / unknowns
 - Focused MCP suites still require execution in a checkout with repository files available to Python.
