@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from runtime.mcp_prometheus_evidence import (
+    MAX_LABEL_NAME_CHARS,
+    MAX_LABEL_VALUE_CHARS,
     MAX_LABELS_PER_SERIES,
     MAX_MCP_COLLECTION_ITEMS,
     MAX_PROMETHEUS_SERIES,
+    MAX_SAMPLE_VALUE_CHARS,
     MAX_SAMPLES_PER_SERIES,
     contains_prometheus_sample,
 )
@@ -62,3 +65,23 @@ def test_accepts_metric_label_map_at_limit() -> None:
 def test_rejects_oversized_expected_label_map_before_matching() -> None:
     expected = {f"label_{index}": "value" for index in range(MAX_LABELS_PER_SERIES + 1)}
     assert not contains_prometheus_sample({"data": [_series()]}, expected_labels=expected)
+
+
+def test_sample_value_string_scalar_limit_is_fail_closed() -> None:
+    at_limit = "1" + "0" * (MAX_SAMPLE_VALUE_CHARS - 1)
+    over_limit = at_limit + "0"
+    assert contains_prometheus_sample({"data": [{"metric": {}, "value": [1789990000, at_limit]}]})
+    assert not contains_prometheus_sample({"data": [{"metric": {}, "value": [1789990000, over_limit]}]})
+
+
+def test_metric_label_scalar_limits_are_fail_closed() -> None:
+    valid_metric = {"k" * MAX_LABEL_NAME_CHARS: "v" * MAX_LABEL_VALUE_CHARS}
+    assert contains_prometheus_sample({"data": [_series(metric=valid_metric)]})
+    assert not contains_prometheus_sample({"data": [_series(metric={"k" * (MAX_LABEL_NAME_CHARS + 1): "v"})]})
+    assert not contains_prometheus_sample({"data": [_series(metric={"k": "v" * (MAX_LABEL_VALUE_CHARS + 1)})]})
+
+
+def test_expected_label_scalar_limits_are_fail_closed() -> None:
+    payload = {"data": [_series(metric={"service": "stageguard"})]}
+    assert not contains_prometheus_sample(payload, expected_labels={"k" * (MAX_LABEL_NAME_CHARS + 1): "v"})
+    assert not contains_prometheus_sample(payload, expected_labels={"k": "v" * (MAX_LABEL_VALUE_CHARS + 1)})
