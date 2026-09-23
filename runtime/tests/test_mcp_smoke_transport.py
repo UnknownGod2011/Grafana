@@ -6,7 +6,7 @@ from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from mcp_smoke import DEFAULT_COMMAND, McpError, _configured_command
+from mcp_smoke import DEFAULT_COMMAND, McpError, _configured_command, _strict_json_rpc_loads
 
 
 class McpSmokeTransportTests(unittest.TestCase):
@@ -62,6 +62,26 @@ class McpSmokeTransportTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(McpError, "network transport is forbidden"):
                 _configured_command()
+
+    def test_strict_json_rpc_accepts_unique_standard_json(self):
+        self.assertEqual(
+            {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}},
+            _strict_json_rpc_loads('{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'),
+        )
+
+    def test_strict_json_rpc_rejects_duplicate_security_critical_member(self):
+        with self.assertRaisesRegex(McpError, "invalid or ambiguous JSON"):
+            _strict_json_rpc_loads('{"jsonrpc":"2.0","id":1,"id":2,"result":{}}')
+
+    def test_strict_json_rpc_rejects_duplicate_nested_member(self):
+        with self.assertRaisesRegex(McpError, "invalid or ambiguous JSON"):
+            _strict_json_rpc_loads('{"jsonrpc":"2.0","id":1,"result":{"content":[],"content":[1]}}')
+
+    def test_strict_json_rpc_rejects_python_only_numeric_constants(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                with self.assertRaisesRegex(McpError, "invalid or ambiguous JSON"):
+                    _strict_json_rpc_loads('{"jsonrpc":"2.0","id":1,"result":{"value":' + constant + '}}')
 
 
 if __name__ == "__main__":
