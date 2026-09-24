@@ -22,6 +22,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
 - Upstream MCP failure material passes through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
 - Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available for the local fixture.
+- Grafana bootstrap targets are strict origins: no embedded credentials, path, query, fragment, malformed port, or non-HTTP(S) scheme; literal IPv4/IPv6 loopback addresses are recognized via the standard IP parser.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -44,32 +45,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added live-smoke integration regressions proving generic validation precedes datasource identity interpretation.
 - Added and wired a strict JSON-RPC response-ID boundary preventing Python boolean/integer equality from aliasing MCP request identity.
 - Hardened Grafana Viewer-token bootstrap so remote admin credentials can never be sent over plaintext HTTP or via URL-embedded credentials.
+- Tightened bootstrap URL handling to a strict origin boundary and generalized loopback recognition to standards-based IPv4/IPv6 parsing.
 
-## Latest run — 2026-09-24 — remote Grafana bootstrap transport hardening
+## Latest run — 2026-09-24 — strict Grafana bootstrap origin boundary
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/mcp_jsonrpc_identity.py`, `docker-compose.yml`, `scripts/run_stageguard_validation.py`, `README.md`, and `runtime/bootstrap_grafana.py`. The pinned local stack and MCP trust boundaries were coherent. The concrete security gap was in credential bootstrap: `STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1` allowed the bootstrapper to send Grafana admin Basic credentials to a remote `http://` origin.
+Read `progress.md` completely, then inspected `runtime/bootstrap_grafana.py` and its focused MCP-gate regression. The prior transport hardening correctly required remote HTTPS and explicit opt-in, but the URL validator still accepted path/query/fragment components and recognized only three hard-coded loopback spellings. Because every API path is appended to `STAGEGUARD_GRAFANA_URL`, accepting non-origin URLs is ambiguous and unnecessary at a credential-bearing boundary.
 
 ### Exact changes made
-- Updated `runtime/bootstrap_grafana.py` in commit `a4830e20912968b7a002cae2f9baf33a146a821c`.
-- Added pure `_validate_bootstrap_target()` validation before any network request or credential construction.
-- Remote Grafana bootstrap now requires both explicit `STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1` opt-in and HTTPS.
-- Preserved HTTP support only for `localhost`, `127.0.0.1`, and `::1`, which keeps the credential-free local Docker workflow intact.
-- Rejected non-HTTP(S) targets, missing hosts, and URLs with embedded username/password material.
-- Added focused regression coverage under `runtime/tests/test_mcp_bootstrap_grafana_target_security.py` in commit `ad9f10fe9f76d4eeadbe1edd523bdfe7da651690`; its name places it in the existing `Grafana MCP` gate.
-- Removed the transient duplicate unowned test path in commit `7739e243e8cbdee7e47861f9d312309ee5df7852`.
+- Updated `runtime/bootstrap_grafana.py` in commit `f3d46176e2aaf559c6a58ab60baa3edcad2cadce`.
+- Added standards-based `ipaddress.ip_address(...).is_loopback` recognition while preserving the exact `localhost` hostname; this supports equivalent literal loopback spellings without treating hostname lookalikes as local.
+- Required the configured Grafana URL to be a strict HTTP(S) origin: no path other than `/`, query, fragment, embedded credentials, malformed port, or port outside 1..65535.
+- Forced deferred `urllib.parse` port validation to occur inside the fail-closed validation boundary before any network request or credential construction.
+- Expanded `runtime/tests/test_mcp_bootstrap_grafana_target_security.py` in commit `0374f0c42a2359961f544775128d33aa4a73d3dd` with IPv4/IPv6 loopback variants, origin-component rejection, malformed/out-of-range ports, and a localhost-lookalike regression.
 - No Actions workflows, cloud resources, tokens, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
-- GitHub accepted the bootstrap hardening and focused regression file.
-- The regression covers loopback HTTP, remote opt-in, remote HTTPS enforcement, embedded credentials, invalid schemes, and missing hosts.
+- GitHub accepted both implementation and focused regression updates.
+- The regression remains inside the existing `Grafana MCP` gate by filename.
 - This connector runtime still does not expose an executable repository checkout, so the focused MCP gate was not executed and no new green claim is made.
 
 ### Decisions
-1. Treat bootstrap admin credentials as a higher-trust secret than the runtime Viewer token and prohibit plaintext remote transport even when remote bootstrap is explicitly enabled.
-2. Keep local Docker onboarding frictionless by allowing loopback HTTP only.
-3. Keep target validation pure and dependency-free so it can be regression-tested without opening sockets or loading credentials.
-4. Keep the regression inside the existing low-noise MCP gate instead of adding CI/workflow machinery.
+1. Treat `STAGEGUARD_GRAFANA_URL` as an origin rather than a generic URL because StageGuard appends fixed Grafana API paths to it.
+2. Use Python's standard IP parser for literal loopback classification instead of maintaining an incomplete string allowlist.
+3. Keep DNS hostnames other than exact `localhost` on the remote path; do not infer loopback from a hostname that could resolve differently later.
+4. Keep all target validation before admin credential construction or network access.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
