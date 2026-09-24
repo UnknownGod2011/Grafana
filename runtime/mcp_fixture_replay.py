@@ -54,17 +54,29 @@ def _bounded_utf8(value: str, limit: int) -> bool:
         return False
 
 
-def load_fixture(path: Path) -> dict[str, Any]:
+def _read_bounded_fixture(path: Path) -> bytes:
+    """Read at most the accepted fixture size plus one sentinel byte.
+
+    The bound is enforced on bytes actually read rather than a pre-read stat. This
+    avoids a check/use race and prevents a changed or special file from causing an
+    unbounded allocation after a small size was observed.
+    """
     try:
-        size = path.stat().st_size
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_FIXTURE_BYTES + 1)
     except OSError as exc:
-        raise FixtureReplayError("fixture cannot be inspected") from exc
-    if size <= 0 or size > MAX_FIXTURE_BYTES:
+        raise FixtureReplayError("fixture cannot be read") from exc
+    if not raw or len(raw) > MAX_FIXTURE_BYTES:
         raise FixtureReplayError(f"fixture must be between 1 and {MAX_FIXTURE_BYTES} bytes")
+    return raw
+
+
+def load_fixture(path: Path) -> dict[str, Any]:
+    raw = _read_bounded_fixture(path)
     try:
-        raw = path.read_text(encoding="utf-8")
-        value = json.loads(raw, object_pairs_hook=_strict_object, parse_constant=_reject_constant)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        text = raw.decode("utf-8", errors="strict")
+        value = json.loads(text, object_pairs_hook=_strict_object, parse_constant=_reject_constant)
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise FixtureReplayError("fixture is not strict bounded UTF-8 JSON") from exc
     if type(value) is not dict:
         raise FixtureReplayError("fixture root must be a JSON object")
