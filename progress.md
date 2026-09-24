@@ -21,6 +21,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Generic MCP `tools/call` result content uses `validated_tool_content` as the live smoke's sole generic result-envelope boundary before datasource or Prometheus domain validation.
 - Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
 - Upstream MCP failure material passes through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
+- Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available for the local fixture.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -41,33 +42,34 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added bounded MCP `tools/list` validation and wired its atomic read-only policy into the live smoke.
 - Added a dedicated bounded generic MCP tool-result envelope validator and wired it into live datasource and Prometheus handling.
 - Added live-smoke integration regressions proving generic validation precedes datasource identity interpretation.
-- Added and now wired a strict JSON-RPC response-ID boundary preventing Python boolean/integer equality from aliasing MCP request identity.
+- Added and wired a strict JSON-RPC response-ID boundary preventing Python boolean/integer equality from aliasing MCP request identity.
+- Hardened Grafana Viewer-token bootstrap so remote admin credentials can never be sent over plaintext HTTP or via URL-embedded credentials.
 
-## Latest run — 2026-09-24 — live JSON-RPC response identity integration
+## Latest run — 2026-09-24 — remote Grafana bootstrap transport hardening
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and `runtime/mcp_jsonrpc_identity.py`. Confirmed the helper correctly rejects JSON booleans and other non-exact integer IDs, but the live `StdioClient.request()` still used ordinary Python equality (`message.get("id") != request_id`), leaving `true` able to alias request ID `1`.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, `runtime/mcp_jsonrpc_identity.py`, `docker-compose.yml`, `scripts/run_stageguard_validation.py`, `README.md`, and `runtime/bootstrap_grafana.py`. The pinned local stack and MCP trust boundaries were coherent. The concrete security gap was in credential bootstrap: `STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1` allowed the bootstrapper to send Grafana admin Basic credentials to a remote `http://` origin.
 
 ### Exact changes made
-- Updated `runtime/mcp_smoke.py` in commit `56f6911cecf6c84aab9fd1c54b22c142a4c39107`.
-- Imported `ResponseIdentityError` and `assert_integer_response_id` from the dedicated identity module.
-- Added `_assert_response_id()` as the live smoke adapter; it invokes the strict helper and translates identity failures into the existing `McpError` operational surface without exposing response material.
-- Replaced the live request loop's ordinary Python ID comparison with `_assert_response_id(message.get("id"), request_id, method)`. This is now the sole response-ID match boundary after strict JSON decoding.
-- Added `runtime/tests/test_mcp_smoke_response_identity_integration.py` in commit `e9d36008fe1f6726c9c4899bb107a640a3fa8f24`.
-- Added integration regressions for exact integer acceptance, boolean/string/mismatched-ID rejection, and preservation of `ResponseIdentityError` as the wrapped cause.
-- The new test filename matches the existing `test_*mcp*.py` focused-gate ownership convention.
-- No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
+- Updated `runtime/bootstrap_grafana.py` in commit `a4830e20912968b7a002cae2f9baf33a146a821c`.
+- Added pure `_validate_bootstrap_target()` validation before any network request or credential construction.
+- Remote Grafana bootstrap now requires both explicit `STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1` opt-in and HTTPS.
+- Preserved HTTP support only for `localhost`, `127.0.0.1`, and `::1`, which keeps the credential-free local Docker workflow intact.
+- Rejected non-HTTP(S) targets, missing hosts, and URLs with embedded username/password material.
+- Added focused regression coverage under `runtime/tests/test_mcp_bootstrap_grafana_target_security.py` in commit `ad9f10fe9f76d4eeadbe1edd523bdfe7da651690`; its name places it in the existing `Grafana MCP` gate.
+- Removed the transient duplicate unowned test path in commit `7739e243e8cbdee7e47861f9d312309ee5df7852`.
+- No Actions workflows, cloud resources, tokens, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
-- GitHub accepted the runtime update and integration regression file.
-- This connector environment does not expose an executable repository checkout, so the new integration regression and focused MCP gate were not executed here; no new green claim is made.
-- Source inspection confirms the permissive `message.get("id") != request_id` comparison has been replaced in the live request loop.
+- GitHub accepted the bootstrap hardening and focused regression file.
+- The regression covers loopback HTTP, remote opt-in, remote HTTPS enforcement, embedded credentials, invalid schemes, and missing hosts.
+- This connector runtime still does not expose an executable repository checkout, so the focused MCP gate was not executed and no new green claim is made.
 
 ### Decisions
-1. Keep response identity validation after strict JSON frame decoding and before interpreting `error` or `result`, so an incorrectly identified frame cannot affect request state.
-2. Translate only the expected protocol identity failure into `McpError`; programmer-contract failures for an invalid internally generated expected ID remain programming errors rather than being silently normalized.
-3. Keep diagnostics free of attacker-controlled response-ID values.
-4. Do not trigger CI solely for connector-authored changes, preserving the repository's low-noise Actions policy.
+1. Treat bootstrap admin credentials as a higher-trust secret than the runtime Viewer token and prohibit plaintext remote transport even when remote bootstrap is explicitly enabled.
+2. Keep local Docker onboarding frictionless by allowing loopback HTTP only.
+3. Keep target validation pure and dependency-free so it can be regression-tested without opening sockets or loading credentials.
+4. Keep the regression inside the existing low-noise MCP gate instead of adding CI/workflow machinery.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
