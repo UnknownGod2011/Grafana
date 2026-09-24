@@ -40,32 +40,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added bounded MCP `tools/list` validation and wired its atomic read-only policy into the live smoke.
 - Added a dedicated bounded generic MCP tool-result envelope validator and focused regressions.
 - Wired the generic result validator into live datasource and Prometheus tool-call handling, removing the duplicate permissive traversal.
+- Added live-smoke integration regressions proving the wrapper accepts valid evidence, translates structural failures to `McpError`, and enforces generic validation before datasource identity interpretation.
 
-## Latest run — 2026-09-24 — live MCP result-boundary integration
+## Latest run — 2026-09-24 — live MCP integration regression coverage
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and `runtime/mcp_tool_result.py`. Confirmed the prior run's blocker exactly: the bounded `validated_tool_content` implementation and focused regressions existed, but live smoke still used local `_has_meaningful_value`, `_has_nonempty_content_payload`, and `_assert_tool_result` traversal.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and the existing dedicated `runtime/tests/test_mcp_tool_result.py` suite. Confirmed that the bounded generic tool-result validator is wired into the live smoke, but the repository lacked a focused regression that imports and exercises the live smoke wrapper itself.
 
 ### Exact changes made
-- Updated `runtime/mcp_smoke.py` in commit `00688e22a9e7373ef120d6ad34fb0f46b72aa90e`.
-- Imported `ToolResultError` and `validated_tool_content` from the dedicated boundary module.
-- Added `_validated_tool_content`, which translates boundary failures into the smoke runner's existing `McpError` operational error path.
-- Removed the duplicated permissive generic recursive traversal and its now-unused metadata/depth constants.
-- `list_datasources` now passes through the bounded generic result boundary before datasource UID identity validation.
-- `query_prometheus` now passes through the same bounded generic result boundary and hands the already-validated content list to the stricter Prometheus evidence validator.
+- Added `runtime/tests/test_mcp_smoke_tool_result_integration.py` in commit `b1ac79ea9eb53545bfb83639801bad3d0b236a49`.
+- Added a valid exact-built-in result control through `_validated_tool_content`.
+- Added a hostile outer-dict-subclass case proving `ToolResultError` is translated to the live smoke's `McpError` surface.
+- Added a datasource-path regression proving malformed generic envelopes fail before datasource identity interpretation.
+- Added a valid-envelope/wrong-datasource regression proving datasource identity remains a distinct fail-closed domain boundary after generic validation.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted the runtime integration commit and the updated file was re-fetched to verify the new import and boundary wiring are present.
-- The existing dedicated `runtime/tests/test_mcp_tool_result.py` regressions cover the boundary implementation itself.
-- A local executable checkout could not be obtained in this run because the container environment could not resolve `github.com`; therefore the focused MCP gate was not executed and no new green test claim is made.
-- GitHub Actions were intentionally not triggered solely to validate these connector-authored changes.
+- GitHub accepted the new regression file.
+- The test is named `test_mcp_*.py`, so it is intended to be owned by the existing focused Grafana MCP validation gate's MCP test discovery pattern.
+- This connector environment still does not provide an executable repository checkout, so the new integration test and focused gate were not executed here; no new green claim is made.
+- GitHub Actions were intentionally not triggered solely for connector-authored validation.
 
 ### Decisions
-1. Generic `tools/call` envelope validation now precedes all domain-specific datasource and Prometheus evidence interpretation in live smoke.
-2. Keep the generic boundary separate from datasource identity and Prometheus semantics so each trust boundary has one responsibility.
-3. Preserve the existing `McpError` operational surface instead of leaking internal validator exception types to operators.
-4. Do not weaken validation or skip the focused gate merely because the execution environment lacks network access.
+1. Test the actual live wrapper, not only the lower-level validator, so future refactors cannot silently bypass exception translation or ordering.
+2. Keep generic envelope validation and datasource identity as separate fail-closed boundaries and assert their order explicitly.
+3. Do not use CI as a substitute for a local focused validation run when the user requested low-noise GitHub Actions usage.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
