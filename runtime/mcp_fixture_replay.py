@@ -59,22 +59,38 @@ def _bounded_utf8(value: str, limit: int) -> bool:
 def _read_bounded_fixture(path: Path) -> bytes:
     """Read a bounded capture only from a regular filesystem object.
 
-    The file type is checked with fstat *after* opening, so pathname replacement
-    cannot swap a validated regular file for a FIFO/device between validation and
-    the read. Rejecting non-regular descriptors also prevents an unattended replay
-    from blocking indefinitely on a named pipe or reading from a device. The byte
-    bound is enforced on data actually consumed, not mutable filesystem metadata.
+    Open non-blocking where the platform supports it, then validate the opened
+    descriptor with fstat before reading. This matters for FIFOs: a normal blocking
+    open can hang *before* fstat gets a chance to reject the pipe. O_NOFOLLOW is
+    also used where available so an unattended replay cannot be redirected through
+    a final-component symlink. At most the configured ceiling plus one sentinel byte
+    is consumed; mutable pathname metadata is never trusted for the size bound.
     """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    fd: int | None = None
     try:
-        with path.open("rb") as handle:
-            opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode):
-                raise FixtureReplayError("fixture must be a regular file")
+        fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise FixtureReplayError("fixture must be a regular file")
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            fd = None
             raw = handle.read(MAX_FIXTURE_BYTES + 1)
     except FixtureReplayError:
         raise
     except OSError as exc:
-        raise FixtureReplayError("fixture cannot be read") from exc
+        raise FixtureReplayError("fixture cannot be safely opened or read") from exc
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     if not raw or len(raw) > MAX_FIXTURE_BYTES:
         raise FixtureReplayError(f"fixture must be between 1 and {MAX_FIXTURE_BYTES} bytes")
     return raw
