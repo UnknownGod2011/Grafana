@@ -12,7 +12,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - MCP acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
 - Evidence traversal and structured work are bounded; JSON/MCP inputs reject duplicate members, non-finite numerics, invalid protocol identity, hostile container subclasses, and oversized structures.
 - MCP tool discovery is bounded and every advertised tool must carry literal `readOnlyHint=true`.
-- Raw PromQL/evidence/sample payloads must not be emitted by normal release-smoke success output.
+- Raw PromQL/evidence/sample payloads and production label values must not be emitted by normal release-smoke/replay success output.
 - Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available locally. Bootstrap targets are strict origins.
 - Sanitized MCP captures replay offline through the same production tool-surface, result-envelope, datasource-identity, and Prometheus semantic validators.
 - Fixture expected-label selectors are bounded to 32 entries with Prometheus-compatible names and UTF-8 byte limits.
@@ -35,29 +35,27 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened Grafana Viewer-token bootstrap so remote admin credentials cannot be sent over plaintext HTTP or via non-origin/credential-bearing URLs.
 - Added an offline sanitized MCP fixture replay validator using production MCP validators, with bounded selectors, byte-oriented scalar limits, strict UTF-8/JSON, bounded reads, non-blocking special-file rejection, and no-follow protection where supported.
 
-## Latest run — 2026-09-24 — prevent pre-validation FIFO blocking
+## Latest run — 2026-09-24 — prevent production label-value disclosure in replay output
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py` and `runtime/tests/test_mcp_fixture_replay.py`. The previous run correctly added an opened-descriptor regular-file check, but static inspection found that `Path.open("rb")` itself is a blocking operation. An unattended replay pointed at a FIFO with no writer could therefore hang before `fstat()` ever had a chance to reject the descriptor. The prior FIFO regression masked this because it deliberately kept a read/write FIFO descriptor open.
+Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py`, its regression suite, and the repository validation/scripts surface. The replay validator correctly proved that the expected labels occurred on one real Prometheus sample, but its success report returned the full matched label mapping. That unnecessarily echoed production identifiers such as production IDs/uplink names into terminal or CI logs even though successful acceptance only needs to report which label keys were proven.
 
 ### Exact changes made
-- Commit `fb4576706c333f888909590b21c478f6e0370582` replaces `Path.open()` with descriptor-level `os.open()`.
-- Fixture open now adds `O_NONBLOCK` where available, so an unconnected FIFO cannot hang before descriptor validation.
-- Fixture open also adds `O_NOFOLLOW` where available, preventing a final-component symlink from redirecting unattended replay to another file.
-- The descriptor is still checked with `fstat()` and must be a regular file before any bytes are consumed; descriptor cleanup is explicit on all rejection/error paths.
-- Commit `9444a06bfa5c3d904d5c399f9e0ee64e99fbde69` replaces the old FIFO test with an unconnected FIFO regression that would expose a blocking-open bug, and adds a no-follow symlink regression on supporting platforms.
+- Commit `785885c0a7a0855c17a4908d70a1649ec776437d` changes successful replay reports from `matched_labels` to deterministic `matched_label_names` metadata.
+- Evidence validation is unchanged: the production validator still receives and verifies the complete expected label/value selector against one genuine sample before a pass is possible.
+- Label values are now discarded at the reporting boundary rather than reflected to stdout.
+- Commit `6f7e5c5d9ebf1d76486f0c147358a3b41ce244f6` updates the positive regression and adds an explicit assertion that expected label values do not occur in the serialized success report.
 - No Actions workflows, credentials, cloud resources, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression commits.
-- Static inspection confirms `O_NONBLOCK` is applied before opening the path, `fstat()` still precedes reads, and the 1 MiB + sentinel bound is unchanged.
-- The connector runtime does not expose an executable checkout, so the focused MCP gate and new regressions were not executed; no new green claim is made.
+- Static inspection confirms semantic matching still occurs before report construction and the report exposes only status, datasource UID, tool count, and matched label names.
+- The connector runtime does not expose an executable checkout, so the focused MCP gate and new regression were not executed; no new green claim is made.
 
 ### Decisions
-1. Special-file safety must cover the open operation itself, not only reads after opening.
-2. Use descriptor-level flags for unattended fixture ingestion while preserving ordinary local regular-file behavior.
-3. Refuse final-component symlinks where the operating system provides `O_NOFOLLOW`; on platforms without it, the existing opened-descriptor regular-file and bounded-content policies still apply.
-4. Continue avoiding GitHub Actions solely to obtain validation because this project explicitly prefers low-noise local checks.
+1. Acceptance evidence and acceptance reporting are separate trust boundaries: validate full values internally, but expose only the minimum metadata needed to prove the check ran.
+2. Keep datasource UID in the report because it is the configured integration identity being accepted; avoid reflecting telemetry label values that may encode production topology or customer/workflow identifiers.
+3. Continue avoiding GitHub Actions solely to obtain validation because this project explicitly prefers low-noise local checks.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
@@ -66,4 +64,4 @@ Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py` an
 - Historical full-suite failures/errors still need classification after the focused MCP boundary is green.
 
 ## Single best next step
-Run the focused `Grafana MCP` validation gate in an executable checkout. Once green, perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke, retain only the sanitized semantic capture expected by `runtime/mcp_fixture_replay.py`, and replay it locally to lock the actual current server response shape into regression coverage.
+Run the focused `Grafana MCP` validation gate in an executable checkout. Once green, perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke, retain only the sanitized semantic capture expected by `runtime/mcp_fixture_replay.py`, and replay it locally to lock the actual current server response shape into regression coverage without emitting production label values.
