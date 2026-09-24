@@ -41,13 +41,14 @@ class FixtureReplayTests(unittest.TestCase):
     def test_valid_capture_replays_through_production_boundaries(self):
         report = validate_fixture(_fixture())
         self.assertEqual(report["status"], "pass")
-        self.assertEqual(report["datasource_uid"], "stageguard-prometheus")
+        self.assertIs(report["datasource_identity_verified"], True)
         self.assertEqual(report["tool_count"], 2)
         self.assertEqual(report["matched_label_names"], ["production_id", "uplink"])
 
-    def test_success_report_does_not_echo_expected_label_values(self):
+    def test_success_report_does_not_echo_production_identity_values(self):
         fixture = _fixture()
         report_text = json.dumps(validate_fixture(fixture), sort_keys=True)
+        self.assertNotIn(fixture["datasource_uid"], report_text)
         for value in fixture["expected_labels"].values():
             self.assertNotIn(value, report_text)
 
