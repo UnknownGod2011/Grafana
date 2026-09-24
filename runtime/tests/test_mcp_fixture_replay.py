@@ -70,6 +70,19 @@ class FixtureReplayTests(unittest.TestCase):
         with self.assertRaises(FixtureReplayError):
             validate_fixture(fixture)
 
+    def test_series_mismatch_error_does_not_echo_expected_label_values(self):
+        fixture = _fixture()
+        fixture["expected_labels"] = {
+            "production_id": "sensitive-production-identity",
+            "uplink": "sensitive-uplink-identity",
+        }
+        with self.assertRaises(FixtureReplayError) as raised:
+            validate_fixture(fixture)
+        rendered = str(raised.exception)
+        for value in fixture["expected_labels"].values():
+            self.assertNotIn(value, rendered)
+        self.assertEqual(rendered, "query_prometheus did not prove the configured StageGuard series")
+
     def test_expected_labels_cardinality_is_bounded_before_evidence_walk(self):
         fixture = _fixture()
         fixture["expected_labels"] = {f"label_{index}": "x" for index in range(MAX_EXPECTED_LABELS + 1)}
