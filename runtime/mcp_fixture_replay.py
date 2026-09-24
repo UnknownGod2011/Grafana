@@ -57,15 +57,7 @@ def _bounded_utf8(value: str, limit: int) -> bool:
 
 
 def _read_bounded_fixture(path: Path) -> bytes:
-    """Read a bounded capture only from a regular filesystem object.
-
-    Open non-blocking where the platform supports it, then validate the opened
-    descriptor with fstat before reading. This matters for FIFOs: a normal blocking
-    open can hang *before* fstat gets a chance to reject the pipe. O_NOFOLLOW is
-    also used where available so an unattended replay cannot be redirected through
-    a final-component symlink. At most the configured ceiling plus one sentinel byte
-    is consumed; mutable pathname metadata is never trusted for the size bound.
-    """
+    """Read a bounded capture only from a regular filesystem object."""
     flags = os.O_RDONLY
     if hasattr(os, "O_NONBLOCK"):
         flags |= os.O_NONBLOCK
@@ -131,23 +123,18 @@ def validate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
         datasource_content = validated_tool_content("list_datasources", fixture["list_datasources"])
         query_content = validated_tool_content("query_prometheus", fixture["query_prometheus"])
     except (ToolSurfaceError, ToolResultError) as exc:
-        raise FixtureReplayError(f"fixture failed MCP structural policy: {exc}") from exc
+        # Reusable production validators may include offending MCP values in detailed
+        # diagnostics. A replay capture can originate from a real deployment, so the
+        # CLI boundary must never reflect those values into unattended logs.
+        raise FixtureReplayError("fixture failed MCP structural policy") from exc
     if not contains_datasource_uid(datasource_content, datasource_uid):
         raise FixtureReplayError("fixture does not contain the configured datasource UID")
     labels_json = json.dumps(expected_labels, separators=(",", ":"), sort_keys=True)
     try:
         matched = assert_expected_prometheus_sample(query_content, labels_json)
     except PrometheusEvidenceError as exc:
-        # The production smoke gate includes expected label values in its diagnostic.
-        # Those values may identify tenants, productions, regions, or uplinks. Replay
-        # is designed for unattended/local acceptance and must not reflect them into
-        # terminal or CI output, so preserve the detailed exception only as the cause.
         raise FixtureReplayError("query_prometheus did not prove the configured StageGuard series") from exc
 
-    # Success output is intentionally metadata-only. Datasource identity and
-    # production label values are proven internally but not reflected into logs.
-    # A production UID can itself reveal tenant/topology naming, so callers only
-    # receive a boolean proof that the configured identity was observed.
     matched_label_names = sorted(key for key in expected_labels if key in matched)
     return {
         "status": "pass",
