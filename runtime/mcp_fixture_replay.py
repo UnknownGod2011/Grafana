@@ -138,7 +138,11 @@ def validate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     try:
         matched = assert_expected_prometheus_sample(query_content, labels_json)
     except PrometheusEvidenceError as exc:
-        raise FixtureReplayError(str(exc)) from exc
+        # The production smoke gate includes expected label values in its diagnostic.
+        # Those values may identify tenants, productions, regions, or uplinks. Replay
+        # is designed for unattended/local acceptance and must not reflect them into
+        # terminal or CI output, so preserve the detailed exception only as the cause.
+        raise FixtureReplayError("query_prometheus did not prove the configured StageGuard series") from exc
 
     # Success output is intentionally metadata-only. Datasource identity and
     # production label values are proven internally but not reflected into logs.
