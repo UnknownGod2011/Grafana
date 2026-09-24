@@ -17,6 +17,7 @@ from mcp_datasource_identity import contains_datasource_uid
 from mcp_diagnostics import safe_diagnostic
 from mcp_smoke_gate import PrometheusEvidenceError, assert_expected_prometheus_sample
 from mcp_smoke_reporting import SmokeReportError, build_safe_smoke_report
+from mcp_tool_result import ToolResultError, validated_tool_content
 from mcp_tool_surface import ToolSurfaceError, validated_read_only_tool_map
 
 DEFAULT_COMMAND = "docker compose run --rm -T mcp"
@@ -26,10 +27,8 @@ MAX_STDIO_LINE_CHARS = 1_048_576
 MAX_STDOUT_QUEUE_FRAMES = 16
 MAX_SERVER_INFO_FIELD_CHARS = 128
 MAX_CONFIG_TEXT_CHARS = 512
-MAX_PAYLOAD_NESTING_DEPTH = 16
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
 QUERY = os.getenv("STAGEGUARD_MCP_SMOKE_QUERY", 'network_packet_loss_percent{production_id="broadcast-alpha",uplink="uplink-b"}')
-_CONTENT_METADATA_KEYS = frozenset({"type", "mimeType", "annotations", "meta", "_meta"})
 _UNSAFE_DISPLAY_CODEPOINTS = frozenset({0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069})
 _SENSITIVE_ARG_MARKERS = frozenset({"token", "secret", "password", "passwd", "apikey", "api-key", "authorization", "cookie", "credential", "credentials"})
 
@@ -253,41 +252,17 @@ def _validated_tool_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
         raise McpError(f"unsafe MCP tool surface: {exc}") from exc
 
 
-def _has_meaningful_value(value: Any, *, depth: int = 0) -> bool:
-    if depth > MAX_PAYLOAD_NESTING_DEPTH:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return not isinstance(value, float) or math.isfinite(value)
-    if isinstance(value, dict):
-        return any(key not in _CONTENT_METADATA_KEYS and _has_meaningful_value(child, depth=depth + 1) for key, child in value.items())
-    if isinstance(value, list):
-        return any(_has_meaningful_value(child, depth=depth + 1) for child in value)
-    return False
-
-
-def _has_nonempty_content_payload(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    return any(key not in _CONTENT_METADATA_KEYS and _has_meaningful_value(value) for key, value in item.items())
-
-
-def _assert_tool_result(name: str, result: dict[str, Any]) -> None:
-    if result.get("isError"):
-        raise McpError(f"{name} returned isError=true: {safe_diagnostic(result.get('content'))}")
-    content = result.get("content")
-    if not isinstance(content, list) or not content:
-        raise McpError(f"{name} returned no evidence content")
-    if not any(_has_nonempty_content_payload(item) for item in content):
-        raise McpError(f"{name} returned malformed or empty evidence content")
+def _validated_tool_content(name: str, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apply the sole generic tools/call result-envelope trust boundary."""
+    try:
+        return validated_tool_content(name, result)
+    except ToolResultError as exc:
+        raise McpError(f"unsafe MCP tool result: {exc}") from exc
 
 
 def _assert_datasource_present(result: dict[str, Any], datasource_uid: str) -> None:
-    _assert_tool_result("list_datasources", result)
-    if not contains_datasource_uid(result.get("content"), datasource_uid):
+    content = _validated_tool_content("list_datasources", result)
+    if not contains_datasource_uid(content, datasource_uid):
         raise McpError(f"list_datasources did not return configured datasource UID {datasource_uid!r}")
 
 
@@ -307,9 +282,9 @@ def main() -> None:
         datasources = client.request("tools/call", {"name": "list_datasources", "arguments": {}})
         _assert_datasource_present(datasources, datasource_uid)
         query_result = client.request("tools/call", {"name": "query_prometheus", "arguments": {"datasourceUid": datasource_uid, "expr": query, "queryType": "instant", "endTime": "now"}})
-        _assert_tool_result("query_prometheus", query_result)
+        query_content = _validated_tool_content("query_prometheus", query_result)
         try:
-            expected_series = assert_expected_prometheus_sample(query_result.get("content"), os.getenv("STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS"))
+            expected_series = assert_expected_prometheus_sample(query_content, os.getenv("STAGEGUARD_MCP_SMOKE_EXPECTED_LABELS"))
         except PrometheusEvidenceError as exc:
             raise McpError(str(exc)) from exc
         try:
