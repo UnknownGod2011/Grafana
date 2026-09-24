@@ -12,7 +12,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - MCP acceptance requires meaningful evidence, exact datasource UID, and a genuine Prometheus vector/matrix sample bound to expected labels on the same sampled series.
 - Evidence traversal and structured work are bounded; JSON/MCP inputs reject duplicate members, non-finite numerics, invalid protocol identity, hostile container subclasses, and oversized structures.
 - MCP tool discovery is bounded and every advertised tool must carry literal `readOnlyHint=true`.
-- Raw PromQL/evidence/sample payloads, datasource UIDs, and production label values must not be emitted by normal replay success or series-mismatch failure output.
+- Raw PromQL/evidence/sample payloads, datasource UIDs, production label values, and offending MCP structural values must not be emitted by normal replay output.
 - Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available locally. Bootstrap targets are strict origins.
 - Sanitized MCP captures replay offline through the same production tool-surface, result-envelope, datasource-identity, and Prometheus semantic validators.
 - Fixture expected-label selectors are bounded to 32 entries with Prometheus-compatible names and UTF-8 byte limits.
@@ -35,27 +35,27 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened Grafana Viewer-token bootstrap so remote admin credentials cannot be sent over plaintext HTTP or via non-origin/credential-bearing URLs.
 - Added an offline sanitized MCP fixture replay validator using production MCP validators, with bounded selectors, byte-oriented scalar limits, strict UTF-8/JSON, bounded reads, non-blocking special-file rejection, no-follow protection where supported, and metadata-minimal success/failure reporting.
 
-## Latest run — 2026-09-24 — redact production label values from replay failures
+## Latest run — 2026-09-24 — sanitize MCP structural-policy replay failures
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py`, `runtime/mcp_smoke_gate.py`, and `runtime/tests/test_mcp_fixture_replay.py`. The replay success boundary had already stopped emitting datasource UIDs and production label values, but the failure boundary still propagated `PrometheusEvidenceError` text verbatim. The production smoke gate intentionally renders expected label key/value pairs when a series does not match, so an unattended replay failure could still disclose production identifiers in terminal or CI output.
+Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py` and `runtime/tests/test_mcp_fixture_replay.py`. Success output and Prometheus series-mismatch failures were already identity-safe, but the structural-policy exception path still interpolated the detailed `ToolSurfaceError`/`ToolResultError` message into the outer replay error. Those reusable validators can legitimately describe offending MCP values, so a malformed real capture could reflect deployment-specific content into terminal or CI output.
 
 ### Exact changes made
-- Commit `99dff8f4bafc65510f741f6b0bdf9a9f74742ad1` changes replay handling of `PrometheusEvidenceError` to emit the fixed message `query_prometheus did not prove the configured StageGuard series` instead of reflecting the detailed production diagnostic.
-- The detailed `PrometheusEvidenceError` remains chained as the Python exception cause for in-process debugging; normal CLI output catches `FixtureReplayError` and prints only the sanitized outer message.
-- Evidence semantics are unchanged: the same production `assert_expected_prometheus_sample()` validator still performs exact expected-label matching before acceptance.
-- Commit `861e73b0ab97da1780f9dfe9b056ac7fac3fd816` adds a regression using explicitly sensitive-looking production/uplink identities and asserts neither value appears in the raised replay error while the fixed diagnostic remains stable.
+- Commit `317cbb4863685d82e213ca17b3d3e060d32d2dcd` changes MCP structural-policy replay failures to the fixed message `fixture failed MCP structural policy`.
+- The detailed validator exception remains chained as the Python cause for trusted in-process debugging; the normal replay CLI prints only the sanitized outer error.
+- Validation semantics are unchanged: `validated_read_only_tool_map()` and `validated_tool_content()` remain the production validators and still fail closed before datasource/evidence acceptance.
+- Commit `b242e72e3f85f434901d69b8ed96946ac633a838` adds a regression that injects a sensitive-looking value into malformed MCP tool content and asserts the public replay error is fixed and does not contain that value.
 - No Actions workflows, credentials, cloud resources, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression commits.
-- Static inspection confirms mismatch diagnostics no longer interpolate expected label values at the replay boundary.
+- Static inspection confirms the replay boundary no longer formats reusable structural-validator diagnostics into its public exception.
 - The connector runtime does not expose an executable checkout, so the focused MCP gate and changed regression were not executed; no new green claim is made.
 
 ### Decisions
-1. Treat failure output as the same disclosure boundary as success output; production identity values must not be reflected merely because acceptance failed.
-2. Keep the production smoke gate's detailed diagnostic intact for its existing use cases, and sanitize specifically at the replay/CLI boundary rather than weakening reusable validator diagnostics globally.
-3. Preserve exception chaining for trusted in-process debugging while ensuring the normal replay CLI prints only the sanitized outer exception.
+1. Treat every replay failure path that can originate in captured MCP content as a disclosure boundary, not only Prometheus label mismatches.
+2. Preserve detailed diagnostics inside reusable production validators and exception chaining, while keeping the unattended replay CLI metadata-minimal.
+3. Do not weaken structural validation or evidence semantics in order to sanitize output.
 4. Continue avoiding GitHub Actions solely to obtain validation because this project explicitly prefers low-noise local checks.
 
 ### Blockers / unknowns
@@ -65,4 +65,4 @@ Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py`, `
 - Historical full-suite failures/errors still need classification after the focused MCP boundary is green.
 
 ## Single best next step
-Run the focused `Grafana MCP` validation gate in an executable checkout. Once green, perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke, retain only the sanitized semantic capture expected by `runtime/mcp_fixture_replay.py`, and replay it locally to lock the actual current server response shape into regression coverage without emitting datasource or production label identity values on either success or mismatch failure.
+Run the focused `Grafana MCP` validation gate in an executable checkout. Once green, perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke, retain only the sanitized semantic capture expected by `runtime/mcp_fixture_replay.py`, and replay it locally to lock the actual current server response shape into regression coverage with identity-safe output across success, structural failure, and series mismatch paths.
