@@ -139,11 +139,16 @@ def validate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
         matched = assert_expected_prometheus_sample(query_content, labels_json)
     except PrometheusEvidenceError as exc:
         raise FixtureReplayError(str(exc)) from exc
+
+    # Success output is intentionally metadata-only. The fixture may contain
+    # production identifiers in label values; proving the expected labels matched
+    # does not require echoing those values into logs or CI output.
+    matched_label_names = sorted(key for key in expected_labels if key in matched)
     return {
         "status": "pass",
         "datasource_uid": datasource_uid,
         "tool_count": len(tools),
-        "matched_labels": matched,
+        "matched_label_names": matched_label_names,
     }
 
 
