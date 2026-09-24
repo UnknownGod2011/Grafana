@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -116,6 +117,20 @@ class FixtureReplayTests(unittest.TestCase):
             path.write_bytes(b"\xff")
             with self.assertRaises(FixtureReplayError):
                 load_fixture(path)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes are not available on this platform")
+    def test_loader_rejects_fifo_without_attempting_to_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixture.pipe"
+            os.mkfifo(path)
+            # Open the FIFO read/write so load_fixture's open succeeds immediately.
+            # The production fstat check must reject it before calling read().
+            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            try:
+                with self.assertRaisesRegex(FixtureReplayError, "regular file"):
+                    load_fixture(path)
+            finally:
+                os.close(fd)
 
 
 if __name__ == "__main__":
