@@ -22,6 +22,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available locally. Bootstrap targets are strict origins with no embedded credentials/path/query/fragment.
 - Sanitized MCP captures replay offline through the same production tool-surface, tool-result, datasource-identity, and Prometheus semantic validators.
 - Fixture expected-label selectors are bounded to 32 entries, valid Prometheus label names, and byte-oriented UTF-8 scalar limits before evidence traversal.
+- Fixture file size is enforced on bytes actually read with a one-byte sentinel, not a pre-read filesystem size check.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -43,30 +44,27 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened Grafana Viewer-token bootstrap so remote admin credentials cannot be sent over plaintext HTTP or via non-origin/credential-bearing URLs.
 - Added an offline sanitized MCP fixture replay validator so a real current-server capture can be regression-tested without retaining credentials or requiring Docker/Grafana on every test run.
 
-## Latest run — 2026-09-24 — fixture selector resource hardening
+## Latest run — 2026-09-24 — bounded fixture file loading
 
 ### Inspected at start
-Read `progress.md` completely, then inspected the repository tree, `runtime/mcp_fixture_replay.py`, and its focused regression suite. Live Grafana `13.2.1` + official MCP `1.4.1` acceptance remains the principal pending executable milestone. The replay path had a smaller unblocked resource-boundary issue: its overall file size was capped, but `expected_labels` had no semantic cardinality cap and scalar limits were Python-character-oriented rather than wire-byte-oriented.
+Read `progress.md` completely, inspected the runtime tree, `runtime/mcp_fixture_replay.py`, and `runtime/tests/test_mcp_fixture_replay.py`. Live Grafana `13.2.1` + official MCP `1.4.1` acceptance remains the principal pending executable milestone. The replay loader still enforced its 1 MiB limit using `stat()` followed by `read_text()`, leaving a check/use race and allowing the actual read allocation to exceed the accepted bound if the file changed after inspection.
 
 ### Exact changes made
-- Commit `48dfc31026c06f23901463c21b62a75ebc91f581` hardens `runtime/mcp_fixture_replay.py`.
-- Expected selectors are now capped at 32 labels before production evidence traversal.
-- Label names must follow the Prometheus-compatible `[A-Za-z_][A-Za-z0-9_]*` grammar.
-- Datasource UID, label-name, and label-value limits are enforced on encoded UTF-8 byte length rather than Python code-point count, making the bounds correspond to serialized resource use.
-- Added a small `_bounded_utf8` helper and explicit constants so acceptance limits are reviewable rather than magic numbers.
-- Commit `db2956031473f10dbc69a5e2d7e8a848ebbd6535` expands `runtime/tests/test_mcp_fixture_replay.py` with fail-closed regressions for over-cardinality selectors, invalid Prometheus label names, and multibyte UTF-8 values that exceed the byte limit while remaining below the old character-count threshold.
+- Commit `be442e0eeba94a22ce95c755d2236fe0cef2ab4b` replaces the pre-read `stat()`/unbounded `read_text()` sequence with a binary bounded read of `MAX_FIXTURE_BYTES + 1` bytes.
+- The extra sentinel byte makes oversize detection independent of filesystem metadata while keeping memory use bounded; empty and oversized captures fail before UTF-8 decoding or JSON parsing.
+- UTF-8 is decoded explicitly with strict error handling after the byte bound succeeds; the existing strict JSON duplicate-member/non-standard-number policy is preserved unchanged.
+- Commit `127ff5d2a159fac3189e78d905fc63f458680ce6` adds loader regressions for empty files, files one byte beyond the 1 MiB ceiling, and invalid UTF-8, while retaining all semantic replay tests.
 - No Actions workflows, credentials, cloud resources, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression changes.
-- Static inspection confirms the new selector checks run before `validated_read_only_tool_map`, `validated_tool_content`, datasource traversal, or Prometheus sample matching, so attacker-controlled selector cardinality cannot amplify evidence-walk work.
-- This connector runtime still does not expose an executable checkout, so the focused MCP gate and new tests were not executed; no new green claim is made.
+- Static inspection confirms at most 1 MiB + 1 byte is read before fixture size acceptance and that semantic validation still reuses the production MCP validators.
+- This connector runtime does not expose an executable checkout, so the focused MCP gate and new tests were not executed; no new green claim is made.
 
 ### Decisions
-1. Bound semantic selector cardinality independently of the 1 MiB fixture cap because downstream matching cost is driven by selector count, not only serialized file size.
-2. Validate label names at the replay trust boundary because these fields represent Prometheus label selectors, not arbitrary metadata keys.
-3. Use UTF-8 byte limits for capture-facing strings so limits track transport/storage cost predictably across Unicode input.
-4. Keep this hardening dependency-light and preserve reuse of the production evidence validators.
+1. Enforce the fixture resource ceiling on bytes actually consumed rather than mutable filesystem metadata.
+2. Keep the loader dependency-free and preserve strict UTF-8/JSON semantics.
+3. Do not trigger GitHub Actions merely to compensate for the connector runtime lacking an executable checkout.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
