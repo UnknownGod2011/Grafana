@@ -8,6 +8,7 @@ environment data.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,11 @@ from mcp_tool_result import ToolResultError, validated_tool_content
 from mcp_tool_surface import ToolSurfaceError, validated_read_only_tool_map
 
 MAX_FIXTURE_BYTES = 1_048_576
+MAX_EXPECTED_LABELS = 32
+MAX_LABEL_NAME_BYTES = 256
+MAX_LABEL_VALUE_BYTES = 512
+MAX_DATASOURCE_UID_BYTES = 512
+PROMETHEUS_LABEL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 REQUIRED_KEYS = frozenset({"tools_list", "list_datasources", "query_prometheus", "datasource_uid", "expected_labels"})
 
 
@@ -36,6 +42,16 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON numeric constant: {value}")
+
+
+def _bounded_utf8(value: str, limit: int) -> bool:
+    """Return whether a string is non-empty and within a byte-oriented wire limit."""
+    if not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= limit
+    except UnicodeError:
+        return False
 
 
 def load_fixture(path: Path) -> dict[str, Any]:
@@ -60,13 +76,19 @@ def load_fixture(path: Path) -> dict[str, Any]:
 def validate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     datasource_uid = fixture.get("datasource_uid")
     expected_labels = fixture.get("expected_labels")
-    if type(datasource_uid) is not str or not datasource_uid or len(datasource_uid) > 512:
+    if type(datasource_uid) is not str or not _bounded_utf8(datasource_uid, MAX_DATASOURCE_UID_BYTES):
         raise FixtureReplayError("datasource_uid must be a bounded non-empty string")
-    if type(expected_labels) is not dict or not expected_labels:
-        raise FixtureReplayError("expected_labels must be a non-empty JSON object")
+    if type(expected_labels) is not dict or not expected_labels or len(expected_labels) > MAX_EXPECTED_LABELS:
+        raise FixtureReplayError(f"expected_labels must contain between 1 and {MAX_EXPECTED_LABELS} labels")
     for key, value in expected_labels.items():
-        if type(key) is not str or type(value) is not str or not key or not value or len(key) > 256 or len(value) > 512:
-            raise FixtureReplayError("expected_labels must contain bounded non-empty string pairs")
+        if (
+            type(key) is not str
+            or type(value) is not str
+            or PROMETHEUS_LABEL_NAME.fullmatch(key) is None
+            or not _bounded_utf8(key, MAX_LABEL_NAME_BYTES)
+            or not _bounded_utf8(value, MAX_LABEL_VALUE_BYTES)
+        ):
+            raise FixtureReplayError("expected_labels must contain valid bounded Prometheus label names and non-empty string values")
     try:
         tools = validated_read_only_tool_map(fixture["tools_list"])
         datasource_content = validated_tool_content("list_datasources", fixture["list_datasources"])
