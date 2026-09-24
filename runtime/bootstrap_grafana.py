@@ -8,6 +8,7 @@ credential bootstrap is HTTPS-only.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import stat
@@ -25,7 +26,16 @@ ACCOUNT_NAME = os.getenv("STAGEGUARD_MCP_SERVICE_ACCOUNT", "stageguard-mcp")
 TOKEN_TTL = int(os.getenv("STAGEGUARD_MCP_TOKEN_TTL_SECONDS", "86400"))
 TOKEN_PATH = Path(os.getenv("STAGEGUARD_MCP_TOKEN_FILE", "runtime/.secrets/grafana-mcp-token"))
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Recognize localhost and all literal IPv4/IPv6 loopback addresses only."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _request(path: str, *, method: str = "GET", payload: dict | None = None, token: str | None = None) -> tuple[int, object]:
@@ -56,12 +66,20 @@ def _validate_bootstrap_target(url: str, *, allow_remote: bool) -> None:
     """Fail closed before admin credentials can be sent to an unsafe target."""
     try:
         parsed = urllib.parse.urlsplit(url)
+        # Accessing port is intentionally part of validation: urllib defers
+        # malformed/out-of-range port errors until this property is read.
+        port = parsed.port
     except ValueError as exc:
         raise ValueError("Grafana URL is malformed") from exc
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None or parsed.password is not None:
         raise ValueError("Grafana URL must be an http(s) origin without embedded credentials")
-    is_loopback = host in _LOOPBACK_HOSTS
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("Grafana URL must be an origin without a path, query, or fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Grafana URL port is invalid")
+
+    is_loopback = _is_loopback_host(host)
     if not is_loopback and not allow_remote:
         raise ValueError(
             f"Refusing to create credentials on remote Grafana host {host!r}. "
