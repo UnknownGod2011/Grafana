@@ -10,7 +10,7 @@ RUNTIME = Path(__file__).resolve().parents[1]
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 
-from mcp_fixture_replay import FixtureReplayError, load_fixture, validate_fixture
+from mcp_fixture_replay import FixtureReplayError, MAX_EXPECTED_LABELS, load_fixture, validate_fixture
 
 
 def _fixture():
@@ -59,6 +59,24 @@ class FixtureReplayTests(unittest.TestCase):
     def test_wrong_series_labels_fail_closed(self):
         fixture = _fixture()
         fixture["expected_labels"]["uplink"] = "uplink-a"
+        with self.assertRaises(FixtureReplayError):
+            validate_fixture(fixture)
+
+    def test_expected_labels_cardinality_is_bounded_before_evidence_walk(self):
+        fixture = _fixture()
+        fixture["expected_labels"] = {f"label_{index}": "x" for index in range(MAX_EXPECTED_LABELS + 1)}
+        with self.assertRaises(FixtureReplayError):
+            validate_fixture(fixture)
+
+    def test_invalid_prometheus_label_name_fails_closed(self):
+        fixture = _fixture()
+        fixture["expected_labels"] = {"not-a-label": "x"}
+        with self.assertRaises(FixtureReplayError):
+            validate_fixture(fixture)
+
+    def test_label_limits_are_utf8_byte_oriented(self):
+        fixture = _fixture()
+        fixture["expected_labels"] = {"uplink": "é" * 300}
         with self.assertRaises(FixtureReplayError):
             validate_fixture(fixture)
 
