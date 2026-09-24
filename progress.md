@@ -16,7 +16,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available locally. Bootstrap targets are strict origins.
 - Sanitized MCP captures replay offline through the same production tool-surface, result-envelope, datasource-identity, and Prometheus semantic validators.
 - Fixture expected-label selectors are bounded to 32 entries with Prometheus-compatible names and UTF-8 byte limits.
-- Fixture input is accepted only from an opened regular file; the type is checked race-safely with `fstat` before reading, and at most 1 MiB + 1 sentinel byte is consumed.
+- Fixture input is opened non-blocking where supported, final-component symlinks are refused where `O_NOFOLLOW` exists, the opened descriptor must be a regular file, and at most 1 MiB + 1 sentinel byte is consumed.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -33,29 +33,31 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added bounded semantic Prometheus evidence parsing with expected-label binding and strict sample-pair semantics.
 - Hardened JSON-text evidence and MCP JSON-RPC transport decoding, response identity, tool discovery, generic tool-result envelopes, and secret-aware diagnostics.
 - Hardened Grafana Viewer-token bootstrap so remote admin credentials cannot be sent over plaintext HTTP or via non-origin/credential-bearing URLs.
-- Added an offline sanitized MCP fixture replay validator using production MCP validators, with bounded selectors, byte-oriented scalar limits, strict UTF-8/JSON, and bounded byte reads.
+- Added an offline sanitized MCP fixture replay validator using production MCP validators, with bounded selectors, byte-oriented scalar limits, strict UTF-8/JSON, bounded reads, non-blocking special-file rejection, and no-follow protection where supported.
 
-## Latest run — 2026-09-24 — reject special fixture files
+## Latest run — 2026-09-24 — prevent pre-validation FIFO blocking
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py` and its focused regression suite. The principal pending executable milestone remains Grafana `13.2.1` + official MCP `1.4.1` acceptance. The replay loader's previous bounded read still opened arbitrary filesystem object types, so an unattended invocation pointed at a FIFO/device could block or consume non-file input despite the byte ceiling.
+Read `progress.md` completely, then inspected `runtime/mcp_fixture_replay.py` and `runtime/tests/test_mcp_fixture_replay.py`. The previous run correctly added an opened-descriptor regular-file check, but static inspection found that `Path.open("rb")` itself is a blocking operation. An unattended replay pointed at a FIFO with no writer could therefore hang before `fstat()` ever had a chance to reject the descriptor. The prior FIFO regression masked this because it deliberately kept a read/write FIFO descriptor open.
 
 ### Exact changes made
-- Commit `62d554fb82bc434e8706d74065a3335bd231fe7b` adds an opened-descriptor `os.fstat()` / `stat.S_ISREG()` boundary before fixture reads.
-- The check occurs after open, so pathname replacement cannot swap a previously validated regular file for a special file between validation and read.
-- FIFOs, devices, sockets, and other non-regular descriptors now fail before `read()`; the existing 1 MiB + 1 sentinel byte ceiling remains unchanged.
-- Commit `a62410818fa9a416cf30114ee0327996371caf5a` adds a portable FIFO regression (skipped where `os.mkfifo` is unavailable) that ensures a named pipe is rejected as a non-regular fixture.
+- Commit `fb4576706c333f888909590b21c478f6e0370582` replaces `Path.open()` with descriptor-level `os.open()`.
+- Fixture open now adds `O_NONBLOCK` where available, so an unconnected FIFO cannot hang before descriptor validation.
+- Fixture open also adds `O_NOFOLLOW` where available, preventing a final-component symlink from redirecting unattended replay to another file.
+- The descriptor is still checked with `fstat()` and must be a regular file before any bytes are consumed; descriptor cleanup is explicit on all rejection/error paths.
+- Commit `9444a06bfa5c3d904d5c399f9e0ee64e99fbde69` replaces the old FIFO test with an unconnected FIFO regression that would expose a blocking-open bug, and adds a no-follow symlink regression on supporting platforms.
 - No Actions workflows, credentials, cloud resources, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
 - GitHub accepted both implementation and regression commits.
-- Static inspection confirms the descriptor type is checked before fixture bytes are consumed and that the existing bounded-read and strict JSON path remains intact.
-- This connector runtime still does not expose an executable checkout, so the focused MCP gate and new regression were not executed; no new green claim is made.
+- Static inspection confirms `O_NONBLOCK` is applied before opening the path, `fstat()` still precedes reads, and the 1 MiB + sentinel bound is unchanged.
+- The connector runtime does not expose an executable checkout, so the focused MCP gate and new regressions were not executed; no new green claim is made.
 
 ### Decisions
-1. Treat sanitized acceptance captures as regular-file artifacts, not arbitrary byte streams.
-2. Validate the opened descriptor rather than pathname metadata to avoid a check/use race.
-3. Preserve local/free operation and avoid triggering GitHub Actions solely to obtain validation in this connector runtime.
+1. Special-file safety must cover the open operation itself, not only reads after opening.
+2. Use descriptor-level flags for unattended fixture ingestion while preserving ordinary local regular-file behavior.
+3. Refuse final-component symlinks where the operating system provides `O_NOFOLLOW`; on platforms without it, the existing opened-descriptor regular-file and bounded-content policies still apply.
+4. Continue avoiding GitHub Actions solely to obtain validation because this project explicitly prefers low-noise local checks.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
