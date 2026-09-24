@@ -15,6 +15,7 @@ from typing import Any
 from command_line import split_command
 from mcp_datasource_identity import contains_datasource_uid
 from mcp_diagnostics import safe_diagnostic
+from mcp_jsonrpc_identity import ResponseIdentityError, assert_integer_response_id
 from mcp_smoke_gate import PrometheusEvidenceError, assert_expected_prometheus_sample
 from mcp_smoke_reporting import SmokeReportError, build_safe_smoke_report
 from mcp_tool_result import ToolResultError, validated_tool_content
@@ -56,6 +57,14 @@ def _strict_json_rpc_loads(line: str) -> Any:
         return json.loads(line, object_pairs_hook=_strict_json_object, parse_constant=_reject_json_constant)
     except (json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise McpError("MCP stdio stdout contained invalid or ambiguous JSON; stdout is reserved for strict JSON-RPC") from exc
+
+
+def _assert_response_id(response_id: object, request_id: int, method: str) -> None:
+    """Apply the sole type-strict JSON-RPC response identity boundary."""
+    try:
+        assert_integer_response_id(response_id, request_id)
+    except ResponseIdentityError as exc:
+        raise McpError(f"MCP returned unexpected response id while waiting for {method}") from exc
 
 
 def _contains_unsafe_display_char(value: str) -> bool:
@@ -215,8 +224,7 @@ class StdioClient:
                 if isinstance(message.get("method"), str):
                     continue
                 raise McpError("MCP stdio message had neither a response id nor notification method")
-            if message.get("id") != request_id:
-                raise McpError(f"MCP returned unexpected response id while waiting for {method}")
+            _assert_response_id(message.get("id"), request_id, method)
             if "error" in message:
                 raise McpError(f"{method} failed: {safe_diagnostic(message['error'])}")
             result = message.get("result")
