@@ -2,7 +2,8 @@
 """Create/reuse the local read-only Grafana service-account token for MCP.
 
 Zero third-party dependencies. The script refuses to bootstrap a remote Grafana
-instance unless STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1 is explicitly set.
+instance unless STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1 is explicitly set, and remote
+credential bootstrap is HTTPS-only.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ ACCOUNT_NAME = os.getenv("STAGEGUARD_MCP_SERVICE_ACCOUNT", "stageguard-mcp")
 TOKEN_TTL = int(os.getenv("STAGEGUARD_MCP_TOKEN_TTL_SECONDS", "86400"))
 TOKEN_PATH = Path(os.getenv("STAGEGUARD_MCP_TOKEN_FILE", "runtime/.secrets/grafana-mcp-token"))
 DATASOURCE_UID = os.getenv("STAGEGUARD_DATASOURCE_UID", "stageguard-prometheus")
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _request(path: str, *, method: str = "GET", payload: dict | None = None, token: str | None = None) -> tuple[int, object]:
@@ -50,13 +52,30 @@ def _request(path: str, *, method: str = "GET", payload: dict | None = None, tok
         return exc.code, detail
 
 
-def _guard_target() -> None:
-    host = (urllib.parse.urlparse(GRAFANA_URL).hostname or "").lower()
-    if host not in {"localhost", "127.0.0.1", "::1"} and os.getenv("STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP") != "1":
-        raise SystemExit(
+def _validate_bootstrap_target(url: str, *, allow_remote: bool) -> None:
+    """Fail closed before admin credentials can be sent to an unsafe target."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise ValueError("Grafana URL is malformed") from exc
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None or parsed.password is not None:
+        raise ValueError("Grafana URL must be an http(s) origin without embedded credentials")
+    is_loopback = host in _LOOPBACK_HOSTS
+    if not is_loopback and not allow_remote:
+        raise ValueError(
             f"Refusing to create credentials on remote Grafana host {host!r}. "
             "Set STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP=1 only after verifying the target."
         )
+    if not is_loopback and parsed.scheme != "https":
+        raise ValueError("Remote Grafana credential bootstrap requires HTTPS")
+
+
+def _guard_target() -> None:
+    try:
+        _validate_bootstrap_target(GRAFANA_URL, allow_remote=os.getenv("STAGEGUARD_ALLOW_REMOTE_BOOTSTRAP") == "1")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _wait_for_grafana(timeout_seconds: int = 90) -> None:
