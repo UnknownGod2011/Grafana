@@ -23,6 +23,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Upstream MCP failure material passes through secret-aware, bounded, display-safe diagnostics before becoming operator-visible.
 - Remote Grafana credential bootstrap is explicit-opt-in and HTTPS-only; loopback HTTP remains available for the local fixture.
 - Grafana bootstrap targets are strict origins: no embedded credentials, path, query, fragment, malformed port, or non-HTTP(S) scheme; literal IPv4/IPv6 loopback addresses are recognized via the standard IP parser.
+- Sanitized live MCP captures can be replayed offline only through the same production tool-surface, tool-result, datasource-identity, and Prometheus semantic validators.
 - Validation claims distinguish historical executable results from connector-authored changes not yet run in a checkout.
 
 ## Retained validation baseline
@@ -46,35 +47,38 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Added and wired a strict JSON-RPC response-ID boundary preventing Python boolean/integer equality from aliasing MCP request identity.
 - Hardened Grafana Viewer-token bootstrap so remote admin credentials can never be sent over plaintext HTTP or via URL-embedded credentials.
 - Tightened bootstrap URL handling to a strict origin boundary and generalized loopback recognition to standards-based IPv4/IPv6 parsing.
+- Added an offline sanitized MCP fixture replay validator so a real current-server capture can be regression-tested without retaining credentials or requiring Docker/Grafana on every test run.
 
-## Latest run — 2026-09-24 — strict Grafana bootstrap origin boundary
+## Latest run — 2026-09-24 — sanitized MCP fixture replay path
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/bootstrap_grafana.py` and its focused MCP-gate regression. The prior transport hardening correctly required remote HTTPS and explicit opt-in, but the URL validator still accepted path/query/fragment components and recognized only three hard-coded loopback spellings. Because every API path is appended to `STAGEGUARD_GRAFANA_URL`, accepting non-origin URLs is ambiguous and unnecessary at a credential-bearing boundary.
+Read `progress.md` completely, then inspected the validation harness, runtime tree, and live `runtime/mcp_smoke.py` path. The principal pending milestone remains live acceptance against pinned Grafana `13.2.1` and official MCP `1.4.1`. Because this connector runtime cannot execute the repository/Docker stack, the most useful unblocked work was to make the eventual sanitized live capture durable and replayable through the exact production evidence validators rather than leaving it as an ad-hoc artifact.
 
 ### Exact changes made
-- Updated `runtime/bootstrap_grafana.py` in commit `f3d46176e2aaf559c6a58ab60baa3edcad2cadce`.
-- Added standards-based `ipaddress.ip_address(...).is_loopback` recognition while preserving the exact `localhost` hostname; this supports equivalent literal loopback spellings without treating hostname lookalikes as local.
-- Required the configured Grafana URL to be a strict HTTP(S) origin: no path other than `/`, query, fragment, embedded credentials, malformed port, or port outside 1..65535.
-- Forced deferred `urllib.parse` port validation to occur inside the fail-closed validation boundary before any network request or credential construction.
-- Expanded `runtime/tests/test_mcp_bootstrap_grafana_target_security.py` in commit `0374f0c42a2359961f544775128d33aa4a73d3dd` with IPv4/IPv6 loopback variants, origin-component rejection, malformed/out-of-range ports, and a localhost-lookalike regression.
-- No Actions workflows, cloud resources, tokens, remediation targets, or unrelated repositories were touched.
+- Added `runtime/mcp_fixture_replay.py` in commit `f4d03969d7cfeeca515e112ecbf3584b81f5607f`.
+- The replay loader is capped at 1 MiB, requires strict UTF-8 JSON, rejects duplicate members and NaN/Infinity, and accepts exactly five documented fields: `tools_list`, `list_datasources`, `query_prometheus`, `datasource_uid`, and `expected_labels`.
+- Replay invokes the production `validated_read_only_tool_map`, `validated_tool_content`, `contains_datasource_uid`, and `assert_expected_prometheus_sample` boundaries; it does not implement a weaker parallel parser.
+- The fixture schema intentionally has no place for authorization headers, tokens, process environment, or raw query configuration, reducing the chance that a captured acceptance artifact persists credentials.
+- Added `runtime/tests/test_mcp_fixture_replay.py` in commit `fb764f717ff29922e6cbfd8bad457f680b060d02` with valid replay plus fail-closed regressions for write-capable tools, wrong datasource identity, wrong expected series labels, duplicate JSON members, and extra/secret fields.
+- The regression is automatically owned by the existing `Grafana MCP` gate through the `test_*mcp*.py` pattern.
+- No Actions workflows, cloud resources, credentials, remediation targets, or unrelated repositories were touched.
 
 ### Checks / results
-- GitHub accepted both implementation and focused regression updates.
-- The regression remains inside the existing `Grafana MCP` gate by filename.
-- This connector runtime still does not expose an executable repository checkout, so the focused MCP gate was not executed and no new green claim is made.
+- GitHub accepted both new implementation/test files.
+- Static inspection confirms the replay path reuses the production MCP validation modules rather than duplicating their semantic logic.
+- This connector runtime still does not expose an executable repository checkout, so the new test and focused MCP gate were not executed; no new green claim is made.
 
 ### Decisions
-1. Treat `STAGEGUARD_GRAFANA_URL` as an origin rather than a generic URL because StageGuard appends fixed Grafana API paths to it.
-2. Use Python's standard IP parser for literal loopback classification instead of maintaining an incomplete string allowlist.
-3. Keep DNS hostnames other than exact `localhost` on the remote path; do not infer loopback from a hostname that could resolve differently later.
-4. Keep all target validation before admin credential construction or network access.
+1. Make the forthcoming real MCP `1.4.1` capture a sanitized semantic fixture rather than storing raw stdio/session material.
+2. Reuse production validators for offline replay so a fixture that passes cannot bypass StageGuard's read-only tool policy or evidence semantics.
+3. Reject unknown top-level fixture fields to make accidental persistence of secrets conspicuous and fail closed.
+4. Keep the fixture replay dependency-light and local; it should remain useful without Grafana, Docker, Gemini, or cloud credentials.
 
 ### Blockers / unknowns
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
+- The new replay test is connector-authored and not yet executed.
 - Historical full-suite failures/errors still need classification after the focused MCP boundary is green.
 
 ## Single best next step
-Run the focused `Grafana MCP` validation gate in an executable checkout and fix any failures. Once green, perform pinned Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance and capture a sanitized real `query_prometheus` transport fixture so the hardened parser is validated against the actual current server shape.
+Run the focused `Grafana MCP` validation gate in an executable checkout. Once green, perform the pinned Grafana `13.2.1` + official MCP `1.4.1` Docker smoke, save only the five-field sanitized semantic capture expected by `runtime/mcp_fixture_replay.py`, and replay it locally to lock the actual current server response shape into regression coverage.
