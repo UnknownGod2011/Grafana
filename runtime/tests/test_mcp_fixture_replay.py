@@ -118,19 +118,26 @@ class FixtureReplayTests(unittest.TestCase):
             with self.assertRaises(FixtureReplayError):
                 load_fixture(path)
 
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes are not available on this platform")
-    def test_loader_rejects_fifo_without_attempting_to_read(self):
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "nonblocking FIFOs are not available on this platform")
+    def test_loader_rejects_unconnected_fifo_without_blocking_open(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "fixture.pipe"
             os.mkfifo(path)
-            # Open the FIFO read/write so load_fixture's open succeeds immediately.
-            # The production fstat check must reject it before calling read().
-            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-            try:
-                with self.assertRaisesRegex(FixtureReplayError, "regular file"):
-                    load_fixture(path)
-            finally:
-                os.close(fd)
+            # There is deliberately no writer. A blocking open would hang here;
+            # production must open non-blocking and reject the descriptor via fstat.
+            with self.assertRaisesRegex(FixtureReplayError, "regular file"):
+                load_fixture(path)
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "symlink"), "no-follow symlink open is not available on this platform")
+    def test_loader_rejects_final_component_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "fixture.json"
+            target.write_text(json.dumps(_fixture()), encoding="utf-8")
+            link = root / "fixture-link.json"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(FixtureReplayError, "safely opened"):
+                load_fixture(link)
 
 
 if __name__ == "__main__":
