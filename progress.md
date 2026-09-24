@@ -15,6 +15,7 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Structured evidence work is bounded by collection cardinality and scalar sizes.
 - JSON text evidence is size-gated before whole-string whitespace processing; decoder resource failures, duplicate keys, and NaN/Infinity fail closed.
 - JSON-RPC transport frames reject duplicate members and non-standard numeric constants before protocol state is interpreted.
+- JSON-RPC response identity is type-strict: StageGuard's positive integer request IDs cannot be satisfied by booleans, strings, subclasses, or mismatched integers.
 - MCP tool discovery is bounded to 256 tools with exact built-in containers, mandatory evidence tools, and literal `readOnlyHint=true` on every advertised tool.
 - The live MCP smoke uses the atomic `validated_read_only_tool_map` trust boundary; structural and evidence-only policy validation cannot be bypassed by consuming a partially validated map.
 - Generic MCP `tools/call` result content uses `validated_tool_content` as the live smoke's sole generic result-envelope boundary before datasource or Prometheus domain validation.
@@ -38,39 +39,40 @@ StageGuard is a personal open-source Gemini/Google Cloud incident commander for 
 - Hardened JSON-text evidence and MCP JSON-RPC transport decoding against duplicate keys, parser resource failures, and non-standard numeric constants.
 - Added focused validation-gate selection for the MCP regression boundary.
 - Added bounded MCP `tools/list` validation and wired its atomic read-only policy into the live smoke.
-- Added a dedicated bounded generic MCP tool-result envelope validator and focused regressions.
-- Wired the generic result validator into live datasource and Prometheus tool-call handling, removing the duplicate permissive traversal.
+- Added a dedicated bounded generic MCP tool-result envelope validator and wired it into live datasource and Prometheus handling.
 - Added live-smoke integration regressions proving generic validation precedes datasource identity interpretation.
-- Added a strict JSON-RPC response-ID boundary and regressions preventing Python boolean/integer equality from aliasing MCP request identity; live wiring remains the next change.
+- Added and now wired a strict JSON-RPC response-ID boundary preventing Python boolean/integer equality from aliasing MCP request identity.
 
-## Latest run — 2026-09-24 — strict JSON-RPC response identity boundary
+## Latest run — 2026-09-24 — live JSON-RPC response identity integration
 
 ### Inspected at start
-Read `progress.md` completely, then inspected `runtime/mcp_smoke.py`, the focused MCP validation-gate definition, and the latest live-wrapper regression. The live stdio client currently compares `message.get("id") != request_id` using ordinary Python equality. Because `True == 1`, a malicious or malformed JSON-RPC response with `"id": true` can be accepted as the response to StageGuard's first integer request even though JSON booleans and numbers are distinct protocol values.
+Read `progress.md` completely, then inspected `runtime/mcp_smoke.py` and `runtime/mcp_jsonrpc_identity.py`. Confirmed the helper correctly rejects JSON booleans and other non-exact integer IDs, but the live `StdioClient.request()` still used ordinary Python equality (`message.get("id") != request_id`), leaving `true` able to alias request ID `1`.
 
 ### Exact changes made
-- Added `runtime/mcp_jsonrpc_identity.py` in commit `cdfb6228ea076b2708f1e6e7e9e03f737cc2848e`.
-- Added `assert_integer_response_id`, which requires both the expected ID and response ID to be exact built-in integers and requires exact value equality; booleans, strings, integer subclasses, and mismatched integers fail closed.
-- Added `runtime/tests/test_mcp_jsonrpc_identity.py` in commit `c5e05865f6173f39f6c8d2f752b6128dcd1f23b9` with controls for exact integer acceptance and regressions for `true`/`false`, numeric strings, integer subclasses, mismatches, and invalid expected IDs.
-- The new test is named `test_*mcp*.py`, so it belongs to the existing focused `Grafana MCP` validation gate.
+- Updated `runtime/mcp_smoke.py` in commit `56f6911cecf6c84aab9fd1c54b22c142a4c39107`.
+- Imported `ResponseIdentityError` and `assert_integer_response_id` from the dedicated identity module.
+- Added `_assert_response_id()` as the live smoke adapter; it invokes the strict helper and translates identity failures into the existing `McpError` operational surface without exposing response material.
+- Replaced the live request loop's ordinary Python ID comparison with `_assert_response_id(message.get("id"), request_id, method)`. This is now the sole response-ID match boundary after strict JSON decoding.
+- Added `runtime/tests/test_mcp_smoke_response_identity_integration.py` in commit `e9d36008fe1f6726c9c4899bb107a640a3fa8f24`.
+- Added integration regressions for exact integer acceptance, boolean/string/mismatched-ID rejection, and preservation of `ResponseIdentityError` as the wrapped cause.
+- The new test filename matches the existing `test_*mcp*.py` focused-gate ownership convention.
 - No credentials, cloud resources, remediation targets, unrelated repositories, or GitHub Actions workflows were touched.
 
 ### Checks / results
-- GitHub accepted both new files.
-- This connector environment still does not provide an executable repository checkout, so the new test and focused gate were not executed here; no new green claim is made.
-- The new response-ID validator is intentionally not yet claimed as an active runtime control: `runtime/mcp_smoke.py` still uses ordinary equality and must be wired to the helper next.
+- GitHub accepted the runtime update and integration regression file.
+- This connector environment does not expose an executable repository checkout, so the new integration regression and focused MCP gate were not executed here; no new green claim is made.
+- Source inspection confirms the permissive `message.get("id") != request_id` comparison has been replaced in the live request loop.
 
 ### Decisions
-1. Treat JSON-RPC request identity as type-sensitive rather than relying on Python equality semantics.
-2. Keep the helper dependency-free and independently testable before changing the live stdio loop.
-3. Fail closed on representation ambiguity; StageGuard itself emits only positive integer request IDs, so accepting string or boolean IDs provides no compatibility benefit.
-4. Do not trigger CI solely to validate connector-authored changes, preserving the project's low-noise Actions policy.
+1. Keep response identity validation after strict JSON frame decoding and before interpreting `error` or `result`, so an incorrectly identified frame cannot affect request state.
+2. Translate only the expected protocol identity failure into `McpError`; programmer-contract failures for an invalid internally generated expected ID remain programming errors rather than being silently normalized.
+3. Keep diagnostics free of attacker-controlled response-ID values.
+4. Do not trigger CI solely for connector-authored changes, preserving the repository's low-noise Actions policy.
 
 ### Blockers / unknowns
-- `assert_integer_response_id` still needs to replace the live `message.get("id") != request_id` comparison in `runtime/mcp_smoke.py`, with `ResponseIdentityError` translated to `McpError`.
 - The focused MCP gate still requires an executable checkout run: `python scripts/run_stageguard_validation.py --gate "Grafana MCP" --keep-going`.
 - Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance, Viewer-token bootstrap, sanitized real response capture, and datasource HTTP-method observation remain pending.
 - Historical full-suite failures/errors still need classification after the focused MCP boundary is green.
 
 ## Single best next step
-Wire `assert_integer_response_id()` into `StdioClient.request()` as the sole response-ID match boundary, translate `ResponseIdentityError` to `McpError`, and add a live-client regression proving JSON `true` cannot satisfy request ID `1`; then run the focused `Grafana MCP` gate before pinned live Docker acceptance.
+Run the focused `Grafana MCP` validation gate in an executable checkout and fix any failures. Once green, perform pinned Grafana `13.2.1` + official MCP `1.4.1` Docker acceptance and capture a sanitized real `query_prometheus` transport fixture so the hardened parser is validated against the actual current server shape.
