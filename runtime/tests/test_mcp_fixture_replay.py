@@ -43,7 +43,13 @@ class FixtureReplayTests(unittest.TestCase):
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["datasource_uid"], "stageguard-prometheus")
         self.assertEqual(report["tool_count"], 2)
-        self.assertEqual(report["matched_labels"]["uplink"], "uplink-b")
+        self.assertEqual(report["matched_label_names"], ["production_id", "uplink"])
+
+    def test_success_report_does_not_echo_expected_label_values(self):
+        fixture = _fixture()
+        report_text = json.dumps(validate_fixture(fixture), sort_keys=True)
+        for value in fixture["expected_labels"].values():
+            self.assertNotIn(value, report_text)
 
     def test_write_capable_tool_fails_closed(self):
         fixture = _fixture()
