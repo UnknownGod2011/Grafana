@@ -10,7 +10,7 @@ RUNTIME = Path(__file__).resolve().parents[1]
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 
-from mcp_fixture_replay import FixtureReplayError, MAX_EXPECTED_LABELS, load_fixture, validate_fixture
+from mcp_fixture_replay import FixtureReplayError, MAX_EXPECTED_LABELS, MAX_FIXTURE_BYTES, load_fixture, validate_fixture
 
 
 def _fixture():
@@ -93,6 +93,27 @@ class FixtureReplayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "fixture.json"
             path.write_text(json.dumps(fixture), encoding="utf-8")
+            with self.assertRaises(FixtureReplayError):
+                load_fixture(path)
+
+    def test_loader_rejects_empty_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixture.json"
+            path.write_bytes(b"")
+            with self.assertRaises(FixtureReplayError):
+                load_fixture(path)
+
+    def test_loader_rejects_oversized_file_from_bytes_actually_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixture.json"
+            path.write_bytes(b" " * (MAX_FIXTURE_BYTES + 1))
+            with self.assertRaises(FixtureReplayError):
+                load_fixture(path)
+
+    def test_loader_rejects_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixture.json"
+            path.write_bytes(b"\xff")
             with self.assertRaises(FixtureReplayError):
                 load_fixture(path)
 
