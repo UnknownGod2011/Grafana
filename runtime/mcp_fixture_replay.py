@@ -140,13 +140,14 @@ def validate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     except PrometheusEvidenceError as exc:
         raise FixtureReplayError(str(exc)) from exc
 
-    # Success output is intentionally metadata-only. The fixture may contain
-    # production identifiers in label values; proving the expected labels matched
-    # does not require echoing those values into logs or CI output.
+    # Success output is intentionally metadata-only. Datasource identity and
+    # production label values are proven internally but not reflected into logs.
+    # A production UID can itself reveal tenant/topology naming, so callers only
+    # receive a boolean proof that the configured identity was observed.
     matched_label_names = sorted(key for key in expected_labels if key in matched)
     return {
         "status": "pass",
-        "datasource_uid": datasource_uid,
+        "datasource_identity_verified": True,
         "tool_count": len(tools),
         "matched_label_names": matched_label_names,
     }
