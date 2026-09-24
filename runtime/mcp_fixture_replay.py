@@ -8,7 +8,9 @@ environment data.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -55,15 +57,22 @@ def _bounded_utf8(value: str, limit: int) -> bool:
 
 
 def _read_bounded_fixture(path: Path) -> bytes:
-    """Read at most the accepted fixture size plus one sentinel byte.
+    """Read a bounded capture only from a regular filesystem object.
 
-    The bound is enforced on bytes actually read rather than a pre-read stat. This
-    avoids a check/use race and prevents a changed or special file from causing an
-    unbounded allocation after a small size was observed.
+    The file type is checked with fstat *after* opening, so pathname replacement
+    cannot swap a validated regular file for a FIFO/device between validation and
+    the read. Rejecting non-regular descriptors also prevents an unattended replay
+    from blocking indefinitely on a named pipe or reading from a device. The byte
+    bound is enforced on data actually consumed, not mutable filesystem metadata.
     """
     try:
         with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise FixtureReplayError("fixture must be a regular file")
             raw = handle.read(MAX_FIXTURE_BYTES + 1)
+    except FixtureReplayError:
+        raise
     except OSError as exc:
         raise FixtureReplayError("fixture cannot be read") from exc
     if not raw or len(raw) > MAX_FIXTURE_BYTES:
